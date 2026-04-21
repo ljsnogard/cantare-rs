@@ -1,0 +1,15 @@
+[package]
+edition = "2024"
+name = "abs_iter"
+version = "0.1.0"
+
+description = "ABStraction of ITERable"
+repository = "https://github.com/ljsnogard/abs_iter"
+keywords = ["iter", "traits"]
+categories = ["no-std"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[features]
+default = []
+collections = []

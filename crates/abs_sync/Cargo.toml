@@ -1,0 +1,21 @@
+﻿[package]
+edition = "2024"
+name = "abs_sync"
+version = "0.3.0"
+
+description = "ABStraction of SYNchronization"
+repository = "https://github.com/ljsnogard/abs_sync"
+keywords = ["async", "traits"]
+categories = ["no-std"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+pin-project = { workspace = true }
+
+[dev-dependencies]
+futures-lite = { workspace = true }
+pin-utils = { workspace = true }
+tokio = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }

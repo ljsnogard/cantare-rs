@@ -1,0 +1,18 @@
+﻿[package]
+edition = "2024"
+name = "atomex"
+version = "0.1.2"
+
+description = "Atomics extensions in Rust"
+repository = "https://github.com/ljsnogard/atomex-rs"
+keywords = ["atomic", "traits"]
+categories = ["algorithms", "no-std"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[features]
+support_u128_i128_atomics = []
+default = ["support_u128_i128_atomics"]
+
+[dependencies]
+funty = { workspace = true }

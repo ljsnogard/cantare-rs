@@ -1,0 +1,22 @@
+﻿[package]
+edition = "2024"
+name = "atomic_sync"
+version = "0.3.0"
+
+description = "Atomic-based synchronization implementing traits in `abs_sync`"
+repository = "https://github.com/ljsnogard/atomic_sync"
+keywords = ["sync", "spinlock", "mutex", "rwlock"]
+categories = ["no-std"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+abs_sync = { path = "../abs_sync" }
+atomex = { path = "../atomex" }
+
+[dev-dependencies]
+rand = { version = "0.9" }
+
+futures-lite = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

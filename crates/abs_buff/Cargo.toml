@@ -1,0 +1,18 @@
+[package]
+edition = "2024"
+name = "abs_buff"
+version = "0.3.0"
+
+description = "ABStraction of BUFFered IO"
+repository = "https://github.com/ljsnogard/abs_buff"
+keywords = ["IO", "buffer"]
+categories = ["no-std"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+anylr = { git = "https://github.com/ljsnogard/anylr.rs.git", branch = "dev/0.2.0" }
+
+abs_iter = { path = "../abs_iter" }
+abs_sync = { path = "../abs_sync" }
+gen_mcf_macro = { path = "../gen_mcf_macro" }

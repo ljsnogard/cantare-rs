@@ -1,0 +1,22 @@
+[package]
+edition = "2024"
+name = "gen_mcf_macro"
+version = "0.1.0"
+
+repository = "https://github.com/ljsnogard/gen_mcf_macro.rs"
+keywords = ["async"]
+categories = ["no-std"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+description = """
+A macro working with crate `abs_sync` v0.3 to generate codes and types needed to implement `Future`
+and `TrMayCancel` for a pattern that supports graceful cancellation in async programming.
+"""
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "parsing"] }
+quote = "1"
+proc-macro2 = "1"

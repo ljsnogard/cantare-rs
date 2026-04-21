@@ -1,0 +1,14 @@
+[package]
+edition = "2024"
+name = "segm_buff"
+version = "0.3.0"
+
+description = "Segmented buffers: small buffer utils."
+repository = "https://github.com/ljsnogard/segm_buff"
+keywords = ["slice", "buffer"]
+categories = ["no-std"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+abs_buff = { path = "../abs_buff" }
