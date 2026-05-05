@@ -1,13 +1,13 @@
 use core::{
-    borrow::{Borrow, BorrowMut},
     convert::{AsRef, AsMut},
+    mem::MaybeUninit,
 };
 
 /// This trait provides the associated type `Elem` and a the `as_slice` function
 /// for types that implementing both `AsRef<[T]>` and `Borrow<[T]>`
 pub trait TrAsSlice
 where
-    Self: AsRef<[Self::Elem]> + Borrow<[Self::Elem]>,
+    Self: AsRef<[Self::Elem]>,
 {
     type Elem: Sized;
 
@@ -20,9 +20,7 @@ where
 /// function for types that implementing both `AsMut<[T]>` and `BorrowMut<[T]>`
 pub trait TrAsSliceMut
 where
-    Self: TrAsSlice
-        + AsMut<[Self::Elem]>
-        + BorrowMut<[Self::Elem]>,
+    Self: TrAsSlice + AsMut<[Self::Elem]>,
 {
     fn as_slice_mut(&mut self) -> &mut [Self::Elem] {
         self.as_mut()
@@ -62,3 +60,31 @@ impl<T> TrAsSlice for &mut [T] {
 
 impl<T> TrAsSliceMut for &mut [T]
 {}
+
+impl<T, const N: usize> TrAsSlice for MaybeUninit<[T; N]> {
+    type Elem = MaybeUninit<T>;
+
+    fn as_slice(&self) -> &[Self::Elem] {
+        self.as_ref() as &[MaybeUninit<T>; N]
+    }
+}
+
+impl<T, const N: usize> TrAsSliceMut for MaybeUninit<[T; N]> {
+    fn as_slice_mut(&mut self) -> &mut [Self::Elem] {
+        self.as_mut() as &mut [MaybeUninit<T>; N]
+    }
+}
+
+impl<T, const N: usize> TrAsSlice for &mut MaybeUninit<[T; N]> {
+    type Elem = MaybeUninit<T>;
+
+    fn as_slice(&self) -> &[Self::Elem] {
+        self.as_ref() as &[MaybeUninit<T>; N]
+    }
+}
+
+impl<T, const N: usize> TrAsSliceMut for &mut MaybeUninit<[T; N]> {
+    fn as_slice_mut(&mut self) -> &mut [Self::Elem] {
+        self.as_mut() as &mut [MaybeUninit<T>; N]
+    }
+}

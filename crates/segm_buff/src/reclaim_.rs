@@ -1,45 +1,34 @@
-﻿use core::{
-    ops::AddAssign,
-    ptr::NonNull,
-};
-
-use abs_buff::TrBuffSegmView;
-
-pub trait TrReclaim<T>: Sized {
-    fn reclaim<S: TrBuffSegmView<Item = T>>(&mut self, s: &mut S);
+﻿pub trait TrReclaim: Sized {
+    fn reclaim(&mut self, amount: usize);
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoReclaim;
 
-impl<T> TrReclaim<T> for NoReclaim {
+impl TrReclaim for NoReclaim {
     #[inline]
-    fn reclaim<S: TrBuffSegmView<Item = T>>(&mut self, s: &mut S) {
-        let _ = s;
+    fn reclaim(&mut self, amount: usize) {
+        let _ = amount;
     }
 }
 
-pub struct SegmSelfReclaim(NonNull<usize>);
+pub struct SegmSelfReclaim<'a>(&'a mut usize);
 
-impl SegmSelfReclaim {
+impl<'a> SegmSelfReclaim<'a> {
     #[inline]
-    pub(super) const fn new(offset_ptr: NonNull<usize>) -> Self {
-        SegmSelfReclaim(offset_ptr)
+    pub(super) const fn new(offset: &'a mut usize) -> Self {
+        SegmSelfReclaim(offset)
     }
 }
 
-impl<T> TrReclaim<T> for SegmSelfReclaim {
+impl TrReclaim for SegmSelfReclaim<'_> {
     #[inline]
-    fn reclaim<S: TrBuffSegmView<Item = T>>(&mut self, s: &mut S) {
-        let c = s.capacity();
+    fn reclaim(&mut self, amount: usize) {
         #[cfg(test)]
         {
-            let offset_ptr = self.0.as_ptr();
-            std::println!("SegmSelfReclaim::reclaim: [{:p}] {c}", offset_ptr);
+            let offset_ptr = self.0 as *mut usize;
+            std::println!("SegmSelfReclaim::reclaim: [{:p}] {amount}", offset_ptr);
         }
-        unsafe {
-            let offset_mut: &mut usize = self.0.as_mut();
-            offset_mut.add_assign(c);
-        }
+        *self.0 += amount;
     }
 }

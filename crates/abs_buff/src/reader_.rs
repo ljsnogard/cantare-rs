@@ -12,13 +12,12 @@ use crate::{BuffReadAsInput, TrInput, TrBuffSegmRef};
 pub trait TrBuffRead<T = u8> {
     type Err: Error;
 
-    /// Lend some segments for reading in async manner. The amount of items
-    /// is specified by the parameter `demand`.
+    /// Emits borrowed segment which carries the buffered items. The amount of items
+    /// can be specified by the parameter `demand`.
     fn read_async<'a>(
         &'a mut self,
         demand: &impl RangeBounds<usize>,
-    ) -> impl TrMayCancel<'a,
-        MayCancelOutput = SomeOf<impl 'a + TrBuffSegmRef<T>, Self::Err>>;
+    ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<impl 'a + TrBuffSegmRef<T>, Self::Err>>;
 
     fn as_input(&mut self) -> impl TrInput<T>
     where

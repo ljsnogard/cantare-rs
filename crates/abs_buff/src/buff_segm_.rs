@@ -61,12 +61,10 @@ where
     /// mut slices.
     fn iter_slices_mut<'a>(
         &'a mut self,
-    ) -> impl IntoIterator<Item: 'a + AsMut<[MaybeUninit<T>]>>
-    where
-        T: 'a;
+    ) -> impl IntoIterator<Item: 'a + AsMut<[MaybeUninit<T>]>>;
 
-    /// Turn the mutable borrow of this segment into an output so that its internal
-    /// buffer can be filled by copying or moving.
+    /// Turn the mutable borrow of this segment into an output device so that 
+    /// its internal buffer can be filled by copying or moving.
     fn as_output(&mut self) -> impl TrOutput<T>
     where
         Self: Sized,

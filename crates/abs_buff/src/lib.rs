@@ -21,6 +21,7 @@ mod buff_write_as_output_;
 mod buff_segm_;
 mod buff_segm_as_input_;
 mod buff_segm_as_output_;
+
 mod demand_;
 mod peeker_;
 mod reader_;
@@ -44,7 +45,7 @@ pub use buff_segm_as_output_::{
     BuffSegmMutOutputClonedAsync, BuffSegmMutOutputClonedFuture,
 };
 pub use demand_::Demand;
-pub use io::{TrInput, TrOutput};
+pub use io::{TrBuffer, TrMaybeUninit, TrInput, TrOutput};
 pub use peeker_::{TrBuffPeek, TrBuffTryPeek};
 pub use reader_::{TrBuffRead, TrBuffTryRead};
 pub use writer_::{TrBuffWrite, TrBuffTryWrite};

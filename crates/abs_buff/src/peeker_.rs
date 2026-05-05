@@ -10,12 +10,11 @@ use crate::{BuffPeekAsInput, TrBuffSegmRef, TrInput};
 pub trait TrBuffPeek<T = u8> {
     type Err: Error;
 
-    /// Lend some slices for peeking. The number and the length of the slices 
+    /// Lend some slices for peeking. The number and the length of the slices
     /// to peek are decided by the buffer.
     fn peek_async<'a>(
         &'a mut self,
-    ) -> impl TrMayCancel<'a,
-        MayCancelOutput = SomeOf<impl 'a + TrBuffSegmRef<T>, Self::Err>>;
+    ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<impl 'a + TrBuffSegmRef<T>, Self::Err>>;
 
     fn as_intput(&mut self) -> impl TrInput<T>
     where
