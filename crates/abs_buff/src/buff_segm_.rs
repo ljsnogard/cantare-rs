@@ -1,9 +1,9 @@
 ﻿use core::{
     mem::MaybeUninit,
-    ops::{RangeBounds, Try},
+    ops::Try,
 };
 
-use crate::{BuffSegmRefAsInput, BuffSegmMutAsOutput, TrInput, TrOutput};
+use crate::{BuffSegmRefAsInput, BuffSegmMutAsOutput, Demand, TrInput, TrOutput};
 
 pub trait TrBuffSegmView {
     type Item: Sized;
@@ -31,7 +31,7 @@ where
     /// when the taken slice drops.
     fn take_segm_ref<'a>(
         &'a mut self,
-        length: &impl RangeBounds<usize>,
+        demand: &'a Demand<usize>,
     ) -> impl 'a + Try<Output: 'a + TrBuffSegmRef<T>>;
 
     /// Turn the borrow of this segment into an input so that its internal data
@@ -54,7 +54,7 @@ where
     /// when the taken slice drops.
     fn take_segm_mut<'a>(
         &'a mut self,
-        length: &impl RangeBounds<usize>,
+        demand: &'a Demand<usize>,
     ) -> impl 'a + Try<Output: 'a + TrBuffSegmMut<T>>;
 
     /// Iterate the unconsumed parts of the segment one by one in the form of

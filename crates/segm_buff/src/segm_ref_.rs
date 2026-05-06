@@ -1,7 +1,7 @@
 ﻿use core::{
     borrow::Borrow,
     marker::PhantomPinned,
-    ops::{Deref, Try, RangeBounds},
+    ops::{Deref, Try},
     ptr::NonNull,
 };
 
@@ -193,12 +193,8 @@ where
     #[inline]
     fn take_segm_ref<'a>(
         &'a mut self,
-        demand: &impl RangeBounds<usize>,
+        demand: &'a Demand<usize>,
     ) -> impl 'a + Try<Output: 'a + TrBuffSegmRef<SliceElem<B>>> {
-        let r= Demand::try_from_usize_range(demand);
-        let Result::Ok(demand) = &r else {
-            return Option::None
-        };
         SegmRef::take_segm_ref(self, demand)
     }
 }

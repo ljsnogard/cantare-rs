@@ -14,7 +14,7 @@ use gen_mcf_macro::gen_may_cancel_future;
 
 use crate::{
     buff_segm_as_input_::buff_segm_ref_read,
-    TrBuffRead, TrInput,
+    Demand, TrBuffRead, TrInput,
 };
 
 pub struct BuffReadAsInput<B, R, T>(B, PhantomData<R>, PhantomData<[T]>)
@@ -75,7 +75,7 @@ where
     R: TrBuffRead<T>,
     C: TrCancellationToken,
 {
-    let demand = ..target.len();
+    let demand = Demand::less_than(target.len());
     buff_r
         .read_async(&demand)
         .may_cancel_with(cancel)

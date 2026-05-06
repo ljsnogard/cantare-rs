@@ -12,7 +12,7 @@ use abs_sync::{cancellation::TrCancellationToken, may_cancel::TrMayCancel};
 use anylr::SomeOf;
 use gen_mcf_macro::gen_may_cancel_future;
 
-use crate::{TrBuffSegmMut, TrOutput};
+use crate::{Demand, TrBuffSegmMut, TrOutput};
 
 pub struct BuffSegmMutAsOutput<B, S, T>
 where
@@ -116,7 +116,7 @@ pub(crate) fn buff_segm_mut_write<'f, S, T>(
 where
     S: TrBuffSegmMut<T>,
 {
-    let length = ..source.len();
+    let length = Demand::less_than(source.len());
     let branch = segment.take_segm_mut(&length).branch();
     let ControlFlow::Continue(mut parts) = branch else {
         return 0
@@ -145,8 +145,8 @@ where
     S: TrBuffSegmMut<T>,
     T: Clone,
 {
-    let length = ..source.len();
-    let branch = segment.take_segm_mut(&length).branch();
+    let demand = Demand::less_than(source.len());
+    let branch = segment.take_segm_mut(&demand).branch();
     let ControlFlow::Continue(mut parts) = branch else {
         return 0
     };

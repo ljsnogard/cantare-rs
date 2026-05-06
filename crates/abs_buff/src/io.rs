@@ -10,7 +10,7 @@ use anylr::SomeOf;
 use abs_sync::may_cancel::TrMayCancel;
 
 /// A trait specifically abstracted from `MaybeUninit<T>` or types alike.
-/// 
+///
 /// # Safety
 /// The only reasonable implementation is core::mem::MaybeUninit<T>, which is
 /// already included in this crate.
@@ -39,25 +39,25 @@ pub unsafe trait TrMaybeUninit {
 
     /// Reads the value from the `MaybeUninit<T>` container. The resulting `T` is subject
     /// to the usual drop handling.
-    /// 
+    ///
     /// # Safety
     /// See [core::mem::MaybeUninit::assume_init_read].
     unsafe fn assume_init_read(&self) -> Self::Inner;
 
     /// Gets a shared reference to the contained value.
-    /// 
+    ///
     /// # Safety
     /// See [core::mem::MaybeUninit::assume_init_ref].
     unsafe fn assume_init_ref(&self) -> &Self::Inner;
 
     /// Gets a mutable reference to the containted value.
-    /// 
+    ///
     /// # Safety
     /// See [core::mem::MaybeUninit::assume_init_mut]
     unsafe fn assume_init_mut(&mut self) -> &mut Self::Inner;
 
     /// Drops the contained value in place.
-    /// 
+    ///
     /// # Safety
     /// See [core::mem::MaybeUninit::assume_init_drop]
     unsafe fn assume_init_drop(&mut self);
@@ -67,7 +67,7 @@ pub unsafe trait TrMaybeUninit {
 }
 
 /// A continuous memory space that can read and write items.
-/// 
+///
 /// The reasonable implementations are already included in this crate. They are
 /// `[MaybeUninit<T>; N]`, `MaybeUninit<[T; N]>`, `&mut MaybeUninit<[T; N]>`,
 /// and `&mut [MaybeUninit<T>] `
@@ -78,14 +78,21 @@ where
 {
     type Slot: TrMaybeUninit;
 
+    /// Explicitly declare that the termination of evaluation for
+    /// `TrMaybeUninit` be `core::mem::MaybeUninit`.
     fn as_slice_uninit(
         &self,
     ) -> &[MaybeUninit<<Self::Slot as TrMaybeUninit>::Inner>];
 
+    /// Explicitly declare that the termination of evaluation for
+    /// `TrMaybeUninit` be `core::mem::MaybeUninit`.
     fn as_mut_slice_uninit(
         &mut self,
     ) -> &mut [MaybeUninit<<Self::Slot as TrMaybeUninit>::Inner>];
 }
+
+pub type BufferSlot<B> = <B as TrBuffer>::Slot;
+pub type BufferElem<B> = <BufferSlot<B> as TrMaybeUninit>::Inner;
 
 /// Unbuffered input device
 pub trait TrInput<T = u8> {
@@ -303,6 +310,7 @@ unsafe impl<T> TrMaybeUninit for MaybeUninit<T> {
     }
 }
 
+#[cfg(test)]
 mod tests_ {
     #[allow(unused)]
     use super::{MaybeUninit, TrBuffer};

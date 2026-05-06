@@ -15,7 +15,7 @@ use gen_mcf_macro::gen_may_cancel_future;
 
 use crate::{
     buff_segm_as_input_::buff_segm_ref_read,
-    TrBuffPeek, TrBuffSegmRef, TrInput,
+    Demand, TrBuffPeek, TrBuffSegmRef, TrInput,
 };
 
 pub struct BuffPeekAsInput<B, P, T>
@@ -97,9 +97,9 @@ where
         .split();
     let mut copied = 0usize;
     if let Option::Some(mut segment) = opt_segm {
-        let length = ..input.offset_;
+        let demand = Demand::less_than(input.offset_);
         if true {
-            let branch = segment.take_segm_ref(&length).branch();
+            let branch = segment.take_segm_ref(&demand).branch();
             let ControlFlow::Continue(prev_done) = branch else {
                 return SomeOf::new_left(copied)
             };
