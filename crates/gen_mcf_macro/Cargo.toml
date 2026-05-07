@@ -1,7 +1,7 @@
 [package]
 edition = "2024"
 name = "gen_mcf_macro"
-version = "0.1.0"
+version = "0.3.0"
 
 repository = "https://github.com/ljsnogard/gen_mcf_macro.rs"
 keywords = ["async"]
@@ -20,3 +20,6 @@ proc-macro = true
 syn = { version = "2", features = ["full", "parsing"] }
 quote = "1"
 proc-macro2 = "1"
+
+[dev-dependencies]
+abs_sync = { path = "../abs_sync" }

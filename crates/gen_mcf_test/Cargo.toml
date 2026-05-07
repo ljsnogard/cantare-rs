@@ -1,0 +1,11 @@
+﻿[package]
+edition = "2024"
+name = "gen_mcf_test"
+version = "0.3.0"
+
+description = "ABStraction of BUFFered IO"
+readme = "README.md"
+
+[dependencies]
+abs_sync = { path = "../abs_sync" }
+gen_mcf_macro = { path = "../gen_mcf_macro" }
