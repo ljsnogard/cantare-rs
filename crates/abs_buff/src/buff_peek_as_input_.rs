@@ -96,16 +96,16 @@ where
         .into_any_of()
         .split();
     let mut copied = 0usize;
-    if let Option::Some(mut segment) = opt_segm {
-        let demand = Demand::less_than(input.offset_);
+    if let Option::Some(mut segm) = opt_segm {
+        let demand = Demand::less_than(target.len() - copied);
         if true {
-            let branch = segment.take_segm_ref(&demand).branch();
+            let branch = segm.take_segm_ref(&demand).branch();
             let ControlFlow::Continue(prev_done) = branch else {
                 return SomeOf::new_left(copied)
             };
             drop(prev_done);
         }
-        copied = buff_segm_ref_read(&mut segment, target);
+        copied = buff_segm_ref_read(&mut segm, target);
     };
     input.offset_ += copied;
     if let Option::Some(err) = opt_err {

@@ -91,7 +91,10 @@ where
     ) -> &mut [MaybeUninit<<Self::Slot as TrMaybeUninit>::Inner>];
 }
 
+/// A convenient alias to extract `MaybeUninit<T>` from trait `TrBuffer`.
 pub type BufferSlot<B> = <B as TrBuffer>::Slot;
+
+/// A convenient alias to extract the element type from trait `TrBuffer`.
 pub type BufferElem<B> = <BufferSlot<B> as TrMaybeUninit>::Inner;
 
 /// Unbuffered input device

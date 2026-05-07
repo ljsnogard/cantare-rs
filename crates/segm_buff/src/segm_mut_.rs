@@ -296,7 +296,6 @@ mod tests_ {
         let mut buff = [MaybeUninit::zeroed(); ARR_SIZE];
         for (u, x) in buff.iter_mut().enumerate() {
             let _ = *x.write(u);
-            std::println!("segm_mut wrote: {}", u)
         }
         let mut segm = SegmMut::new(
             &mut buff,

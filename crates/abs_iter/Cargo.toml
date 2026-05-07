@@ -9,7 +9,3 @@ keywords = ["iter", "traits"]
 categories = ["no-std"]
 license = "MIT/Apache-2.0"
 readme = "README.md"
-
-[features]
-default = []
-collections = []

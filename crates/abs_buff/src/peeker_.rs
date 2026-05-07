@@ -12,6 +12,9 @@ pub trait TrBuffPeek<T = u8> {
 
     /// Lend some slices for peeking. The number and the length of the slices
     /// to peek are decided by the buffer.
+    /// 
+    /// The left side of SomeOf is `TrBuffSegmRef` encapsulating some buffers.
+    /// That means the call may result in more than one buffer available.
     fn peek_async<'a>(
         &'a mut self,
     ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<impl 'a + TrBuffSegmRef<T>, Self::Err>>;
