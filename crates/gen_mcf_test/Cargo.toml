@@ -9,3 +9,5 @@ readme = "README.md"
 [dependencies]
 abs_sync = { path = "../abs_sync" }
 gen_mcf_macro = { path = "../gen_mcf_macro" }
+
+tokio = { workspace = true }

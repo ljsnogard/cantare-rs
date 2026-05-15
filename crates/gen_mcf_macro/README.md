@@ -25,13 +25,12 @@ use abs_sync::cancellation::{NonCancellableToken, TrMayCancel, TrCancellationTok
 /// 1. At least one lifetime and the last one must be for the cancellation token;
 /// 2. The last argument and generic parameter type must be the cancellation token type and constrained with: `TrCancellationToken`;
 /// 3. Use a where clause to constrain the cancel token type;
-/// 4. If an argument is not `Copy` then it should be borrowed with *NAMED* lifetime;
 #[gen_may_cancel_future(DoThing)]
-async fn do_thing_async<'a, 'b, 'x, 'y, 'c, A, B, C>(
+async fn do_thing_async<'a, 'b, 'x, 'c, A, B, C>(
     a: &'a mut A,
     b: &'b mut B,
     l: usize,
-    x: &'x core::slice::Iter<'y, A>,
+    x: core::slice::Iter<'x, A>,
     cancel: Pin<&'c mut C>,
 ) -> usize
 where
@@ -53,18 +52,17 @@ Which expands to codes:
 
 ```rust
 
-async fn do_thing_async<'a, 'b, 'x, 'y, 'c, A, B, C>(
+async fn do_thing_async<'a, 'b, 'x, 'c, A, B, C>(
     a: &'a mut A,
     b: &'b mut B,
     l: usize,
-    x: &'x core::slice::Iter<'y, A>,
+    x: core::slice::Iter<'x, A>,
     cancel: Pin<&'c mut C>,
 ) -> usize
 where
     'a: 'c,
     'b: 'c,
     'x: 'c,
-    'y: 'c,
     A: Send,
     B: Sync,
     C: TrCancellationToken,
@@ -76,7 +74,7 @@ pub struct DoThingAsync<'c, A, B>(
     &'c mut A,
     &'c mut B,
     usize,
-    &'c core::slice::Iter<'c, A>,
+    core::slice::Iter<'c, A>,
 )
 where
     A: Send,
@@ -87,7 +85,7 @@ where
     B: Sync,
     C: TrCancellationToken,
 {
-    params_: DoThingAsync<'c, A, B>,
+    params_: ::core::mem::MaybeUninit<DoThingAsync<'c, A, B>>,
     cancel_: Pin<&'c mut C>,
     future_: Option<
         <DoThingFutureState<
@@ -119,7 +117,7 @@ where
     type Output = usize;
     fn into_future(self) -> Self::IntoFuture {
         DoThingFuture {
-            params_: self,
+            params_: ::core::mem::MaybeUninit::new(self),
             cancel_: abs_sync::cancellation::NonCancellableToken::shared_pin(),
             future_: Option::None,
         }
@@ -139,7 +137,7 @@ where
         Self: 'cancel_,
     {
         DoThingFuture {
-            params_: self,
+            params_: ::core::mem::MaybeUninit::new(self),
             cancel_: cancel,
             future_: Option::None,
         }
@@ -190,8 +188,10 @@ where
     type CallOnceFuture = impl ::core::future::Future<Output = Self::Output>;
     extern "rust-call" fn async_call_once(self, _: ()) -> Self::CallOnceFuture {
         let f = unsafe { self.0.get_unchecked_mut() };
-        let p = &mut f.params_;
-        self::do_thing_async(p.0, p.1, p.2, p.3, f.cancel_.as_mut())
+        let DoThingAsync::<'c, A, B>(p0, p1, p2, p3) = unsafe {
+            f.params_.assume_init_read()
+        };
+        self::do_thing_async(p0, p1, p2, p3, f.cancel_.as_mut())
     }
 }
 

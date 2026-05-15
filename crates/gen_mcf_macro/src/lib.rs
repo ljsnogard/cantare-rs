@@ -36,7 +36,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
     // 函数的泛型参数（包括生命周期）
     let fn_generics = &input_fn.sig.generics;
 
-    // 必备的 where 子句至少有一行，例如 C: TrCancellationToken 
+    // 必备的 where 子句至少有一行，例如 C: TrCancellationToken
     let Option::Some(where_clause) = &input_fn.sig.generics.where_clause else {
         panic!("Function must have where clause for generics");
     };
@@ -74,7 +74,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
     };
 
     // 根据约定，最后一个生命周期是最短的，同时也是对 cancel_token 的引用的存活
-    let last_lt = lifetimes_all.last().unwrap().clone(); 
+    let last_lt = lifetimes_all.last().unwrap().clone();
 
     // 根据约定，最后一个泛型参数是用于约束 cancel_token 为 TrCancellation
     let cancel_type_param = generics_all.last().unwrap().clone();
@@ -203,6 +203,14 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
 
     let cancel_type_lt_replaced = transform_type_outer_lifetime(cancel_type.as_ref().unwrap(), &last_lt);
 
+    let tuple_idents: Vec<Ident> = field_indices
+        .iter()
+        .map(|idx| format_ident!("p{}", idx.index))
+        .collect();
+    // 只生成 (p0, p1, ...) 部分
+    let tuple_pattern = quote! { ( #(#tuple_idents),* ) };
+    let async_struct_destruct = quote! { #async_struct::<#generic_params_single_lt_no_cancel>#tuple_pattern };
+
     let expanded = quote! {
         // panic!("input_fn 是: {:#?}", input_fn);
         #input_fn
@@ -213,7 +221,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         pub struct #future_struct<#generic_params_single_lt_all>
         #where_clause_no_lt
         {
-            params_: #async_struct<#generic_params_single_lt_no_cancel>,
+            params_: ::core::mem::MaybeUninit<#async_struct<#generic_params_single_lt_no_cancel>>,
             cancel_: #cancel_type_lt_replaced,
             future_: Option<<#state_struct<#generic_params_single_lt_all> as ::core::ops::AsyncFnOnce<()>>::CallOnceFuture>,
         }
@@ -231,7 +239,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
 
             fn into_future(self) -> Self::IntoFuture {
                 #future_struct {
-                    params_: self,
+                    params_: ::core::mem::MaybeUninit::new(self),
                     cancel_: abs_sync::cancellation::NonCancellableToken::shared_pin(),
                     future_: Option::None,
                 }
@@ -252,7 +260,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
                 Self: 'cancel_,
             {
                 #future_struct {
-                    params_: self,
+                    params_: ::core::mem::MaybeUninit::new(self),
                     cancel_: cancel,
                     future_: Option::None,
                 }
@@ -302,8 +310,8 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
 
             extern "rust-call" fn async_call_once(self, _: ()) -> Self::CallOnceFuture {
                 let f = unsafe { self.0.get_unchecked_mut() };
-                let p = &mut f.params_;
-                self::#fn_ident(#(p.#field_indices),*, f.cancel_.as_mut())
+                let #async_struct_destruct = unsafe { f.params_.assume_init_read() };
+                self::#fn_ident(#(#tuple_idents),*, f.cancel_.as_mut())
             }
         }
     };
