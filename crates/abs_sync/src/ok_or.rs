@@ -79,16 +79,16 @@ mod tests_ {
 
     use super::XtOkOr;
 
-    #[tokio::test]
+    #[compio::test]
     async fn or_else_should_poll_both_future() {
         let a1 = AtomicUsize::new(1);
         let a2 = AtomicUsize::new(2);
 
         async fn fetch_add_async(a: &AtomicUsize) -> usize {
             let u = a.fetch_add(1, Ordering::Relaxed);
-            tokio::time::sleep(Duration::from_micros(100)).await;
+            compio::time::sleep(Duration::from_micros(100)).await;
             if u.is_multiple_of(2) {
-                tokio::time::sleep(Duration::from_micros(100)).await;
+                compio::time::sleep(Duration::from_micros(100)).await;
             }
             u
         }

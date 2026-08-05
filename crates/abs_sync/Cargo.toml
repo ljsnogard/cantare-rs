@@ -16,6 +16,6 @@ pin-project = { workspace = true }
 [dev-dependencies]
 futures-lite = { workspace = true }
 pin-utils = { workspace = true }
-tokio = { workspace = true }
+compio = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }

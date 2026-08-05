@@ -1,7 +1,5 @@
 ﻿use core::pin::Pin;
 
-use tokio;
-
 use abs_sync::cancellation::{NonCancellableToken, TrCancellationToken};
 
 use gen_mcf_macro::gen_may_cancel_future;
@@ -31,7 +29,7 @@ where
     42
 }
 
-#[tokio::test]
+#[compio::test]
 pub async fn run() {
     let mut a = 1usize;
     let mut b = 2.0f32;

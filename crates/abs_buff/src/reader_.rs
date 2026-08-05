@@ -7,14 +7,15 @@ use crate::{BuffReadAsInput, Demand, TrInput, TrBuffSegmRef};
 
 /// Buffer that will emit zero or more segments for consumer (and update cursor)
 pub trait TrBuffRead<T = u8> {
+    type SegmRef<'a>: TrBuffSegmRef<T> where Self: 'a;
     type Err: Error;
 
     /// Emits borrowed segment which carries the buffered items. The amount of items
     /// can be specified by the parameter `demand`.
-    fn read_async<'a>(
-        &'a mut self,
-        demand: &'a Demand<usize>,
-    ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<impl 'a + TrBuffSegmRef<T>, Self::Err>>;
+    fn read_async<'f>(
+        &'f mut self,
+        demand: &Demand<usize>,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>>;
 
     fn as_input(&mut self) -> impl TrInput<T>
     where
@@ -27,6 +28,6 @@ pub trait TrBuffRead<T = u8> {
 pub trait TrBuffTryRead<T = u8>: TrBuffRead<T> {
     fn try_read<'a>(
         &'a mut self,
-        demand: &'a Demand<usize>,
-    ) -> SomeOf<impl 'a + TrBuffSegmRef<T>, Self::Err>;
+        demand: &Demand<usize>,
+    ) -> SomeOf<Self::SegmRef<'a>, Self::Err>;
 }

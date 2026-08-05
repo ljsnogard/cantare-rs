@@ -1,0 +1,11 @@
+[package]
+edition = "2024"
+name = "abs_smux"
+version = "0.1.0"
+
+description = "基于可复用为多个频道的连接而设计的通讯"
+
+[dependencies]
+abs_buff = { path = "../abs_buff" }
+abs_sync = { path = "../abs_sync" }
+abs_str = { path = "../../../abs_str" }

@@ -11,7 +11,7 @@ license = "MIT/Apache-2.0"
 readme = "README.md"
 
 [dependencies]
-anylr = { git = "https://github.com/ljsnogard/anylr.rs.git", branch = "dev/0.2.0" }
+anylr = { git = "https://gitee.com/lino_snsalias/anylr.rs.git", branch = "dev/0.2.0" }
 
 abs_iter = { path = "../abs_iter" }
 abs_sync = { path = "../abs_sync" }

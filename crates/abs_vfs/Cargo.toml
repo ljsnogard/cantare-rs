@@ -1,0 +1,17 @@
+[package]
+edition = "2024"
+name = "abs_vfs"
+version = "0.1.0"
+
+description = """
+ABStraction of Virtual File System.
+An asynchronous file system interfaces that organizes all data into a single file tree.
+""""
+readme = "README.md"
+
+[features]
+std = []
+default = ["std"]
+
+[dependencies]
+abs_sync = { path = "../abs_sync" }
