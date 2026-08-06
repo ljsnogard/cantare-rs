@@ -5,8 +5,10 @@ use anylr::SomeOf;
 
 use crate::{BuffPeekAsInput, TrBuffSegmRef, TrInput};
 
-/// Buffer that will borrow zero or more segments for data observation without
+/// A kind of buffer that owns the memory for peeking the received data without
 /// consuming them.
+///
+/// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffPeek<T = u8> {
     type SegmPeek<'a>: TrBuffSegmRef<T> where Self: 'a;
     type Err: Error;

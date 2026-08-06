@@ -1,0 +1,16 @@
+[package]
+edition = "2024"
+name = "mem_vfs"
+version = "0.1.0"
+
+description = """
+Virtual File System in the memory.
+""""
+readme = "README.md"
+
+[dependencies]
+abs_vfs = { path = "../abs_vfs" }
+gen_mcf_macro = { path = "../gen_mcf_macro" }
+
+# bumpalo = { version = "3.20.3", features = ["allocator_api"] }
+thiserror = { workspace = true }

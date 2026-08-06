@@ -5,7 +5,10 @@ use anylr::SomeOf;
 
 use crate::{BuffReadAsInput, Demand, TrInput, TrBuffSegmRef};
 
-/// Buffer that will emit zero or more segments for consumer (and update cursor)
+/// A kind of buffer that owns the memory for reading data by lending some
+/// segments to the consumer.
+///
+/// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffRead<T = u8> {
     type SegmRef<'a>: TrBuffSegmRef<T> where Self: 'a;
     type Err: Error;

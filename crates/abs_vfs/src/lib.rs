@@ -5,4 +5,8 @@
 #[cfg(any(test, feature = "std"))]
 extern crate std;
 
-pub mod meta_fs;
+pub mod fs_tree;
+
+pub mod x_deps {
+    pub use abs_sync;
+}

@@ -5,7 +5,10 @@ use anylr::SomeOf;
 
 use crate::{BuffWriteAsOutput, Demand, TrBuffSegmMut, TrOutput};
 
-/// Buffer that will emit zero or more segments for producer (and update cursor)
+/// A kind of buffer that owns the memory for writing data by lending some
+/// segments to the producer.
+///
+/// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffWrite<T = u8> {
     type SegmMut<'a>: TrBuffSegmMut<T> where Self: 'a;
     type Err: Error;
