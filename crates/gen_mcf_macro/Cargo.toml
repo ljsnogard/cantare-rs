@@ -22,4 +22,4 @@ quote = "1"
 proc-macro2 = "1"
 
 [dev-dependencies]
-abs_sync = { path = "../abs_sync" }
+abs_cancel = { path = "../abs_cancel" }

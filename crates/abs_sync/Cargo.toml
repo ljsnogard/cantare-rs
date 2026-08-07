@@ -12,6 +12,7 @@ readme = "README.md"
 
 [dependencies]
 pin-project = { workspace = true }
+abs_cancel = { path = "../abs_cancel" }
 
 [dev-dependencies]
 futures-lite = { workspace = true }

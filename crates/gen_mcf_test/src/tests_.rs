@@ -1,6 +1,4 @@
-﻿use core::pin::Pin;
-
-use abs_sync::cancellation::{NonCancellableToken, TrCancellationToken};
+﻿use abs_cancel::{NonCancellableToken, TrCancellationToken};
 
 use gen_mcf_macro::gen_may_cancel_future;
 
@@ -15,7 +13,7 @@ async fn do_thing_async<'a, 'b, 'x, 'c, A, B, C>(
     b: &'b mut B,
     l: usize,
     x: core::slice::Iter<'x, A>,
-    cancel: Pin<&'c mut C>,
+    cancel: &'c mut C,
 ) -> usize
 where
     'a: 'c,
@@ -35,5 +33,5 @@ pub async fn run() {
     let mut b = 2.0f32;
     let l = 3usize;
     let x = [0usize; 1usize].as_ref().iter();
-    let _ = do_thing_async(&mut a, &mut b, l, x, NonCancellableToken::shared_pin()).await;
+    let _ = do_thing_async(&mut a, &mut b, l, x, &mut NonCancellableToken::new()).await;
 }

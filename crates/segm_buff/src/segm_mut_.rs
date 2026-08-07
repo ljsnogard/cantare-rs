@@ -276,7 +276,7 @@ where
     #[inline]
     fn take_segm_mut<'a>(
         &'a mut self,
-        demand: &'a Demand<usize>,
+        demand: &Demand<usize>,
     ) -> impl 'a + Try<Output: 'a + TrBuffSegmMut<BufferElem<B>>> {
         SegmMut::take_segm_mut(self, demand)
     }

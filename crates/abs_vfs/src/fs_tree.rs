@@ -5,7 +5,7 @@
 
 use core::{error::Error, iter::IntoIterator};
 
-use abs_sync::may_cancel::TrMayCancel;
+use abs_cancel::TrMayCancel;
 
 #[derive(Clone, Copy)]
 pub enum NodeType {

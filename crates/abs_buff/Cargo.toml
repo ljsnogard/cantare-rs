@@ -14,5 +14,5 @@ readme = "README.md"
 anylr = { git = "https://gitee.com/lino_snsalias/anylr.rs.git", branch = "dev/0.2.0" }
 
 abs_iter = { path = "../abs_iter" }
-abs_sync = { path = "../abs_sync" }
+abs_cancel = { path = "../abs_cancel" }
 gen_mcf_macro = { path = "../gen_mcf_macro" }

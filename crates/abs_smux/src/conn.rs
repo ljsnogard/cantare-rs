@@ -1,10 +1,10 @@
 use core::error::Error;
 
 use abs_buff::{
-    x_deps::anylr,
+    x_deps::{abs_cancel, anylr},
     TrBuffRead, TrBuffWrite,
 };
-use abs_sync::may_cancel::TrMayCancel;
+use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
 /// Similar to port in TCP/IP, a tuple of dock defines the packet source and destination.

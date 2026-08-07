@@ -8,5 +8,5 @@ extern crate std;
 pub mod fs_tree;
 
 pub mod x_deps {
-    pub use abs_sync;
+    pub use abs_cancel;
 }

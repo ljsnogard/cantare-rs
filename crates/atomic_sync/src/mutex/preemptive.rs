@@ -3,7 +3,6 @@
     cell::UnsafeCell,
     marker::PhantomData,
     ops::{Deref, DerefMut, Try},
-    pin::Pin,
     sync::atomic::*,
 };
 
@@ -14,10 +13,11 @@ use atomex::{
     CmpxchResult, StrictOrderings,
     TrAtomicCell, TrAtomicData, TrAtomicFlags, TrCmpxchOrderings,
 };
+use abs_cancel::TrCancellationToken;
 use abs_sync::{
-    cancellation::TrCancellationToken,
     may_break::TrMayBreak,
     sync_mutex::*,
+    x_deps::abs_cancel,
 };
 
 /// An helper trait to define spinlock behaviour
@@ -281,7 +281,7 @@ where
 
     fn try_spin_acquire_<'g, 'c, C>(
         &'g mut self,
-        cancel: Pin<&'c mut C>,
+        cancel: &'c mut C,
     ) -> Option<MutexGuard<'a, 'g, T, D, B, S, O>>
     where
         'g: 'c,
@@ -366,7 +366,7 @@ where
 {
     pub fn may_break_with<C>(
         self,
-        cancel: Pin<&mut C>,
+        cancel: &mut C,
     ) -> Option<MutexGuard<'a, 'g, T, D, B, S, O>>
     where
         C: TrCancellationToken,
@@ -394,7 +394,7 @@ where
     #[inline]
     fn may_break_with<C>(
         self,
-        cancel: Pin<&mut C>,
+        cancel: &mut C,
     ) -> Self::MayBreakOutput
     where
         C: TrCancellationToken,

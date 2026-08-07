@@ -1,6 +1,5 @@
 use core::{
     alloc::Allocator,
-    pin::Pin,
     ops::Deref,
 };
 use alloc::{
@@ -11,11 +10,8 @@ use alloc::{
 
 use thiserror::Error;
 
-use abs_sync::{
-    may_cancel::TrMayCancel,
-    cancellation::TrCancellationToken,
-};
-use abs_vfs::{fs_tree, x_deps::abs_sync};
+use abs_cancel::{TrCancellationToken, TrMayCancel};
+use abs_vfs::{fs_tree, x_deps::abs_cancel};
 
 use crate::tree_node_::{FsTreeNode, InfoNode, LocalDirNode, NameSegm, NodeId};
 
@@ -145,7 +141,7 @@ where
 async fn get_inode_by_id_async_<'a, TNodeAlloc, TNameAlloc, C>(
     fs: &'a FsTree<TNodeAlloc, TNameAlloc>,
     id: &'a NodeId,
-    _c: Pin<&'a mut C>,
+    _c: &'a mut C,
 ) -> Result<INode<TNodeAlloc, TNameAlloc>, FsOprError>
 where
     TNodeAlloc: Allocator + Clone,
@@ -160,7 +156,7 @@ async fn find_inode_with_path_async_<'a, TNodeAlloc, TNameAlloc, C>(
     tree: &'a FsTree<TNodeAlloc, TNameAlloc>,
     root_id: &'a NodeId,
     path: &'a Path<TNodeAlloc, TNameAlloc>,
-    _: Pin<&'a mut C>,
+    _: &'a mut C,
 ) -> Result<INode<TNodeAlloc, TNameAlloc>, FsOprError>
 where
     TNodeAlloc: Allocator + Clone,
@@ -207,7 +203,7 @@ where
 async fn get_inode_name_async_<'a, TNodeAlloc, TNameAlloc, C>(
     fs: &'a FsTree<TNodeAlloc, TNameAlloc>,
     id: &'a NodeId,
-    _: Pin<&'a mut C>,
+    _: &'a mut C,
 ) -> Result<NameSegm<TNameAlloc>, FsOprError>
 where
     TNodeAlloc: Allocator + Clone,
@@ -221,7 +217,7 @@ where
 async fn get_inode_path_async_<'a, TNodeAlloc, TNameAlloc, C>(
     fs: &'a FsTree<TNodeAlloc, TNameAlloc>,
     id: &'a NodeId,
-    _: Pin<&'a mut C>,
+    _: &'a mut C,
 ) -> Result<Path<TNodeAlloc, TNameAlloc>, FsOprError>
 where
     TNodeAlloc: Allocator + Clone,

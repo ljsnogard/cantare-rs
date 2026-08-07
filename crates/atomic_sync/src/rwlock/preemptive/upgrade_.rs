@@ -1,7 +1,6 @@
 ﻿use core::{
     borrow::BorrowMut,
     ops::{Deref, Try},
-    pin::Pin,
 };
 
 use funty::Unsigned;
@@ -10,10 +9,11 @@ use atomex::{
     x_deps::funty,
     TrAtomicData, TrCmpxchOrderings,
 };
+use abs_cancel::{NonCancellableToken, TrCancellationToken};
 use abs_sync::{
-    cancellation::{NonCancellableToken, TrCancellationToken},
     may_break::TrMayBreak,
     sync_lock::*,
+    x_deps::abs_cancel,
 };
 
 use crate::rwlock::TrShareMut;
@@ -173,7 +173,7 @@ where
 
     pub fn may_break_with<C>(
         self,
-        cancel: Pin<&mut C>,
+        cancel: &mut C,
     ) -> Option<UpgradableReaderGuard<'a, 'g, T, D, B, O>>
     where
         C: TrCancellationToken,
@@ -211,7 +211,7 @@ where
     type MayBreakOutput = Option<UpgradableReaderGuard<'a, 'g, T, D, B, O>>;
 
     #[inline]
-    fn may_break_with<C>(self, cancel: Pin<&mut C>) -> Self::MayBreakOutput
+    fn may_break_with<C>(self, cancel: &mut C) -> Self::MayBreakOutput
     where
         C: TrCancellationToken,
     {
@@ -260,7 +260,7 @@ where
 
     pub fn upgrade_with_cancel<'u, C>(
         &'u mut self,
-        cancel: Pin<&mut C>,
+        cancel: &mut C,
     ) -> Option<WriterGuard<'a, 'u, T, D, B, O>>
     where
         C: TrCancellationToken,
@@ -347,7 +347,7 @@ where
 
     pub fn may_break_with<C>(
         self,
-        cancel: Pin<&mut C>,
+        cancel: &mut C,
     ) -> Option<WriterGuard<'a, 'u, T, D, B, O>>
     where
         C: TrCancellationToken,
@@ -357,7 +357,7 @@ where
 
     #[inline]
     pub fn wait(self) -> Option<WriterGuard<'a, 'u, T, D, B, O>> {
-        self.may_break_with(NonCancellableToken::shared_pin())
+        self.may_break_with(NonCancellableToken::shared_mut())
     }
 
     #[inline]
@@ -380,7 +380,7 @@ where
     type MayBreakOutput = Option<WriterGuard<'a, 'u, T, D, B, O>>;
 
     #[inline]
-    fn may_break_with<C>(self, cancel: Pin<&mut C>) -> Self::MayBreakOutput
+    fn may_break_with<C>(self, cancel: &mut C) -> Self::MayBreakOutput
     where
         C: TrCancellationToken,
     {

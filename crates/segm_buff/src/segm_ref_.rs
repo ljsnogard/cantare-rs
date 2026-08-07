@@ -193,7 +193,7 @@ where
     #[inline]
     fn take_segm_ref<'a>(
         &'a mut self,
-        demand: &'a Demand<usize>,
+        demand: &Demand<usize>,
     ) -> impl 'a + Try<Output: 'a + TrBuffSegmRef<SliceElem<B>>> {
         SegmRef::take_segm_ref(self, demand)
     }

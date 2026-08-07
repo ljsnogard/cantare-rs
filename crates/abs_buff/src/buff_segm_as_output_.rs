@@ -4,11 +4,10 @@ use core::{
     marker::PhantomData,
     mem::{self, MaybeUninit},
     ops::{ControlFlow, Try},
-    pin::Pin,
     ptr,
 };
 
-use abs_sync::{cancellation::TrCancellationToken, may_cancel::TrMayCancel};
+use abs_cancel::{TrCancellationToken, TrMayCancel};
 use anylr::SomeOf;
 use gen_mcf_macro::gen_may_cancel_future;
 
@@ -86,7 +85,7 @@ where
 async fn buff_segm_output_async<'f, S, T, C>(
     segm_mut: &'f mut S,
     source: &'f [MaybeUninit<T>],
-    _: Pin<&'f mut C>,
+    _: &'f mut C,
 ) -> SomeOf<usize, Infallible>
 where
     S: TrBuffSegmMut<T>,
@@ -99,7 +98,7 @@ where
 async fn buff_segm_output_cloned_async<'f, S, T, C>(
     segm_mut: &'f mut S,
     source: &'f [T],
-    _: Pin<&'f mut C>,
+    _: &'f mut C,
 ) -> SomeOf<usize, Infallible>
 where
     S: TrBuffSegmMut<T>,

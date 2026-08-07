@@ -1,7 +1,6 @@
 ﻿use core::{
     borrow::BorrowMut,
     ops::Deref,
-    pin::Pin,
 };
 
 use funty::Unsigned;
@@ -10,10 +9,11 @@ use atomex::{
     x_deps::funty,
     TrAtomicData, TrCmpxchOrderings,
 };
+use abs_cancel::TrCancellationToken;
 use abs_sync::{
-    cancellation::TrCancellationToken,
     may_break::TrMayBreak,
     sync_lock::*,
+    x_deps::abs_cancel,
 };
 
 use super::rwlock_::{Acquire, may_break_with_impl_};
@@ -111,7 +111,7 @@ where
     #[inline]
     pub fn may_break_with<C>(
         self,
-        cancel: Pin<&mut C>,
+        cancel: &mut C,
     ) -> Option<ReaderGuard<'a, 'g, T, D, B, O>>
     where
         C: TrCancellationToken,
@@ -149,7 +149,7 @@ where
     type MayBreakOutput = Option<ReaderGuard<'a, 'g, T, D, B, O>>;
 
     #[inline]
-    fn may_break_with<C>(self, cancel: Pin<&mut C>) -> Self::MayBreakOutput
+    fn may_break_with<C>(self, cancel: &mut C) -> Self::MayBreakOutput
     where
         C: TrCancellationToken,
     {

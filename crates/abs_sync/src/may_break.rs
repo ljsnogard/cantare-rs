@@ -1,9 +1,6 @@
-﻿use core::{
-    ops::{ControlFlow, Try},
-    pin::Pin,
-};
+﻿use core::ops::{ControlFlow, Try};
 
-use crate::cancellation::{NonCancellableToken, TrCancellationToken};
+use abs_cancel::{NonCancellableToken, TrCancellationToken};
 
 /// Describes a coroutine, a loop, or a job to run on other thread, that can be
 /// discontinued with an external cancellation token.
@@ -17,12 +14,12 @@ use crate::cancellation::{NonCancellableToken, TrCancellationToken};
 pub trait TrMayBreak: Sized {
     type MayBreakOutput: Sized;
 
-    fn may_break_with<C>(self, cancel: Pin<&mut C>) -> Self::MayBreakOutput
+    fn may_break_with<C>(self, cancel: &mut C) -> Self::MayBreakOutput
     where
         C: TrCancellationToken;
 
     fn wait(self) -> Self::MayBreakOutput {
-        self.may_break_with(NonCancellableToken::shared_pin())
+        self.may_break_with(&mut NonCancellableToken::new())
     }
 
     fn wait_or<F>(self, f: F) -> <Self::MayBreakOutput as Try>::Output
@@ -44,7 +41,7 @@ impl<T> Completed<T> {
         Self(value)
     }
 
-    pub fn may_break_with<C>(self, _: Pin<&mut C>) -> T
+    pub fn may_break_with<C>(self, _: &mut C) -> T
     where
         C: TrCancellationToken,
     {
@@ -62,7 +59,7 @@ impl<T> TrMayBreak for Completed<T> {
     type MayBreakOutput = T;
 
     #[inline]
-    fn may_break_with<C>(self, cancel: Pin<&mut C>) -> Self::MayBreakOutput
+    fn may_break_with<C>(self, cancel: &mut C) -> Self::MayBreakOutput
     where
         C: TrCancellationToken,
     {

@@ -1,9 +1,8 @@
 ﻿use core::ops::Try;
 
-use crate::{
-    may_cancel::TrMayCancel,
-    sync_guard::TrAcqMutGuard,
-};
+use abs_cancel::TrMayCancel;
+
+use crate::sync_guard::TrAcqMutGuard;
 
 /// Mutex for asynchronous task pattern.
 pub trait TrAsyncMutex {

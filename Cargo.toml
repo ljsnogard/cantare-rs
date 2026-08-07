@@ -4,6 +4,7 @@ members = [
     "crates/atomex",
     "crates/abs_iter",
 
+    "crates/abs_cancel",
     "crates/abs_sync",
     "crates/atomic_sync",
     "crates/gen_mcf_macro",
@@ -12,6 +13,12 @@ members = [
     "crates/abs_buff",
     "crates/segm_buff",
     # "crates/buffex",
+
+    "crates/abs_vfs",
+    "crates/mem_vfs",
+
+    "crates/abs_smux",
+    "crates/smux_v1",
 ]
 
 [workspace.package]
@@ -25,4 +32,5 @@ pin-utils = { version = "*" }
 env_logger = { version = "0.11.*" }
 log = { version = "0.4.*" }
 futures-lite = { version = "2" }
-tokio = { version = "1", features = ["full"] }
+compio = { version = "0.19.*", features = ["fs", "macros", "time"] }
+thiserror = { version = "2.0", default-features = false }

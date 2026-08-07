@@ -1,9 +1,8 @@
 ﻿use core::ops::Try;
 
-use crate::{
-    may_cancel::TrMayCancel,
-    sync_guard::{TrAcqMutGuard, TrAcqRefGuard},
-};
+use abs_cancel::TrMayCancel;
+
+use crate::sync_guard::{TrAcqMutGuard, TrAcqRefGuard};
 
 /// Reader-Writer lock for asynchronous task pattern.
 pub trait TrAsyncRwLock {

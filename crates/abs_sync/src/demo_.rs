@@ -4,11 +4,9 @@ use std::{
     ops::{ControlFlow, Deref, DerefMut, Try},
 };
 
-use crate::{
-    async_lock::*,
-    cancellation::NonCancellableToken,
-    may_cancel::TrMayCancel,
-};
+use abs_cancel::{NonCancellableToken, TrMayCancel};
+
+use crate::async_lock::*;
 
 #[allow(dead_code)]
 async fn generic_rwlock_smoke_<B, L, T>(rwlock: B) -> Result<()>
@@ -24,7 +22,7 @@ where
     //     .may_cancel_with(&mut NonCancellableToken::new())
     //     .await?;
     let ControlFlow::Continue(read_guard) = read_async
-        .may_cancel_with(NonCancellableToken::shared_pin())
+        .may_cancel_with(&mut NonCancellableToken::new())
         .await
         .branch()
     else {
@@ -35,7 +33,7 @@ where
     drop(read_guard);
     let ControlFlow::Continue(upgradable) = acq
         .upgradable_read_async()
-        .may_cancel_with(NonCancellableToken::shared_pin())
+        .may_cancel_with(&mut NonCancellableToken::new())
         .await
         .branch()
     else {
@@ -45,7 +43,7 @@ where
     let mut upgrade = upgradable.upgrade();
     let ControlFlow::Continue(mut write_guard) = upgrade
         .upgrade_async()
-        .may_cancel_with(NonCancellableToken::shared_pin())
+        .may_cancel_with(&mut NonCancellableToken::new())
         .await
         .branch()
     else {

@@ -7,7 +7,7 @@ description = "ABStraction of BUFFered IO"
 readme = "README.md"
 
 [dependencies]
-abs_sync = { path = "../abs_sync" }
+abs_cancel = { path = "../abs_cancel" }
 gen_mcf_macro = { path = "../gen_mcf_macro" }
 
 compio = { workspace = true }

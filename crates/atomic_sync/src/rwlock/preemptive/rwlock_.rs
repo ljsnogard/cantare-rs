@@ -5,7 +5,6 @@
     marker::{PhantomData, PhantomPinned},
     mem::ManuallyDrop,
     ops::Try,
-    pin::Pin,
     sync::atomic::*,
 };
 
@@ -17,10 +16,11 @@ use atomex::{
     StrictOrderings, TrAtomicCell, TrAtomicData, TrAtomicFlags,
     TrCmpxchOrderings,
 };
+use abs_cancel::TrCancellationToken;
 use abs_sync::{
-    cancellation::TrCancellationToken,
     may_break::TrMayBreak,
     sync_lock::*,
+    x_deps::abs_cancel,
 };
 
 use crate::rwlock::TrShareMut;
@@ -758,7 +758,7 @@ pub(super) fn may_break_with_impl_<'a, 'g, TTask, T, B, D, O, C, X>(
     mut task: TTask,
     mut get_acq_mut: impl FnMut(&mut TTask) -> &mut Acquire<'a, T, D, B, O>,
     try_acquire: FpTryAcquire<'a, 'g, T, B, D, O, X>,
-    cancel: Pin<&mut C>,
+    cancel: &mut C,
 ) -> Option<X>
 where
     TTask: 'g,

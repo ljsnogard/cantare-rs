@@ -1,6 +1,6 @@
 ﻿use core::error::Error;
 
-use abs_sync::may_cancel::TrMayCancel;
+use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
 use crate::{BuffWriteAsOutput, Demand, TrBuffSegmMut, TrOutput};

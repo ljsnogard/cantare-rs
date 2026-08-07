@@ -18,5 +18,5 @@ pub use segm_ref_::SegmRef;
 pub mod x_deps {
     pub use abs_buff;
 
-    pub use abs_buff::x_deps::abs_sync;
+    pub use abs_buff::x_deps::abs_cancel;
 }

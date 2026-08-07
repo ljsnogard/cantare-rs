@@ -7,7 +7,7 @@ use core::{
 
 use abs_iter::{TrAsSlice, TrAsSliceMut};
 use anylr::SomeOf;
-use abs_sync::may_cancel::TrMayCancel;
+use abs_cancel::TrMayCancel;
 
 /// A trait specifically abstracted from `MaybeUninit<T>` or types alike.
 ///
