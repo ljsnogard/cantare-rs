@@ -38,6 +38,13 @@ where
             _use_t_: PhantomData,
         }
     }
+
+    pub fn read_async<'a>(
+        &'a mut self,
+        target: &'a mut [MaybeUninit<T>],
+    ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<usize, <P as TrBuffPeek<T>>::Err>> {
+        BuffPeekInputAsync(self, target)
+    }
 }
 
 impl<'a, P, T> From<&'a mut P> for BuffPeekAsInput<&'a mut P, P, T>

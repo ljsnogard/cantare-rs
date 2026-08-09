@@ -26,6 +26,13 @@ where
     pub const fn new(r: B) -> Self {
         BuffReadAsInput(r, PhantomData, PhantomData)
     }
+
+    pub fn read_async<'a>(
+        &'a mut self,
+        target: &'a mut [MaybeUninit<T>],
+    ) -> BuffReadInputAsync<'a, R, T> {
+        BuffReadInputAsync(self.0.borrow_mut(), target)
+    }
 }
 
 impl<'a, R, T> From<&'a mut R> for BuffReadAsInput<&'a mut R, R, T>
@@ -53,11 +60,12 @@ where
 {
     type Err = <R as TrBuffRead<T>>::Err;
 
+    #[inline]
     fn read_async<'a>(
         &'a mut self,
         target: &'a mut [MaybeUninit<T>],
     ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<usize, Self::Err>> {
-        BuffReadInputAsync(self.0.borrow_mut(), target)
+        BuffReadAsInput::read_async(self, target)
     }
 }
 

@@ -101,7 +101,7 @@ pub type BufferElem<B> = <BufferSlot<B> as TrMaybeUninit>::Inner;
 pub trait TrInput<T = u8> {
     type Err : Error;
 
-    /// Move the data out of the device and into the specified target buffer.
+    /// Read data from this input device and into the specified target buffer.
     ///
     /// ## Safety
     ///
