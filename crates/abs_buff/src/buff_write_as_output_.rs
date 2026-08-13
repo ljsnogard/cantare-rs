@@ -5,7 +5,9 @@ use core::{
 };
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
-use anylr::SomeOf;
+
+use anylr:: SomeOf;
+
 use gen_mcf_macro::gen_may_cancel_future;
 
 use crate::{
@@ -13,6 +15,7 @@ use crate::{
     Demand, TrBuffWrite, TrOutput,
 };
 
+/// The default return type of `fn as_output()` in `TrBuffWrite`.
 pub struct BuffWriteAsOutput<B, W, T>(B, PhantomData<W>, PhantomData<[T]>)
 where
     B: BorrowMut<W>,
@@ -100,12 +103,32 @@ where
     W: TrBuffWrite<T>,
     C: TrCancellationToken,
 {
-    let demand = Demand::less_than(source.len());
-    buff_w
-        .write_async(&demand)
-        .may_cancel_with(cancel)
-        .await
-        .map_left(|mut s| buff_segm_mut_write(&mut s, source))
+    let mut c = 0usize;
+    loop {
+        if c >= source.len() {
+            return SomeOf::new_left(c);
+        };
+        let src = &source[c..];
+        let demand = Demand::less_than(src.len());
+        let result = buff_w
+            .write_async(&demand)
+            .may_cancel_with(cancel)
+            .await
+            .map_left(|mut s| buff_segm_mut_write(&mut s, src));
+        if let Option::Some(delta) = result.as_ref().pick_left() {
+            c += *delta;
+        }
+        if let Option::Some(err) = result.pick_right() {
+            return if c == 0 {
+                SomeOf::new_right(err)
+            } else {
+                SomeOf::new_both(c, err)
+            };
+        }
+        if cancel.is_cancelled() {
+            return SomeOf::new_left(c);
+        }
+    }
 }
 
 #[gen_may_cancel_future(BuffWriteOutputCloned)]
@@ -119,10 +142,30 @@ where
     T: Clone,
     C: TrCancellationToken,
 {
-    let demand = Demand::less_than(source.len());
-    buff_w
-        .write_async(&demand)
-        .may_cancel_with(cancel)
-        .await
-        .map_left(|mut s| buff_segm_mut_write_cloned(&mut s, source))
+    let mut c = 0usize;
+    loop {
+        if c >= source.len() {
+            return SomeOf::new_left(c);
+        };
+        let src = &source[c..];
+        let demand = Demand::less_than(src.len());
+        let result = buff_w
+            .write_async(&demand)
+            .may_cancel_with(cancel)
+            .await
+            .map_left(|mut s| buff_segm_mut_write_cloned(&mut s, src));
+        if let Option::Some(delta) = result.as_ref().pick_left() {
+            c += *delta;
+        }
+        if let Option::Some(err) = result.pick_right() {
+            return if c == 0 {
+                SomeOf::new_right(err)
+            } else {
+                SomeOf::new_both(c, err)
+            };
+        }
+        if cancel.is_cancelled() {
+            return SomeOf::new_left(c);
+        }
+    }
 }

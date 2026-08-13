@@ -256,7 +256,7 @@ where
 
     fn iter_slices<'a>(
         &'a self,
-    ) -> impl IntoIterator<Item: 'a + AsRef<[Self::Item]>> {
+    ) -> impl IntoIterator<Item = &'a [Self::Item]> {
         SegmMut::iter_slices(self)
     }
 }
@@ -269,7 +269,10 @@ where
     #[inline]
     fn iter_slices_mut<'a>(
         &'a mut self,
-    ) -> impl IntoIterator<Item: 'a + AsMut<[MaybeUninit<BufferElem<B>>]>> {
+    ) -> impl IntoIterator<Item = &'a mut [MaybeUninit<BufferElem<B>>]>
+    where
+        BufferElem<B>: 'a,
+    {
         SegmMut::iter_slices_mut(self)
     }
 

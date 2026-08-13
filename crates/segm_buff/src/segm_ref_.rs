@@ -180,7 +180,7 @@ where
     /// Iterate the unconsumed parts of the segment slice by slice.
     fn iter_slices<'a>(
         &'a self,
-    ) -> impl IntoIterator<Item: 'a + AsRef<[Self::Item]>> {
+    ) -> impl IntoIterator<Item = &'a [Self::Item]> {
         SegmRef::iter_slices(self)
     }
 }

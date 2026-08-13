@@ -22,6 +22,8 @@ mod buff_segm_;
 mod buff_segm_as_input_;
 mod buff_segm_as_output_;
 
+pub mod chaining;
+
 mod demand_;
 mod peeker_;
 mod reader_;

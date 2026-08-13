@@ -79,10 +79,30 @@ where
     R: TrBuffRead<T>,
     C: TrCancellationToken,
 {
-    let demand = Demand::less_than(target.len());
-    buff_r
-        .read_async(&demand)
-        .may_cancel_with(cancel)
-        .await
-        .map_left(|mut s| buff_segm_ref_read(&mut s, target))
+    let mut c = 0usize;
+    loop {
+        if c >= target.len() {
+            return SomeOf::new_left(c);
+        }
+        let mut dest = &mut target[c..];
+        let demand = Demand::less_than(dest.len());
+        let result = buff_r
+            .read_async(&demand)
+            .may_cancel_with(cancel)
+            .await
+            .map_left(|mut s| buff_segm_ref_read(&mut s, &mut dest));
+        if let Option::Some(delta) = result.as_ref().pick_left() {
+            c += *delta;
+        }
+        if let Option::Some(err) = result.pick_right() {
+            return if c == 0 {
+                SomeOf::new_right(err)
+            } else {
+                SomeOf::new_both(c, err)
+            };
+        }
+        if cancel.is_cancelled() {
+            return SomeOf::new_left(c);
+        }
+    }
 }

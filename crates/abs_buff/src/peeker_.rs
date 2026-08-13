@@ -22,6 +22,7 @@ pub trait TrBuffPeek<T = u8> {
         &'f mut self,
     ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmPeek<'f>, Self::Err>>;
 
+    /// The default implementation returned by this function is `BuffPeekAsInput`.
     fn as_intput(&mut self) -> impl TrInput<T>
     where
         Self: Sized,

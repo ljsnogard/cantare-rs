@@ -327,7 +327,7 @@ macro_rules! impl_atomic {
             ) -> Result<Self::Value, Self::Value>
             where
                 F: FnMut(Self::Value) -> Option<Self::Value> {
-                Self::fetch_update(self, fetch_order, set_order, f)
+                Self::try_update(self, fetch_order, set_order, f)
             }
         }
 
