@@ -16,3 +16,8 @@ anylr = { git = "https://gitee.com/lino_snsalias/anylr.rs.git", branch = "dev/0.
 abs_iter = { path = "../abs_iter" }
 abs_cancel = { path = "../abs_cancel" }
 gen_mcf_macro = { path = "../gen_mcf_macro" }
+
+funty = { workspace = true }
+
+[features]
+std_io = []

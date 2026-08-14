@@ -58,3 +58,6 @@ pub mod x_deps {
     pub use anylr;
     pub use gen_mcf_macro;
 }
+
+#[cfg(any(test, feature = "std_io"))]
+pub mod as_std_read;

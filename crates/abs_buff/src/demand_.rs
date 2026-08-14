@@ -3,14 +3,19 @@
     ops::{Bound, RangeBounds},
 };
 
+use funty;
+
 /// Describes an interval of amount that needed to operate.
 #[derive(Clone, Debug)]
 pub struct Demand<T>(DemandRange<T>)
 where
     T: Eq + Ord;
 
-impl Demand<usize> {
-    /// Create zero-sized range with value x.
+impl<T> Demand<T>
+where
+    T: funty::Unsigned,
+{
+    /// Create demand ranged which contains only one value.
     ///
     /// ## Example
     /// ```
@@ -18,19 +23,27 @@ impl Demand<usize> {
     ///
     /// let a = Demand::exactly(1);
     /// assert!(matches!(a.min(), Option::Some(1)));
-    /// assert!(matches!(a.max(), Option::Some(1)));
+    /// assert!(matches!(a.max(), Option::Some(2)));
+    /// assert_eq!(a.len(), 1);
+    ///
+    /// let a = Demand::exactly(usize::MAX);
+    /// assert!(a.max().is_none());
+    /// assert_eq!(a.len(), 0);
     /// ```
-    pub fn exactly(val: usize) -> Self {
-        if val < usize::MAX {
-            Demand(DemandRange::Range(val, val + 1usize))
+    pub fn exactly(val: T) -> Self {
+        if val == T::ZERO {
+            panic!("A demand cannot accept 0.")
+        }
+        if val < T::MAX {
+            Demand(DemandRange::Range(val, val + T::ONE))
         } else {
             Demand::at_least(val)
         }
     }
 
     pub fn try_from_usize_range(
-        range: &impl RangeBounds<usize>,
-    ) -> Result<Self, (Bound<&usize>, Bound<&usize>)> {
+        range: &impl RangeBounds<T>,
+    ) -> Result<Self, (Bound<&T>, Bound<&T>)> {
         use Bound::*;
 
         let start_bound = range.start_bound();
@@ -40,14 +53,14 @@ impl Demand<usize> {
         // 只有手动构造一个 struct 的情况下，才可能为 None
         let start = match start_bound {
             Included(&v) => Option::Some(v),
-            Excluded(&v) => v.checked_add(1),
-            Unbounded => Option::Some(usize::MIN),
+            Excluded(&v) => v.checked_add(T::ONE),
+            Unbounded => Option::Some(T::MIN),
         };
         // 只有当 ..=0usize 的情况下，才为 None
         let end = match end_bound {
-            Included(&v) => v.checked_add(1),
+            Included(&v) => v.checked_add(T::ONE),
             Excluded(&v) => Option::Some(v),
-            Unbounded => Option::Some(usize::MAX),
+            Unbounded => Option::Some(T::MAX),
         };
 
         match (start, end) {
@@ -61,12 +74,14 @@ impl Demand<usize> {
             _ => Err((start_bound, end_bound)),
         }
     }
+}
 
+impl Demand<usize> {
     pub fn len(&self) -> usize {
         use DemandRange::*;
 
         match &self.0 {
-            AtLeast(l) => usize::MAX - l,
+            AtLeast(l) => usize::MAX - *l,
             LessThan(u) => *u,
             Range(l, u) => u - l,
         }
@@ -91,7 +106,7 @@ where
     /// assert!(matches!(b.min(), Option::Some(1)));
     /// assert!(matches!(b.max(), Option::Some(10)));
     ///
-    /// let c = Demand::between(1,1); // will panic!
+    /// // let c = Demand::between(1,1); // will panic!
     /// ```
     pub fn between(a: T, b: T) -> Self {
         use DemandRange::*;
@@ -111,7 +126,7 @@ where
     /// ```
     /// use abs_buff::Demand;
     ///
-    /// let a = Demand::no_less_than(2);
+    /// let a = Demand::at_least(2);
     /// assert!(matches!(a.min(), Option::Some(2)));
     /// assert!(a.max().is_none());
     /// ```
@@ -272,8 +287,8 @@ mod try_from_usize_range_tests_ {
 
     #[test]
     fn excatly_vs_between() {
-        let a = Demand::between(0usize, 1usize);
-        let b = Demand::exactly(0usize);
+        let a = Demand::between(1usize, 2usize);
+        let b = Demand::exactly(1usize);
         assert_eq!(a.len(), b.len());
         assert_eq!(a.min().unwrap(), b.min().unwrap());
     }
@@ -306,7 +321,7 @@ mod try_from_usize_range_tests_ {
     #[test]
     fn range_to() {
         // ..10   → [0, 9]  因为 Excluded(10) → 10-1=9
-        let range = ..10;
+        let range = ..10usize;
         let demand = Demand::try_from_usize_range(&range).unwrap();
         assert_eq!(bounds(&demand), (Some(usize::MIN), Some(10)));
 
@@ -316,7 +331,7 @@ mod try_from_usize_range_tests_ {
         assert_eq!(bounds(&demand), (Some(usize::MIN), Some(11)));
 
         // ..0    → (-∞, usize::MAX? 不，Excluded(0) → 0-1 溢出) 应返回 Err
-        let range = ..0;
+        let range = ..0usize;
         let result = Demand::try_from_usize_range(&range);
         assert!(result.is_err());
     }
@@ -351,7 +366,7 @@ mod try_from_usize_range_tests_ {
         assert_eq!(bounds(&demand), (Some(0), Some(1)));
 
         // 5..5  → start=5, end Excluded(5) → end=4, start>end → Err
-        let range = 5..5;
+        let range = 5..5usize;
         let result = Demand::try_from_usize_range(&range);
         assert!(result.is_err());
 
@@ -414,7 +429,7 @@ mod try_from_usize_range_tests_ {
         // assert!(result.is_err());
 
         // ..0 已在上面的 range_to 中测试溢出，但这里测试无溢出但空：..0 因溢出已报错；真正的空范围如 1..1 → start=1, end=0 → Err
-        let range = 1..1;
+        let range = 1..1usize;
         let result = Demand::try_from_usize_range(&range);
         assert!(result.is_err());
     }
