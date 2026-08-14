@@ -57,6 +57,8 @@ pub mod x_deps {
     pub use abs_cancel;
     pub use anylr;
     pub use gen_mcf_macro;
+
+    pub use funty;
 }
 
 #[cfg(any(test, feature = "std_read"))]

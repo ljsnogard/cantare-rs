@@ -2,18 +2,29 @@ extern crate std;
 
 use std::{io, ptr, string::ToString};
 
+use abs_cancel::{NonCancellableToken, TrCancellationToken};
+
 use crate::{Demand, TrBuffSegmView, TrBuffRead, TrBuffTryRead};
 
-pub struct AsStdRead<'a, R>(&'a mut R)
-where
-    R: TrBuffTryRead;
-
-impl<'a, R> AsStdRead<'a, R>
+pub struct AsStdRead<'a, R, C = NonCancellableToken>
 where
     R: TrBuffTryRead,
+    C: TrCancellationToken,
 {
-    pub const fn new(r: &'a mut R) -> Self {
-        AsStdRead(r)
+    buff_r_: &'a mut R,
+    cancel_: &'a mut C,
+}
+
+impl<'a, R, C> AsStdRead<'a, R, C>
+where
+    R: TrBuffTryRead,
+    C: TrCancellationToken,
+{
+    pub const fn new(r: &'a mut R, cancel: &'a mut C) -> Self {
+        AsStdRead {
+            buff_r_: r,
+            cancel_: cancel,
+        }
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>
@@ -23,11 +34,11 @@ where
         let mut c = 0usize;
         let buf_len = buf.len();
         loop {
-            if c >= buf_len || self.0.is_drained() {
+            if c >= buf_len || self.buff_r_.is_drained() || self.cancel_.is_cancelled() {
                 return Result::Ok(c)
             }
             let demand = Demand::less_than(buf_len - c);
-            let r_res = self.0.try_read(&demand);
+            let r_res = self.buff_r_.try_read(&demand);
             if let Option::Some(segm) = r_res.as_ref().pick_left() {
                 let mut cc = 0usize;
                 for src_slice in segm.iter_slices() {
@@ -54,9 +65,19 @@ where
     }
 }
 
-impl<'a, R> std::io::Read for AsStdRead<'a, R>
+impl<'a, R> AsStdRead<'a, R, NonCancellableToken>
 where
     R: TrBuffTryRead,
+{
+    pub fn uncancellable(r: &'a mut R) -> Self {
+        Self::new(r, NonCancellableToken::shared_mut())
+    }
+}
+
+impl<'a, R, C> std::io::Read for AsStdRead<'a, R, C>
+where
+    R: TrBuffTryRead,
+    C: TrCancellationToken,
 {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
