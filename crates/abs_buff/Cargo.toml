@@ -20,4 +20,6 @@ gen_mcf_macro = { path = "../gen_mcf_macro" }
 funty = { workspace = true }
 
 [features]
-std_io = []
+std_write = []
+std_read = []
+std_io = ["std_read", "std_write"]
