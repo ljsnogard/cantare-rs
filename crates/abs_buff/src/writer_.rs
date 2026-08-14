@@ -3,7 +3,10 @@
 use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
-use crate::{BuffWriteAsOutput, Demand, TrBuffSegmMut, TrOutput};
+use crate::{
+    io::TrOutput,
+    BuffWriteAsOutput, Demand, TrBuffSegmMut,
+};
 
 /// A kind of buffer that owns the memory for writing data by lending some
 /// segments to the producer.

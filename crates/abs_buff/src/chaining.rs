@@ -1,6 +1,7 @@
 use core::{
-    mem::{self, MaybeUninit},
+    mem::{self, ManuallyDrop, MaybeUninit},
     marker::PhantomData,
+    ops::{ControlFlow, Try},
     ptr,
 };
 
@@ -8,26 +9,28 @@ use abs_cancel::{TrCancellationToken, TrMayCancel};
 
 use gen_mcf_macro::gen_may_cancel_future;
 
-use crate::{TrBuffRead, TrBuffSegmMut, TrBuffSegmView, TrBuffWrite, Demand};
+use crate::{Demand, TrBuffRead, TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrBuffWrite};
 
 pub enum ChainingIoResult<W, R, T>
 where
     W: TrBuffWrite<T>,
     R: TrBuffRead<T>,
 {
-    BuffWriteErr {
+    TxErr {
         count: usize,
         err: <W as TrBuffWrite<T>>::Err,
     },
-    BuffReadErr {
+    RxErr {
         count: usize,
         err: <R as TrBuffRead<T>>::Err,
     },
-    WriteBlocked(usize),
-    ReadDrained(usize),
+    TxBlocked(usize),
+    RxDrained(usize),
+    SizeLimit(usize),
     NoOps,
 }
 
+/// Moves data from R to W.
 pub struct Chain<'a, W, R, T = u8>
 where
     W: TrBuffWrite<T>,
@@ -61,7 +64,7 @@ where
 
 #[gen_may_cancel_future(ChainIo)]
 async fn chain_io_async_<'f, W, R, T, C>(
-    _no_t_: &'f PhantomData<T>,
+    _no_t_: &'f PhantomData<T>, // This is a work-around for macro gen_may_cancel_future.
     buff_w: &'f mut W,
     buff_r: &'f mut R,
     cancel: &'f mut C,
@@ -76,53 +79,74 @@ where
     }
     let mut c = 0usize;
     loop {
-        if buff_r.is_drained() {
-            return ChainingIoResult::ReadDrained(c);
+        if buff_w.is_blocked() {
+            return ChainingIoResult::TxBlocked(c);
         }
-        let read_demand = Demand::no_less_than(1usize);
-        let mut read_result = buff_r
-            .read_async(&read_demand)
+        if c == usize::MAX {
+            return ChainingIoResult::SizeLimit(c);
+        }
+        let w_demand = Demand::less_than(usize::MAX - c);
+        let mut w_res = buff_w
+            .write_async(&w_demand)
             .may_cancel_with(cancel)
             .await;
-        let opt_input_segm = read_result.as_mut().pick_left();
+        let opt_tx_segm = w_res.as_mut().pick_left();
 
-        if let Option::Some(input_segm) = opt_input_segm {
-            let capacity = input_segm.capacity();
+        if let Option::Some(tx_segm) = opt_tx_segm {
+            let tx_buf_capacity = tx_segm.least_count();
             let mut cc = 0usize;
             loop {
-                if cc >= capacity {
+                if cc >= tx_buf_capacity {
                     break;
                 }
-                if buff_w.is_blocked() {
-                    return ChainingIoResult::WriteBlocked(c);
+                if buff_r.is_drained() {
+                    return ChainingIoResult::RxDrained(c);
                 }
-                let write_demand = Demand::less_than(capacity - cc);
-                let mut write_result = buff_w
-                    .write_async(&write_demand)
+                let r_demand = Demand::less_than(tx_buf_capacity - cc);
+                let mut r_res = buff_r
+                    .read_async(&r_demand)
                     .may_cancel_with(cancel)
                     .await;
 
-                let opt_output_segm = write_result.as_mut().pick_left();
-                if let Option::Some(output_segm) = opt_output_segm {
-                    let it_input = input_segm.iter_slices().into_iter();
-                    let it_output = output_segm.iter_slices_mut().into_iter();
-
-                    let item_cp = unsafe { copy_data_(it_input, it_output) };
-                    cc += item_cp;
-                    c += item_cp;
+                let opt_rx_segm = r_res.as_mut().pick_left();
+                if let Option::Some(rx_segm) = opt_rx_segm {
+                    let rx_buf_capacity = rx_segm.least_count();
+                    // this is guaranteed by the semantic of `least_count()`
+                    assert!(tx_buf_capacity >= rx_buf_capacity);
+                    let ControlFlow::Continue(segm_dst) =
+                        tx_segm.take_segm_mut(&Demand::less_than(rx_buf_capacity)).branch() else {
+                            todo!()
+                    };
+                    let ControlFlow::Continue(segm_src) =
+                        rx_segm.take_segm_ref(&Demand::exactly(rx_buf_capacity)).branch() else {
+                            todo!()
+                    };
+                    let mut segm_dst = ManuallyDrop::new(segm_dst);
+                    let mut segm_src = ManuallyDrop::new(segm_src);
+                    let dst_it = segm_dst.iter_slices_mut().into_iter();
+                    let src_it = segm_src.iter_slices().into_iter();
+                    let copied_len;
+                    unsafe {
+                        copied_len = copy_data_(src_it, dst_it);
+                        // dropping both segm will now be safe and correctly increasing the consumed count.
+                        ManuallyDrop::drop(&mut segm_dst);
+                        ManuallyDrop::drop(&mut segm_src);
+                    }
+                    cc += copied_len;
+                    c += copied_len;
                 }
-                if let Option::Some(output_err) = write_result.pick_right() {
-                    return ChainingIoResult::BuffWriteErr {
+                if let Option::Some(rx_err) = r_res.pick_right() {
+                    return ChainingIoResult::RxErr {
                         count: c,
-                        err: output_err,
+                        err: rx_err,
                     };
                 }
             }
         }
-        if let Option::Some(input_err) = read_result.pick_right() {
-            return ChainingIoResult::BuffReadErr {
+        if let Option::Some(tx_err) = w_res.pick_right() {
+            return ChainingIoResult::TxErr {
                 count: c,
-                err: input_err,
+                err: tx_err,
             };
         }
     }
@@ -183,6 +207,5 @@ where
             total_copied += copy_count;
         }
     }
-
     total_copied
 }

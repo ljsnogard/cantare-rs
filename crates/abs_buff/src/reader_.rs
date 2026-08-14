@@ -3,7 +3,10 @@
 use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
-use crate::{BuffReadAsInput, Demand, TrInput, TrBuffSegmRef};
+use crate::{
+    io::TrInput,
+    BuffReadAsInput, Demand, TrBuffSegmRef,
+};
 
 /// A kind of buffer that owns the memory for reading data by lending some
 /// segments to the consumer.

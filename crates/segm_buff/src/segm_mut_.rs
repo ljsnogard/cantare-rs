@@ -5,14 +5,17 @@
     ops::{Deref, DerefMut, Try},
 };
 
-use abs_buff::{Demand, TrBuffer, TrBuffSegmMut, TrBuffSegmView};
+use abs_buff::{
+    io::{self, TrBuffer, },
+    Demand, TrBuffSegmMut, TrBuffSegmView,
+};
 
 use super::{
     reclaim_::SegmSelfReclaim,
     NoReclaim, TrReclaim,
 };
 
-type BufferElem<B> = abs_buff::BufferElem<<B as Deref>::Target>;
+type BufferElem<B> = io::BufferElem<<B as Deref>::Target>;
 
 type ChildSegm<'a, B, R> = SegmMut<&'a mut [MaybeUninit<BufferElem<B>>], R>;
 
@@ -54,6 +57,11 @@ where
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.capacity() == self.offset_
+    }
+
+    #[inline]
+    pub fn least_count(&self) -> usize {
+        self.capacity() - self.offset_
     }
 
     #[inline]
@@ -247,6 +255,11 @@ where
     #[inline]
     fn is_empty(&self) -> bool {
         SegmMut::is_empty(self)
+    }
+
+    #[inline]
+    fn least_count(&self) -> usize {
+        SegmMut::least_count(self)
     }
 
     #[inline]

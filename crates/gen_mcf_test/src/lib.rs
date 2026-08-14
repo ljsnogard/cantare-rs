@@ -4,5 +4,8 @@
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
 
-#[cfg(test)]
+// #[cfg(test)]
 mod tests_;
+
+/// Empty mod to check the output of `cargo expand`
+mod out_;

@@ -11,7 +11,8 @@ use gen_mcf_macro::gen_may_cancel_future;
 
 use crate::{
     buff_segm_as_input_::buff_segm_ref_read,
-    Demand, TrBuffPeek, TrBuffSegmRef, TrInput,
+    io::TrInput,
+    Demand, TrBuffPeek, TrBuffSegmRef,
 };
 
 pub struct BuffPeekAsInput<B, P, T>

@@ -11,7 +11,7 @@ use abs_cancel::{TrCancellationToken, TrMayCancel};
 use anylr::SomeOf;
 use gen_mcf_macro::gen_may_cancel_future;
 
-use crate::{Demand, TrBuffSegmMut, TrOutput};
+use crate::{Demand, TrBuffSegmMut, io::TrOutput};
 
 pub struct BuffSegmMutAsOutput<B, S, T>
 where
@@ -124,7 +124,7 @@ where
     for dst in parts.iter_slices_mut() {
         let dst = dst.as_mut();
         let copy_len = dst.len();
-        let src = &source[copied..copy_len];
+        let src = &source[copied..copied + copy_len];
         let src_head = (&src[0]) as *const MaybeUninit<T>;
         let dst_head = (&mut dst[0]) as *mut MaybeUninit<T>;
 

@@ -53,13 +53,18 @@ where
     }
 
     #[inline]
-    pub fn capacity(&self) -> usize {
-        self.buffer_.as_slice().len()
+    pub fn is_empty(&self) -> bool {
+        self.capacity() == self.offset_
     }
 
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.capacity() == self.offset_
+    pub fn least_count(&self) -> usize {
+        self.capacity() - self.offset_
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.buffer_.as_slice().len()
     }
 
     pub fn as_slice(&self) -> &SliceInit<B> {
@@ -169,15 +174,23 @@ where
 {
     type Item = SliceElem<B>;
 
+    #[inline]
     fn is_empty(&self) -> bool {
         SegmRef::is_empty(self)
     }
 
+    #[inline]
+    fn least_count(&self) -> usize {
+        SegmRef::least_count(self)
+    }
+
+    #[inline]
     fn capacity(&self) -> usize {
         SegmRef::capacity(self)
     }
 
     /// Iterate the unconsumed parts of the segment slice by slice.
+    #[inline]
     fn iter_slices<'a>(
         &'a self,
     ) -> impl IntoIterator<Item = &'a [Self::Item]> {

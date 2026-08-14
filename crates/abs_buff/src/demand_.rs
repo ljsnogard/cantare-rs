@@ -5,11 +5,29 @@
 
 /// Describes an interval of amount that needed to operate.
 #[derive(Clone, Debug)]
-pub struct Demand<T>(InclRange<T>)
+pub struct Demand<T>(DemandRange<T>)
 where
     T: Eq + Ord;
 
 impl Demand<usize> {
+    /// Create zero-sized range with value x.
+    ///
+    /// ## Example
+    /// ```
+    /// use abs_buff::Demand;
+    ///
+    /// let a = Demand::exactly(1);
+    /// assert!(matches!(a.min(), Option::Some(1)));
+    /// assert!(matches!(a.max(), Option::Some(1)));
+    /// ```
+    pub fn exactly(val: usize) -> Self {
+        if val < usize::MAX {
+            Demand(DemandRange::Range(val, val + 1usize))
+        } else {
+            Demand::at_least(val)
+        }
+    }
+
     pub fn try_from_usize_range(
         range: &impl RangeBounds<usize>,
     ) -> Result<Self, (Bound<&usize>, Bound<&usize>)> {
@@ -44,23 +62,13 @@ impl Demand<usize> {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        use InclRange::*;
-
-        match &self.0 {
-            Between(l, u) => l == u,
-            _ => false,
-        }
-    }
-
     pub fn len(&self) -> usize {
-        use InclRange::*;
+        use DemandRange::*;
 
         match &self.0 {
-            GtEq(l) => usize::MAX - l,
-            Lt(u) => *u,
-            Exactly(_) => 1usize,
-            Between(l, u) => u - l,
+            AtLeast(l) => usize::MAX - l,
+            LessThan(u) => *u,
+            Range(l, u) => u - l,
         }
     }
 }
@@ -69,20 +77,6 @@ impl<T> Demand<T>
 where
     T: Eq + Ord,
 {
-    /// Create zero-sized range with value x.
-    ///
-    /// ## Example
-    /// ```
-    /// use abs_buff::Demand;
-    ///
-    /// let a = Demand::exactly(1);
-    /// assert!(matches!(a.min(), Option::Some(1)));
-    /// assert!(matches!(a.max(), Option::Some(1)));
-    /// ```
-    pub const fn exactly(val: T) -> Self {
-        Demand(InclRange::Exactly(val))
-    }
-
     /// Create a range between (a, b), and the product could vary according to
     /// the actual value of a, b.
     ///
@@ -96,16 +90,18 @@ where
     /// let b = Demand::between(1, 10);
     /// assert!(matches!(b.min(), Option::Some(1)));
     /// assert!(matches!(b.max(), Option::Some(10)));
+    ///
+    /// let c = Demand::between(1,1); // will panic!
     /// ```
     pub fn between(a: T, b: T) -> Self {
-        use InclRange::*;
+        use DemandRange::*;
 
         Demand(if a < b {
-            Between(a, b)
-        } else if a == b {
-            Exactly(a)
+            Range(a, b)
+        } else if a > b {
+            Range(b, a)
         } else {
-            Between(b, a)
+            panic!("Cannot accept 0 len range.")
         })
     }
 
@@ -119,8 +115,8 @@ where
     /// assert!(matches!(a.min(), Option::Some(2)));
     /// assert!(a.max().is_none());
     /// ```
-    pub const fn no_less_than(val: T) -> Self {
-        Demand(InclRange::GtEq(val))
+    pub const fn at_least(val: T) -> Self {
+        Demand(DemandRange::AtLeast(val))
     }
 
     /// Create a range with specified max value
@@ -134,40 +130,37 @@ where
     /// assert!(a.min().is_none());
     /// ```
     pub const fn less_than(val: T) -> Self {
-        Demand(InclRange::Lt(val))
+        Demand(DemandRange::LessThan(val))
     }
 
     /// Check if a low bound is included in the demand
     pub const fn min(&self) -> Option<&T> {
-        use InclRange::*;
+        use DemandRange::*;
 
         match &self.0 {
-            GtEq(l) => Option::Some(l),
-            Exactly(x) => Option::Some(x),
-            Between(l, _)  => Option::Some(l),
+            AtLeast(l) => Option::Some(l),
+            Range(l, _)  => Option::Some(l),
             _ => Option::None,
         }
     }
 
     pub const fn max(&self) -> Option<&T> {
-        use InclRange::*;
+        use DemandRange::*;
 
         match &self.0 {
-            Lt(u) => Option::Some(u),
-            Exactly(x) => Option::Some(x),
-            Between(_, u) => Option::Some(u),
+            LessThan(u) => Option::Some(u),
+            Range(_, u) => Option::Some(u),
             _ => Option::None,
         }
     }
 
     pub const fn as_ref(&self) -> Demand<&T> {
-        use InclRange::*;
+        use DemandRange::*;
 
         match &self.0 {
-            GtEq(l) => Demand(GtEq(l)),
-            Lt(u) => Demand(Lt(u)),
-            Between(l, u) => Demand(Between(l, u)),
-            Exactly(v) => Demand(Exactly(v)),
+            AtLeast(l) => Demand(AtLeast(l)),
+            LessThan(u) => Demand(LessThan(u)),
+            Range(l, u) => Demand(Range(l, u)),
         }
     }
 
@@ -175,39 +168,36 @@ where
     where
         T: Clone,
     {
-        use InclRange::*;
+        use DemandRange::*;
 
         // 辅助：将 Exactly 统一视为 Between 以便处理
-        let left = match &self.0 {
-            Exactly(x) => Between(x.clone(), x.clone()),
-            other => other.clone(),
-        };
-        let right = match &other.0 {
-            Exactly(x) => Between(x.clone(), x.clone()),
-            other => other.clone(),
-        };
+        let left = self.0.clone();
+        let right = other.0.clone();
 
         match (left, right) {
             // 无上界 + 无上界 → 取较大的下界
-            (GtEq(a), GtEq(b)) => Some(Demand::no_less_than(cmp::max(a, b))),
+            (AtLeast(a), AtLeast(b)) => Some(Demand::at_least(cmp::max(a, b))),
 
             // 无下界 + 无下界 → 取较小的上界
-            (Lt(a), Lt(b)) => Some(Demand::less_than(cmp::min(a, b))),
+            (LessThan(a), LessThan(b)) => Some(Demand::less_than(cmp::min(a, b))),
 
             // 无下界 + 无上界 → 需满足 a <= b 才构成闭区间
-            (GtEq(a), Lt(b)) if a <= b => Some(Demand::between(a, b)),
-            (Lt(b), GtEq(a)) if a <= b => Some(Demand::between(a, b)),
+            (AtLeast(a), LessThan(b)) if a <= b => Some(Demand::between(a, b)),
+            (LessThan(b), AtLeast(a)) if a <= b => Some(Demand::between(a, b)),
 
-            // 无上界 + 闭区间
-            (GtEq(a), Between(c, d)) if a <= d => Some(Demand::between(cmp::max(a, c), d)),
-            (Between(c, d), GtEq(a)) if a <= d => Some(Demand::between(cmp::max(a, c), d)),
+            // 无上界 + 右半开区间
+            (AtLeast(a), Range(c, d)) if a <= d => Some(Demand::between(cmp::max(a, c), d)),
+            (Range(c, d), AtLeast(a)) if a <= d => Some(Demand::between(cmp::max(a, c), d)),
 
             // 无下界 + 闭区间
-            (Lt(b), Between(c, d)) if c <= b => Some(Demand::between(c, cmp::min(b, d))),
-            (Between(c, d), Lt(b)) if c <= b => Some(Demand::between(c, cmp::min(b, d))),
+            (LessThan(b), Range(c, d)) if c <= b => Some(Demand::between(c, cmp::min(b, d))),
+            (Range(c, d), LessThan(b)) if c <= b => Some(Demand::between(c, cmp::min(b, d))),
 
-            // 闭区间 + 闭区间
-            (Between(a, b), Between(c, d)) => {
+            // 半开区间 + 半开区间
+            (Range(a, b), Range(c, d)) => {
+                if b <= c  || d <= a {
+                    return None;
+                }
                 let lower = cmp::max(a, c);
                 let upper = cmp::min(b, d);
                 if lower <= upper {
@@ -229,40 +219,35 @@ where
 {
     fn start_bound(&self) -> Bound<&T> {
         match &self.0 {
-            InclRange::GtEq(x) => Bound::Included(x),
-            InclRange::Lt(_) => Bound::Unbounded,
-            InclRange::Exactly(x) => Bound::Included(x),
-            InclRange::Between(x, _) => Bound::Included(x),
+            DemandRange::AtLeast(x) => Bound::Included(x),
+            DemandRange::LessThan(_) => Bound::Unbounded,
+            DemandRange::Range(x, _) => Bound::Included(x),
         }
     }
 
     fn end_bound(&self) -> Bound<&T> {
         match &self.0 {
-            InclRange::GtEq(_) => Bound::Unbounded,
-            InclRange::Lt(x) => Bound::Excluded(x),
-            InclRange::Exactly(x) => Bound::Included(x),
-            InclRange::Between(_, x) => Bound::Excluded(x),
+            DemandRange::AtLeast(_) => Bound::Unbounded,
+            DemandRange::LessThan(x) => Bound::Excluded(x),
+            DemandRange::Range(_, x) => Bound::Excluded(x),
         }
     }
 }
 
-/// A left-closed right-closed interval, inclusive range
+/// A left-closed right-open interval, inclusive range
 #[derive(Clone, Debug)]
-pub(crate) enum InclRange<T>
+pub(crate) enum DemandRange<T>
 where
     T: Eq + Ord,
 {
     /// greater or equal
-    GtEq(T),
+    AtLeast(T),
 
     /// less than
-    Lt(T),
-
-    /// equals to
-    Exactly(T),
+    LessThan(T),
 
     /// [a, b)
-    Between(T, T),
+    Range(T, T),
 }
 
 #[cfg(test)]
@@ -470,8 +455,8 @@ mod compromise_tests_ {
     #[test]
     fn compromise_both_no_less_than() {
         // [5, ∞) ∩ [10, ∞) = [10, ∞)
-        let a = Demand::no_less_than(5);
-        let b = Demand::no_less_than(10);
+        let a = Demand::at_least(5);
+        let b = Demand::at_least(10);
         let c = a.compromise(&b).unwrap();
         assert_eq!(bounds(&c), (Some(10), None));
 
@@ -495,13 +480,13 @@ mod compromise_tests_ {
     #[test]
     fn compromise_no_less_than_and_no_more_than() {
         // [5, ∞) ∩ (-∞, 10] = [5, 10]
-        let a = Demand::no_less_than(5);
+        let a = Demand::at_least(5);
         let b = Demand::less_than(10);
         let c = a.compromise(&b).unwrap();
         assert_eq!(bounds(&c), (Some(5), Some(10)));
 
         // 不相交： [15, ∞) ∩ (-∞, 10] = None
-        let a2 = Demand::no_less_than(15);
+        let a2 = Demand::at_least(15);
         let b2 = Demand::less_than(10);
         assert!(a2.compromise(&b2).is_none());
     }
@@ -509,13 +494,13 @@ mod compromise_tests_ {
     #[test]
     fn compromise_no_less_than_and_between() {
         // [5, ∞) ∩ [1, 8] = [5, 8]
-        let a = Demand::no_less_than(5);
+        let a = Demand::at_least(5);
         let b = Demand::between(1, 8);
         let c = a.compromise(&b).unwrap();
         assert_eq!(bounds(&c), (Some(5), Some(8)));
 
         // 不相交： [15, ∞) ∩ [1, 8] = None
-        let a2 = Demand::no_less_than(15);
+        let a2 = Demand::at_least(15);
         assert!(a2.compromise(&b).is_none());
 
         // 对称性
@@ -538,52 +523,53 @@ mod compromise_tests_ {
 
     #[test]
     fn compromise_between_and_between() {
-        // [1, 10] ∩ [5, 15] = [5, 10]
+        // [1, 10) ∩ [5, 15) = [5, 10)
         let a = Demand::between(1, 10);
         let b = Demand::between(5, 15);
         let c = a.compromise(&b).unwrap();
         assert_eq!(bounds(&c), (Some(5), Some(10)));
 
-        // 恰好相接： [1, 5] ∩ [5, 10] = [5,5] -> Exactly(5)
+        // 恰好相接： [1, 5) ∩ [5, 10) = []
         let a2 = Demand::between(1, 5);
         let b2 = Demand::between(5, 10);
-        let c2 = a2.compromise(&b2).unwrap();
-        assert_eq!(bounds(&c2), (Some(5), Some(5)));
+        assert!(a2.compromise(&b2).is_none());
+        assert!(b2.compromise(&a2).is_none());
 
         // 不相交： [1, 4] ∩ [6, 10] = None
         let a3 = Demand::between(1, 4);
         let b3 = Demand::between(6, 10);
         assert!(a3.compromise(&b3).is_none());
+        assert!(b3.compromise(&a3).is_none())
     }
 
     #[test]
     fn compromise_involving_exactly() {
-        // Exactly(5) 被视为 [5,5]
+        // Exactly(5) 被视为 [5,6)
         let exact = Demand::exactly(5);
 
-        // Exactly(5) ∩ [3, 8] = Exactly(5)
+        // Exactly(5) ∩ [3, 8) = [5, 6)
         let range = Demand::between(3, 8);
         let c1 = exact.compromise(&range).unwrap();
-        assert_eq!(bounds(&c1), (Some(5), Some(5)));
+        assert_eq!(bounds(&c1), (Some(5), Some(6)));
 
         // Exactly(5) ∩ [6, 10] = None
         let range2 = Demand::between(6, 10);
         assert!(exact.compromise(&range2).is_none());
 
-        // Exactly(5) ∩ (-∞, 10] = Exactly(5)
+        // Exactly(5) ∩ (-∞, 10] = [5, 6)
         let upper = Demand::less_than(10);
         let c2 = exact.compromise(&upper).unwrap();
-        assert_eq!(bounds(&c2), (Some(5), Some(5)));
+        assert_eq!(bounds(&c2), (Some(5), Some(6)));
 
         // Exactly(5) ∩ [5, ∞) = Exactly(5)
-        let lower = Demand::no_less_than(5);
+        let lower = Demand::at_least(5);
         let c3 = exact.compromise(&lower).unwrap();
-        assert_eq!(bounds(&c3), (Some(5), Some(5)));
+        assert_eq!(bounds(&c3), (Some(5), Some(6)));
 
         // Exactly(5) ∩ Exactly(5) = Exactly(5)
         let exact2 = Demand::exactly(5);
         let c4 = exact.compromise(&exact2).unwrap();
-        assert_eq!(bounds(&c4), (Some(5), Some(5)));
+        assert_eq!(bounds(&c4), (Some(5), Some(6)));
 
         // Exactly(5) ∩ Exactly(6) = None
         let exact3 = Demand::exactly(6);
@@ -600,7 +586,7 @@ mod compromise_tests_ {
         let c = full.compromise(&a).unwrap();
         assert_eq!(bounds(&c), (Some(10), Some(20)));
 
-        let b = Demand::no_less_than(30);
+        let b = Demand::at_least(30);
         let c2 = full.compromise(&b).unwrap();
         assert_eq!(bounds(&c2), (Some(30), Some(usize::MAX)));
     }
@@ -612,11 +598,11 @@ mod compromise_tests_ {
         let b = Demand::between(6, 10);
         assert!(a.compromise(&b).is_none());
 
-        let c = Demand::no_less_than(10);
+        let c = Demand::at_least(10);
         let d = Demand::less_than(5);
         assert!(c.compromise(&d).is_none());
 
-        let e = Demand::no_less_than(8);
+        let e = Demand::at_least(8);
         let f = Demand::between(1, 5);
         assert!(e.compromise(&f).is_none());
 

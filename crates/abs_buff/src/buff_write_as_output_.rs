@@ -12,7 +12,7 @@ use gen_mcf_macro::gen_may_cancel_future;
 
 use crate::{
     buff_segm_as_output_::{buff_segm_mut_write, buff_segm_mut_write_cloned},
-    Demand, TrBuffWrite, TrOutput,
+    Demand, TrBuffWrite, io::TrOutput,
 };
 
 /// The default return type of `fn as_output()` in `TrBuffWrite`.

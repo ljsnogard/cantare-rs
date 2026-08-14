@@ -3,7 +3,10 @@
 use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
-use crate::{BuffPeekAsInput, TrBuffSegmRef, TrInput};
+use crate::{
+    io::TrInput,
+    BuffPeekAsInput, TrBuffSegmRef,
+};
 
 /// A kind of buffer that owns the memory for peeking the received data without
 /// consuming them.

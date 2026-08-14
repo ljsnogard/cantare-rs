@@ -101,7 +101,7 @@ where
     for src in parts.iter_slices() {
         let src = src.as_ref();
         let copy_len = src.len();
-        let dst = &mut target[copied..copy_len];
+        let dst = &mut target[copied..copied + copy_len];
         let src_head = (&src[0]) as *const T;
         let dst_head = (&mut dst[0]) as *mut MaybeUninit<T> as *mut T;
 

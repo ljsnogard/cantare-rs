@@ -1,10 +1,12 @@
-﻿use core::{
-    mem::MaybeUninit,
-    ops::Try,
+﻿use core::{mem::MaybeUninit, ops::Try};
+
+use crate::{
+    io::{TrInput, TrOutput},
+    BuffSegmRefAsInput, BuffSegmMutAsOutput, Demand,
 };
 
-use crate::{BuffSegmRefAsInput, BuffSegmMutAsOutput, Demand, TrInput, TrOutput};
-
+/// Represent a sequence of slices who are logically the same array but
+/// physically not.
 pub trait TrBuffSegmView {
     type Item: Sized;
 
@@ -14,6 +16,12 @@ pub trait TrBuffSegmView {
     /// Returns the capacity of the segment, no matter the elements are
     /// consumed or not.
     fn capacity(&self) -> usize;
+
+    /// The minimum count of unconsumed items. For a segment view that
+    /// has only ONE PIECE, this is the unconsumed item count. For those
+    /// have more than once slice, this is the unconsumed item count for
+    /// the first slice.
+    fn least_count(&self) -> usize;
 
     /// Iterate the unconsumed parts of the segment slice by slice.
     fn iter_slices<'a>(
@@ -26,9 +34,12 @@ pub trait TrBuffSegmRef<T>
 where
     Self: TrBuffSegmView<Item = T>,
 {
-    /// Take a slice starting from the beginning out of this segment, length
-    /// specified by the demand argument, reducing the length of this segment
+    /// Take a slice starting from the beginning of the unconsumed part, length
+    /// suggested by the demand argument. Will reduce the length of the segment
     /// when the taken slice drops.
+    ///
+    /// The amount of the reducing will be the size of taken slice no matter if
+    /// the items in it are actually moved or not. No drop. So this may leak.
     fn take_segm_ref<'a>(
         &'a mut self,
         demand: &Demand<usize>,
@@ -49,9 +60,12 @@ pub trait TrBuffSegmMut<T>
 where
     Self: TrBuffSegmView<Item = MaybeUninit<T>>,
 {
-    /// Take a slice starting from the beginning out of this segment, length
-    /// specified by the demand argument, reducing the length of this segment
+    /// Take a slice starting from the beginning of the unconsumed part, length
+    /// suggested by the demand argument. Will reduce the length of the segment
     /// when the taken slice drops.
+    ///
+    /// The amount of the reducing will be the size of taken slice no matter if
+    /// the items in it are actually moved or not. No drop. So this may leak.
     fn take_segm_mut<'a>(
         &'a mut self,
         demand: &Demand<usize>,

@@ -10,7 +10,8 @@ use gen_mcf_macro::gen_may_cancel_future;
 
 use crate::{
     buff_segm_as_input_::buff_segm_ref_read,
-    Demand, TrBuffRead, TrInput,
+    io::TrInput,
+    Demand, TrBuffRead,
 };
 
 pub struct BuffReadAsInput<B, R, T>(B, PhantomData<R>, PhantomData<[T]>)
