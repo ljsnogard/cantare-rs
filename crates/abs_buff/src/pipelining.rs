@@ -11,7 +11,7 @@ use gen_mcf_macro::gen_may_cancel_future;
 
 use crate::{Demand, TrBuffRead, TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrBuffWrite};
 
-pub enum ChainingIoResult<W, R, T>
+pub enum PipeIoResult<W, R, T>
 where
     W: TrBuffWrite<T>,
     R: TrBuffRead<T>,
@@ -31,7 +31,7 @@ where
 }
 
 /// Moves data from R to W.
-pub struct Chain<'a, W, R, T = u8>
+pub struct Pipe<'a, W, R, T = u8>
 where
     W: TrBuffWrite<T>,
     R: TrBuffRead<T>,
@@ -41,7 +41,7 @@ where
     _use_t_: PhantomData<fn() -> [T]>,
 }
 
-impl<'a, W, R, T> Chain<'a, W, R, T>
+impl<'a, W, R, T> Pipe<'a, W, R, T>
 where
     W: TrBuffWrite<T>,
     R: TrBuffRead<T>,
@@ -50,45 +50,45 @@ where
         buff_write: &'a mut W,
         buff_read: &'a mut R,
     ) -> Self {
-        Chain {
+        Pipe {
             buff_w_: buff_write,
             buff_r_: buff_read,
             _use_t_: PhantomData,
         }
     }
 
-    pub fn chain_io_async<'f>(&'f mut self) -> ChainIoAsync<'f, W, R, T> {
-        ChainIoAsync(&PhantomData, self.buff_w_, self.buff_r_)
+    pub fn pipe_async<'f>(&'f mut self) -> PipeIoAsync<'f, W, R, T> {
+        PipeIoAsync(&PhantomData, self.buff_w_, self.buff_r_)
     }
 }
 
-#[gen_may_cancel_future(ChainIo)]
-async fn chain_io_async_<'f, W, R, T, C>(
+#[gen_may_cancel_future(PipeIo)]
+async fn pipe_async_<'f, W, R, T, C>(
     _no_t_: &'f PhantomData<T>, // This is a work-around for macro gen_may_cancel_future.
     buff_w: &'f mut W,
     buff_r: &'f mut R,
     cancel: &'f mut C,
-) -> ChainingIoResult<W, R, T>
+) -> PipeIoResult<W, R, T>
 where
     W: TrBuffWrite<T>,
     R: TrBuffRead<T>,
     C: TrCancellationToken + Clone,
 {
     if mem::size_of::<T>() == 0 {
-        return ChainingIoResult::NoOps;
+        return PipeIoResult::NoOps;
     }
     let mut c = 0usize;
     let mut tx_cancel = cancel.clone();
     let mut rx_cancel = cancel.clone();
     loop {
         if buff_w.is_blocked() {
-            return ChainingIoResult::TxBlocked(c);
+            return PipeIoResult::TxBlocked(c);
         }
         if c == usize::MAX {
-            return ChainingIoResult::SizeLimit(c);
+            return PipeIoResult::SizeLimit(c);
         }
         if buff_r.is_drained() {
-            return ChainingIoResult::RxDrained(c);
+            return PipeIoResult::RxDrained(c);
         }
         // Read a segment first, then write it out in write-segment-sized
         // pieces. Every borrowed parent segment is consumed *by value* and
@@ -104,7 +104,7 @@ where
             .may_cancel_with(&mut rx_cancel)
             .await;
         if r_res.contains_right() {
-            return ChainingIoResult::RxErr {
+            return PipeIoResult::RxErr {
                 count: c,
                 err: r_res.pick_right().expect("[Chain] contains_right"),
             };
@@ -129,7 +129,7 @@ where
                 // failure were committed on the write side (they cannot be
                 // rolled back), so a retry after a *cancellation* would
                 // duplicate them.
-                return ChainingIoResult::TxErr {
+                return PipeIoResult::TxErr {
                     count: c,
                     err: w_res.pick_right().expect("[Chain] contains_right"),
                 };
