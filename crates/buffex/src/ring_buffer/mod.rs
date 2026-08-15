@@ -80,6 +80,9 @@ pub use tx_::RingTx;
 #[cfg(feature = "compio")]
 mod compio_;
 
+#[cfg(feature = "compio")]
+pub use compio_::{RecvSlices, SendSlices};
+
 #[cfg(feature = "tokio")]
 mod tokio_;
 

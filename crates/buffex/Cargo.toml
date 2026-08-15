@@ -22,7 +22,7 @@ segm_buff = { path = "../segm_buff" }
 # The core ring buffer never depends on any async runtime. These features
 # only add `AsyncRead`/`AsyncWrite` trait implementations for the selected
 # framework on top of the same core logic.
-compio = { version = "0.19.*", optional = true, features = ["fs", "macros", "time"] }
+compio = { version = "0.19.*", optional = true, features = ["fs", "macros", "time", "net"] }
 tokio = { version = "1", optional = true, features = ["io-util"] }
 futures-io = { version = "0.3", optional = true }
 
@@ -37,6 +37,11 @@ tokio = ["dep:tokio"]
 
 # Support `futures_io::AsyncRead` / `futures_io::AsyncWrite` (smol & friends).
 smol = ["dep:futures-io"]
+
+[[bench]]
+name = "unix_stream_bandwidth"
+harness = false
+required-features = ["compio"]
 
 [dev-dependencies]
 env_logger = { workspace = true }

@@ -17,6 +17,9 @@ extern crate std;
 #[cfg(test)]
 use std::{boxed::Box, vec};
 
+#[cfg(all(feature = "compio", unix))]
+mod unix_stream_;
+
 mod frameworks_;
 mod mini_exec;
 mod scenario_;
