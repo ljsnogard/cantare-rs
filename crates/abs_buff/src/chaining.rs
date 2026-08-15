@@ -1,5 +1,5 @@
 use core::{
-    mem::{self, ManuallyDrop, MaybeUninit},
+    mem::{self, MaybeUninit},
     marker::PhantomData,
     ops::{ControlFlow, Try},
     ptr,
@@ -87,75 +87,64 @@ where
         if c == usize::MAX {
             return ChainingIoResult::SizeLimit(c);
         }
-        let w_demand = Demand::less_than(usize::MAX - c);
-        let mut w_res = buff_w
-            .write_async(&w_demand)
-            .may_cancel_with(&mut tx_cancel)
+        if buff_r.is_drained() {
+            return ChainingIoResult::RxDrained(c);
+        }
+        // Read a segment first, then write it out in write-segment-sized
+        // pieces. This guarantees every borrowed write segment is *fully*
+        // consumed before it drops: with the "borrow N commits N" contract of
+        // the segment buffers, a partially filled write segment would commit
+        // its whole capacity, leaking stale bytes to the output.
+        let r_demand = Demand::less_than(usize::MAX - c);
+        let mut r_res = buff_r
+            .read_async(&r_demand)
+            .may_cancel_with(&mut rx_cancel)
             .await;
-        let opt_tx_segm = w_res.as_mut().pick_left();
+        let opt_rx_segm = r_res.as_mut().pick_left();
 
-        if let Option::Some(tx_segm) = opt_tx_segm {
-            let tx_buf_capacity = tx_segm.least_count();
+        if let Option::Some(rx_segm) = opt_rx_segm {
+            let rx_buf_capacity = rx_segm.least_count();
             let mut cc = 0usize;
-            loop {
-                if cc >= tx_buf_capacity {
-                    break;
-                }
-                if buff_r.is_drained() {
-                    return ChainingIoResult::RxDrained(c);
-                }
-                let r_demand = Demand::less_than(tx_buf_capacity - cc);
-                // `TrMayCancel::may_cancel_with` stores the cancel token borrow
-                // for the whole data borrow of the operation, so `cancel` is
-                // exclusively held by the write above while its borrowed output
-                // (`w_res` and the segments taken from it) lives, i.e. across
-                // this whole copy loop. The copy loop therefore runs with a
-                // non-cancellable token; cancellation is still observed by the
-                // write operation at the top of each iteration.
-                let mut r_res = buff_r
-                    .read_async(&r_demand)
-                    .may_cancel_with(&mut rx_cancel)
+            while cc < rx_buf_capacity {
+                let w_demand = Demand::less_than(rx_buf_capacity - cc);
+                let mut w_res = buff_w
+                    .write_async(&w_demand)
+                    .may_cancel_with(&mut tx_cancel)
                     .await;
-
-                let opt_rx_segm = r_res.as_mut().pick_left();
-                if let Option::Some(rx_segm) = opt_rx_segm {
-                    let rx_buf_capacity = rx_segm.least_count();
-                    // this is guaranteed by the semantic of `least_count()`
-                    assert!(tx_buf_capacity >= rx_buf_capacity);
-                    let ControlFlow::Continue(segm_dst) =
-                        tx_segm.take_segm_mut(&Demand::less_than(rx_buf_capacity)).branch() else {
-                            todo!()
+                let opt_tx_segm = w_res.as_mut().pick_left();
+                if let Option::Some(segm_dst) = opt_tx_segm {
+                    let w_len = segm_dst.least_count();
+                    // The read segment has at least `w_len` unconsumed items
+                    // left (its total remaining is `rx_buf_capacity - cc` and
+                    // the write borrow is no larger than that), so the child
+                    // is exactly `w_len` bytes — the full write borrow.
+                    let ControlFlow::Continue(segm_src) = rx_segm
+                        .take_segm_ref(&Demand::less_than(w_len))
+                        .branch()
+                    else {
+                        unreachable!("[Chain] the read segment ran out");
                     };
-                    let ControlFlow::Continue(segm_src) =
-                        rx_segm.take_segm_ref(&Demand::exactly(rx_buf_capacity)).branch() else {
-                            todo!()
-                    };
-                    let mut segm_dst = ManuallyDrop::new(segm_dst);
-                    let mut segm_src = ManuallyDrop::new(segm_src);
                     let dst_it = segm_dst.iter_slices_mut().into_iter();
                     let src_it = segm_src.iter_slices().into_iter();
-                    let copied_len;
-                    unsafe {
-                        copied_len = copy_data_(src_it, dst_it);
-                        // dropping both segm will now be safe and correctly increasing the consumed count.
-                        ManuallyDrop::drop(&mut segm_dst);
-                        ManuallyDrop::drop(&mut segm_src);
-                    }
+                    // SAFETY: the source and destination regions never
+                    // overlap (they come from two different buffers).
+                    let copied_len = unsafe { copy_data_(src_it, dst_it) };
+                    drop(segm_src); // advance the read segment's offset
                     cc += copied_len;
                     c += copied_len;
                 }
-                if let Option::Some(rx_err) = r_res.pick_right() {
-                    return ChainingIoResult::RxErr {
+                if let Option::Some(tx_err) = w_res.pick_right() {
+                    return ChainingIoResult::TxErr {
                         count: c,
-                        err: rx_err,
+                        err: tx_err,
                     };
                 }
             }
         }
-        if let Option::Some(tx_err) = w_res.pick_right() {
-            return ChainingIoResult::TxErr {
+        if let Option::Some(rx_err) = r_res.pick_right() {
+            return ChainingIoResult::RxErr {
                 count: c,
-                err: tx_err,
+                err: rx_err,
             };
         }
     }

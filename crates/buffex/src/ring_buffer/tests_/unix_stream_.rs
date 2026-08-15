@@ -112,13 +112,7 @@ fn unix_stream_roundtrip() {
 /// Echo server built on `abs_buff::chaining::Chain`: the server moves data
 /// from its read ring to its write ring; the client sends and reads back the
 /// echo. This exercises the `Chain` machinery over the ring-buffer segments.
-///
-/// `#[ignore]`d: `abs_buff::chaining::Chain` currently cannot take the full
-/// readable segment (`Demand::exactly(x)` has no intersection with the
-/// segment's `less_than(len)` availability, and `Demand::compromise` panics
-/// on the touching boundary); see the findings reported for `chaining.rs`.
 #[test]
-#[ignore = "abs_buff::chaining::Chain hits a Demand::compromise boundary bug"]
 fn unix_stream_echo_via_chain() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
         const TOTAL: usize = 1 << 20; // 1 MiB
@@ -143,37 +137,55 @@ fn unix_stream_echo_via_chain() {
             buffered.shutdown().await;
         });
 
-        // --- client: send TOTAL bytes, then read the echo until EOF ---
+        // --- client: interleave sends and receives through the *try*
+        // interfaces. A send-then-read client would deadlock on the
+        // full-duplex backpressure (the server's echo write fills up once the
+        // client stops reading); the try-based loop never parks, so the
+        // background flush/fill tasks keep the pipe moving. ---
         let mut buffered = BufferedUnixStream::new(stream, 4096);
-        let n = write_bytes(&mut buffered, 0, TOTAL).await;
-        assert_eq!(n, TOTAL);
-        buffered.close();
-
-        // read the echo back and verify every byte
+        let mut sent = 0usize;
+        let mut recvd = 0usize;
         let mut got = Vec::new();
         loop {
-            let demand = Demand::less_than(997);
-            let x = buffered
-                .read_async(&demand)
-                .may_cancel_with(NonCancellableToken::shared_mut())
-                .await;
-            match x.pick_left() {
-                Some(segm) => {
+            if sent < TOTAL {
+                let demand = Demand::less_than(core::cmp::min(1009, TOTAL - sent));
+                let x = buffered.try_write(&demand);
+                if let Some(mut segm) = x.pick_left() {
+                    let len = segm.least_count();
+                    let mut seen = 0usize;
+                    for dst in segm.iter_slices_mut() {
+                        for (i, slot) in dst.iter_mut().enumerate() {
+                            slot.write((sent + seen + i) as u8);
+                        }
+                        seen += dst.len();
+                    }
+                    drop(segm);
+                    sent += len;
+                }
+            }
+            if recvd < TOTAL {
+                let demand = Demand::less_than(core::cmp::min(997, TOTAL - recvd));
+                let x = buffered.try_read(&demand);
+                if let Some(segm) = x.pick_left() {
+                    let len = segm.least_count();
                     for src in segm.iter_slices() {
                         got.extend_from_slice(src);
                     }
                     drop(segm);
-                }
-                None => {
-                    // Closing (EOF) is expected once the server is done.
-                    break;
+                    recvd += len;
                 }
             }
+            if sent >= TOTAL && recvd >= TOTAL {
+                break;
+            }
+            futures_lite::future::yield_now().await;
         }
+        assert_eq!(sent, TOTAL);
         assert_eq!(got.len(), TOTAL, "echo must return exactly the sent bytes");
         for (i, b) in got.iter().enumerate() {
             assert_eq!(*b, i as u8, "[echo client] mismatch at {i}");
         }
+        buffered.shutdown().await;
 
         server.await.expect("server task");
     });
