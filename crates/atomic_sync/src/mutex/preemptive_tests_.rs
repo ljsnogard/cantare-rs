@@ -4,15 +4,14 @@
 //! ([`MsbAsMutexSignal`], [`PtrAsMutexSignal`]) and of the lock state
 //! machine, without modifying the implementation.
 //!
-//! Two of the tests at the bottom are `#[ignore]`d because they demonstrate a
-//! livelock in [`Acquire::try_spin_acquire_`] (the code path behind
+//! The two contention tests at the bottom are regression tests for a livelock
+//! that used to live in [`Acquire::try_spin_acquire_`] (the code path behind
 //! [`MayBreakLock::wait`] / [`MayBreakLock::may_break_with`]): when another
-//! thread holds the lock, the spin loop keeps passing a stale "acquired"
-//! value to `try_once_compare_exchange_weak`, which keeps answering
-//! `CmpxchResult::Unexpected`, and the loop `continue`s forever without
-//! reloading the state or consulting the cancellation token. Run them with
-//! `cargo test -p atomic_sync -- --ignored --nocapture` (each will spin for a
-//! bounded watchdog interval before failing, and leak one spinner thread).
+//! thread held the lock, the spin loop kept passing a stale "acquired" value
+//! to `try_once_compare_exchange_weak`, which kept answering
+//! `CmpxchResult::Unexpected`, and the loop `continue`d forever without
+//! reloading the state or consulting the cancellation token. They now verify
+//! that the loop reloads the state and honours the token.
 
 use std::{
     boxed::Box,
@@ -184,17 +183,17 @@ fn into_inner_roundtrip() {
 // -------------------------------------------------------------------------
 
 #[test]
-fn may_break_free_lock_ignores_already_cancelled_token() {
-    // When the lock is immediately available, the spin loop succeeds before
-    // the cancellation token is ever consulted, so a pre-cancelled token
-    // still yields the guard. This pins down the current (arguably
-    // permissive) behavior.
+fn may_break_precancelled_token_never_acquires() {
+    // `TrMayBreak` documents that the job must poll the cancellation token
+    // for signal; a pre-cancelled token must therefore never acquire the
+    // lock, even when it is immediately available.
     let mutex = SpinningMutexOwned::<usize>::new_owned(3);
     let mut acq = mutex.acquire();
     let mut token = CancelledToken::new();
     assert!(token.is_cancelled());
-    let g = acq.lock().may_break_with(&mut token).expect("guard");
-    assert_eq!(*g, 3);
+    let g = acq.lock().may_break_with(&mut token);
+    assert!(g.is_none(), "pre-cancelled token must not acquire");
+    assert!(!mutex.is_acquired());
 }
 
 // -------------------------------------------------------------------------
@@ -254,12 +253,12 @@ where
 }
 
 #[test]
-#[ignore = "demonstrates the try_spin_acquire_ livelock (run with --ignored)"]
-fn lock_wait_livelocks_under_contention() {
-    // Thread A holds the lock for a while. Thread B calls `lock().wait()`.
-    // BUG: B's first state load sees "acquired"; every subsequent
-    // `try_once_compare_exchange_weak` answers `Unexpected`, and the loop
-    // `continue`s with the same stale value forever — even after A releases.
+fn lock_wait_acquires_after_holder_releases() {
+    // Regression: under contention the spin loop used to pass a stale
+    // "acquired" value to `try_once_compare_exchange_weak`, which answered
+    // `CmpxchResult::Unexpected` forever, so `lock().wait()` never acquired
+    // even after the holder released. The loop must reload the state and
+    // succeed once the lock becomes free.
     let mutex = Arc::new(SpinningMutexOwned::<usize>::new_owned(0));
     let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -298,12 +297,11 @@ fn lock_wait_livelocks_under_contention() {
 }
 
 #[test]
-#[ignore = "demonstrates the try_spin_acquire_ livelock (run with --ignored)"]
-fn may_break_with_cancelled_token_livelocks_while_held() {
-    // A pre-cancelled token must make `may_break_with` return `None`
-    // immediately. When another thread holds the lock, the spin loop never
-    // consults the token (the `Unexpected` path `continue`s before the
-    // `cancel.is_cancelled()` check), so the caller spins forever.
+fn may_break_with_cancelled_token_returns_none_while_held() {
+    // Regression: a pre-cancelled token must make `may_break_with` return
+    // `None` promptly. The spin loop used to skip the cancellation check on
+    // the `Unexpected` path and spin forever while another thread held the
+    // lock; now the token is polled on every iteration.
     let mutex = Arc::new(SpinningMutexOwned::<usize>::new_owned(0));
     let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
