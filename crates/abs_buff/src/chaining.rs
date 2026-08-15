@@ -103,9 +103,16 @@ where
                     return ChainingIoResult::RxDrained(c);
                 }
                 let r_demand = Demand::less_than(tx_buf_capacity - cc);
+                // `TrMayCancel::may_cancel_with` stores the cancel token borrow
+                // for the whole data borrow of the operation, so `cancel` is
+                // exclusively held by the write above while its borrowed output
+                // (`w_res` and the segments taken from it) lives, i.e. across
+                // this whole copy loop. The copy loop therefore runs with a
+                // non-cancellable token; cancellation is still observed by the
+                // write operation at the top of each iteration.
                 let mut r_res = buff_r
                     .read_async(&r_demand)
-                    .may_cancel_with(cancel)
+                    .may_cancel_with(abs_cancel::NonCancellableToken::shared_mut())
                     .await;
 
                 let opt_rx_segm = r_res.as_mut().pick_left();

@@ -1,4 +1,4 @@
-﻿use core::{
+use core::{
     future::{self, IntoFuture},
     ops::Try,
 };
@@ -20,7 +20,12 @@ where
         cancel: &'f mut C,
     ) -> impl IntoFuture<Output = Self::MayCancelOutput>
     where
-        Self: 'f;
+        Self: 'f,
+        // 当 `MayCancelOutput` 携带生命周期（即返回类型借用了 `Self` 的数据）时，
+        // 生成的 future 需要把 cancel token 的借用以 `&'a mut C` 的形式保存，
+        // 因此要求 cancel 借用存活期不短于 `'a`。没有这一条，宏生成的
+        // `may_cancel_with` 无法用 `&'f mut C` 构造出输出类型引用 `'a` 的 future。
+        'f: 'a;
 }
 
 

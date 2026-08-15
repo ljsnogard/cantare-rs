@@ -1,4 +1,4 @@
-﻿#[allow(dead_code)]
+#[allow(dead_code)]
 mod tests_ {
     use abs_cancel::TrCancellationToken;
 
@@ -85,6 +85,8 @@ mod tests_ {
         ) -> impl ::core::future::IntoFuture<Output = Self::MayCancelOutput>
         where
             Self: 'cancel_,
+            // 与 `abs_cancel::TrMayCancel::may_cancel_with` 的 `'f: 'a` 约束对应。
+            'cancel_: 'c,
         {
             DoThingFuture {
                 params_: ::core::mem::MaybeUninit::new(self),

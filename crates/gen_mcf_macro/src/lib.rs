@@ -227,6 +227,11 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
 
     let cancel_type_lt_replaced = transform_type_outer_lifetime(cancel_type.as_ref().unwrap(), &last_lt);
 
+    // 返回类型中出现的、由用户声明的生命周期，统一替换为 `last_lt`，
+    // 使其能够在生成的各 impl 中表达（生成的类型只携带 `last_lt` 这个生命周期参数）。
+    // `'static`/`'_`/匿名生命周期保持不变。
+    let output_ty_transformed = transform_output_lifetimes(output_ty, &lifetimes_all, &last_lt);
+
     let tuple_idents: Vec<Ident> = field_indices
         .iter()
         .map(|idx| format_ident!("p{}", idx.index))
@@ -234,6 +239,11 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
     // 只生成 (p0, p1, ...) 部分
     let tuple_pattern = quote! { ( #(#tuple_idents),* ) };
     let async_struct_destruct = quote! { #async_struct::<#generic_params_single_lt_no_cancel>#tuple_pattern };
+
+    // `IntoFuture::IntoFuture` 的类型：`Future<'c, A, B, ..., NonCancellableToken>`。
+    let into_future_ty = quote! {
+        #future_struct<#generic_params_single_lt_no_cancel, abs_cancel::NonCancellableToken>
+    };
 
     let expanded = quote! {
         // panic!("input_fn 是: {:#?}", input_fn);
@@ -258,8 +268,8 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         impl<#generic_params_single_lt_no_cancel> ::core::future::IntoFuture for #async_struct<#generic_params_single_lt_no_cancel>
         #where_clause_no_cancel_no_lt
         {
-            type IntoFuture = #future_struct<#generic_params_single_lt_no_cancel, abs_cancel::NonCancellableToken>;
-            type Output = #output_ty;
+            type IntoFuture = #into_future_ty;
+            type Output = #output_ty_transformed;
 
             fn into_future(self) -> Self::IntoFuture {
                 #future_struct {
@@ -274,7 +284,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         impl<#generic_params_single_lt_no_cancel> abs_cancel::TrMayCancel<#last_lt> for #async_struct<#generic_params_single_lt_no_cancel>
         #where_clause_no_cancel_no_lt
         {
-            type MayCancelOutput = #output_ty;
+            type MayCancelOutput = #output_ty_transformed;
 
             fn may_cancel_with<'cancel_, C: abs_cancel::TrCancellationToken>(
                 self,
@@ -282,6 +292,10 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
             ) -> impl ::core::future::IntoFuture<Output = Self::MayCancelOutput>
             where
                 Self: 'cancel_,
+                // 与 `abs_cancel::TrMayCancel::may_cancel_with` 的 `'f: 'a` 约束对应：
+                // cancel token 的借用必须存活不短于数据生命周期 `last_lt`，
+                // 否则无法以 `&#last_lt mut C` 的形式保存到生成的 future 里。
+                'cancel_: #last_lt,
             {
                 #future_struct {
                     params_: ::core::mem::MaybeUninit::new(self),
@@ -295,7 +309,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         impl<#generic_params_single_lt_all> ::core::future::Future for #future_struct<#generic_params_single_lt_all>
         #where_clause_no_lt
         {
-            type Output = #output_ty;
+            type Output = #output_ty_transformed;
 
             fn poll(
                 self: ::core::pin::Pin<&mut Self>,
@@ -329,7 +343,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         impl<#generic_params_single_lt_all> ::core::ops::AsyncFnOnce<()> for #state_struct<#generic_params_single_lt_all>
         #where_clause_no_lt
         {
-            type Output = #output_ty;
+            type Output = #output_ty_transformed;
             type CallOnceFuture = impl ::core::future::Future<Output = Self::Output>;
 
             extern "rust-call" fn async_call_once(self, _: ()) -> Self::CallOnceFuture {
@@ -635,4 +649,102 @@ fn transform_type_outer_lifetime(ty: &Type, new_lt: &Lifetime) -> Type {
         // 其他非复合类型（路径、原始指针等）不改变
         _ => ty.clone(),
     }
+}
+
+/// 将返回类型中由用户声明的生命周期（`user_lifetimes` 中除 `last_lt` 之外的生命周期）
+/// 统一替换为 `last_lt`，使得返回类型能够在只携带 `last_lt` 一个生命周期参数的
+/// 生成类型/impl 中表达出来。
+///
+/// 与 [`transform_type_outer_lifetime`] 不同，这里不会改动 `'static`、`'_`
+/// 以及省略（匿名）的生命周期：`-> &'static str` 之类的返回类型必须原样保留，
+/// 否则会把实际输出 `&'static str` 与声称的输出类型弄得不一致。
+fn transform_output_lifetimes(
+    ty: &Type,
+    user_lifetimes: &[Lifetime],
+    last_lt: &Lifetime,
+) -> Type {
+    fn repl(ty: &Type, user_lifetimes: &[Lifetime], last_lt: &Lifetime) -> Type {
+        let is_user_lt = |lt: &Lifetime| {
+            lt.ident != last_lt.ident
+                && user_lifetimes.iter().any(|u| u.ident == lt.ident)
+        };
+        match ty {
+            Type::Reference(ty_ref) => {
+                let mut new_ref = ty_ref.clone();
+                if let Option::Some(lt) = &ty_ref.lifetime
+                    && is_user_lt(lt)
+                {
+                    new_ref.lifetime = Option::Some(last_lt.clone());
+                }
+                new_ref.elem = Box::new(repl(&ty_ref.elem, user_lifetimes, last_lt));
+                Type::Reference(new_ref)
+            }
+            Type::Tuple(tuple) => {
+                let new_elems = tuple
+                    .elems
+                    .iter()
+                    .map(|elem| repl(elem, user_lifetimes, last_lt))
+                    .collect();
+                Type::Tuple(syn::TypeTuple {
+                    paren_token: tuple.paren_token,
+                    elems: new_elems,
+                })
+            }
+            Type::Array(arr) => {
+                let new_elem = repl(&arr.elem, user_lifetimes, last_lt);
+                Type::Array(TypeArray {
+                    bracket_token: arr.bracket_token,
+                    elem: Box::new(new_elem),
+                    len: arr.len.clone(),
+                    semi_token: arr.semi_token,
+                })
+            }
+            Type::Slice(slice) => {
+                let new_elem = repl(&slice.elem, user_lifetimes, last_lt);
+                Type::Slice(syn::TypeSlice {
+                    bracket_token: slice.bracket_token,
+                    elem: Box::new(new_elem),
+                })
+            }
+            Type::Paren(paren) => {
+                let new_inner = repl(&paren.elem, user_lifetimes, last_lt);
+                Type::Paren(syn::TypeParen {
+                    paren_token: paren.paren_token,
+                    elem: Box::new(new_inner),
+                })
+            }
+            Type::Group(group) => {
+                let new_elem = repl(&group.elem, user_lifetimes, last_lt);
+                Type::Group(syn::TypeGroup {
+                    group_token: group.group_token,
+                    elem: Box::new(new_elem),
+                })
+            }
+            Type::Path(type_path) => {
+                let mut new_path = type_path.clone();
+                for seg in &mut new_path.path.segments {
+                    if let PathArguments::AngleBracketed(args) = &mut seg.arguments {
+                        let mut new_args = Punctuated::new();
+                        for arg in &args.args {
+                            let new_arg = match arg {
+                                GenericArgument::Lifetime(lt) if is_user_lt(lt) => {
+                                    GenericArgument::Lifetime(last_lt.clone())
+                                }
+                                GenericArgument::Type(ty) => {
+                                    GenericArgument::Type(repl(ty, user_lifetimes, last_lt))
+                                }
+                                other => other.clone(),
+                            };
+                            new_args.push(new_arg);
+                        }
+                        args.args = new_args;
+                    }
+                }
+                Type::Path(new_path)
+            }
+            // 其他非复合类型（原始指针、函数指针等）不改变
+            _ => ty.clone(),
+        }
+    }
+    repl(ty, user_lifetimes, last_lt)
 }
