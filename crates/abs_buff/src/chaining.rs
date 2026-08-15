@@ -1,5 +1,5 @@
 use core::{
-    mem::{self, MaybeUninit},
+    mem::{self, ManuallyDrop, MaybeUninit},
     marker::PhantomData,
     ops::{ControlFlow, Try},
     ptr,
@@ -91,62 +91,83 @@ where
             return ChainingIoResult::RxDrained(c);
         }
         // Read a segment first, then write it out in write-segment-sized
-        // pieces. This guarantees every borrowed write segment is *fully*
-        // consumed before it drops: with the "borrow N commits N" contract of
-        // the segment buffers, a partially filled write segment would commit
-        // its whole capacity, leaking stale bytes to the output.
+        // pieces. Every borrowed parent segment is consumed *by value* and
+        // held in a `ManuallyDrop`: the write position only advances when the
+        // piece's copy fully succeeded (`ManuallyDrop::drop`), and the read
+        // segment is only committed once the whole segment has been written
+        // out. If the copy panics (or the write side fails mid-segment), the
+        // `ManuallyDrop` suppresses the parent drops, so neither position
+        // moves — the transfer is atomic per read segment.
         let r_demand = Demand::less_than(usize::MAX - c);
-        let mut r_res = buff_r
+        let r_res = buff_r
             .read_async(&r_demand)
             .may_cancel_with(&mut rx_cancel)
             .await;
-        let opt_rx_segm = r_res.as_mut().pick_left();
-
-        if let Option::Some(rx_segm) = opt_rx_segm {
-            let rx_buf_capacity = rx_segm.least_count();
-            let mut cc = 0usize;
-            while cc < rx_buf_capacity {
-                let w_demand = Demand::less_than(rx_buf_capacity - cc);
-                let mut w_res = buff_w
-                    .write_async(&w_demand)
-                    .may_cancel_with(&mut tx_cancel)
-                    .await;
-                let opt_tx_segm = w_res.as_mut().pick_left();
-                if let Option::Some(segm_dst) = opt_tx_segm {
-                    let w_len = segm_dst.least_count();
-                    // The read segment has at least `w_len` unconsumed items
-                    // left (its total remaining is `rx_buf_capacity - cc` and
-                    // the write borrow is no larger than that), so the child
-                    // is exactly `w_len` bytes — the full write borrow.
-                    let ControlFlow::Continue(segm_src) = rx_segm
-                        .take_segm_ref(&Demand::less_than(w_len))
-                        .branch()
-                    else {
-                        unreachable!("[Chain] the read segment ran out");
-                    };
-                    let dst_it = segm_dst.iter_slices_mut().into_iter();
-                    let src_it = segm_src.iter_slices().into_iter();
-                    // SAFETY: the source and destination regions never
-                    // overlap (they come from two different buffers).
-                    let copied_len = unsafe { copy_data_(src_it, dst_it) };
-                    drop(segm_src); // advance the read segment's offset
-                    cc += copied_len;
-                    c += copied_len;
-                }
-                if let Option::Some(tx_err) = w_res.pick_right() {
-                    return ChainingIoResult::TxErr {
-                        count: c,
-                        err: tx_err,
-                    };
-                }
-            }
-        }
-        if let Option::Some(rx_err) = r_res.pick_right() {
+        if r_res.contains_right() {
             return ChainingIoResult::RxErr {
                 count: c,
-                err: rx_err,
+                err: r_res.pick_right().expect("[Chain] contains_right"),
             };
         }
+        let mut rx_segm = ManuallyDrop::new(
+            r_res
+                .pick_left()
+                .expect("[Chain] read_async returned neither side"),
+        );
+        let rx_buf_capacity = rx_segm.least_count();
+        let mut cc = 0usize;
+        while cc < rx_buf_capacity {
+            let w_demand = Demand::less_than(rx_buf_capacity - cc);
+            let w_res = buff_w
+                .write_async(&w_demand)
+                .may_cancel_with(&mut tx_cancel)
+                .await;
+            if w_res.contains_right() {
+                // The write side failed (closed or cancelled) mid-segment: the
+                // read parent is left in `ManuallyDrop`, so the reader
+                // position does not move. Note: pieces written before this
+                // failure were committed on the write side (they cannot be
+                // rolled back), so a retry after a *cancellation* would
+                // duplicate them.
+                return ChainingIoResult::TxErr {
+                    count: c,
+                    err: w_res.pick_right().expect("[Chain] contains_right"),
+                };
+            }
+            let mut segm_dst = ManuallyDrop::new(
+                w_res
+                    .pick_left()
+                    .expect("[Chain] write_async returned neither side"),
+            );
+            let w_len = segm_dst.least_count();
+            // The read segment has at least `w_len` unconsumed items left
+            // (its total remaining is `rx_buf_capacity - cc` and the write
+            // borrow is no larger than that), so the child is exactly `w_len`
+            // bytes — the full write borrow.
+            let ControlFlow::Continue(segm_src) = rx_segm
+                .take_segm_ref(&Demand::less_than(w_len))
+                .branch()
+            else {
+                unreachable!("[Chain] the read segment ran out");
+            };
+            let dst_it = segm_dst.iter_slices_mut().into_iter();
+            let src_it = segm_src.iter_slices().into_iter();
+            // SAFETY: the source and destination regions never overlap (they
+            // come from two different buffers). If this panics (source
+            // exhausted before the destination is filled), both parents stay
+            // inside their `ManuallyDrop` while unwinding, so neither the
+            // read nor the write position changes.
+            let copied_len = unsafe { copy_data_(src_it, dst_it) };
+            drop(segm_src); // advance the read segment's internal offset
+            // Commit this write piece: the whole borrow was copied.
+            // SAFETY: the copy succeeded, so the segment is fully initialized.
+            unsafe { ManuallyDrop::drop(&mut segm_dst) };
+            cc += copied_len;
+            c += copied_len;
+        }
+        // The whole read segment was written out: commit it.
+        // SAFETY: the segment was fully consumed by its children.
+        unsafe { ManuallyDrop::drop(&mut rx_segm) };
     }
 }
 
