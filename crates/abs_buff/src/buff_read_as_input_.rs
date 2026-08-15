@@ -85,13 +85,13 @@ where
         if c >= target.len() {
             return SomeOf::new_left(c);
         }
-        let mut dest = &mut target[c..];
+        let dest = &mut target[c..];
         let demand = Demand::less_than(dest.len());
         let result = buff_r
             .read_async(&demand)
             .may_cancel_with(cancel)
             .await
-            .map_left(|mut s| buff_segm_ref_read(&mut s, &mut dest));
+            .map_left(|mut s| buff_segm_ref_read(&mut s, dest));
         if let Option::Some(delta) = result.as_ref().pick_left() {
             c += *delta;
         }

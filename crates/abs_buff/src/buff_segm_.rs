@@ -24,9 +24,9 @@ pub trait TrBuffSegmView {
     fn least_count(&self) -> usize;
 
     /// Iterate the unconsumed parts of the segment slice by slice.
-    fn iter_slices<'a>(
-        &'a self,
-    ) -> impl IntoIterator<Item = &'a [Self::Item]>;
+    fn iter_slices(
+        &self,
+    ) -> impl IntoIterator<Item = &[Self::Item]>;
 }
 
 /// A buffer that its data is organized with one or more slices

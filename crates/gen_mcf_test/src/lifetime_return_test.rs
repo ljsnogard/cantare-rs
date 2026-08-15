@@ -24,7 +24,7 @@ where
     'a: 'c,
     C: TrCancellationToken,
 {
-    &s[..]
+    s
 }
 
 /// A return type carrying a *non-last* lifetime (`'a`).

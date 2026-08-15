@@ -3,8 +3,6 @@
     ops::{Bound, RangeBounds},
 };
 
-use funty;
-
 /// Describes an interval of amount that needed to operate.
 #[derive(Clone, Debug)]
 pub struct Demand<T>(DemandRange<T>)
@@ -76,6 +74,7 @@ where
     }
 }
 
+#[allow(clippy::len_without_is_empty)]
 impl Demand<usize> {
     pub fn len(&self) -> usize {
         use DemandRange::*;

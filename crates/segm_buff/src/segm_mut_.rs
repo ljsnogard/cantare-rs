@@ -267,9 +267,9 @@ where
         SegmMut::capacity(self)
     }
 
-    fn iter_slices<'a>(
-        &'a self,
-    ) -> impl IntoIterator<Item = &'a [Self::Item]> {
+    fn iter_slices(
+        &self,
+    ) -> impl IntoIterator<Item = &[Self::Item]> {
         SegmMut::iter_slices(self)
     }
 }

@@ -122,7 +122,6 @@ where
     };
     let mut copied = 0usize;
     for dst in parts.iter_slices_mut() {
-        let dst = dst.as_mut();
         let copy_len = dst.len();
         let src = &source[copied..copied + copy_len];
         let src_head = (&src[0]) as *const MaybeUninit<T>;
@@ -156,7 +155,6 @@ where
     // cloning items like `Rc` or `Arc`
     if mem::needs_drop::<T>() {
         for dst in parts.iter_slices_mut() {
-            let dst = dst.as_mut();
             let src = &source[copied..];
             for i in 0..dst.len() {
                 let m = &mut dst[i];
@@ -167,7 +165,7 @@ where
     } else {
         for dst in parts.iter_slices_mut() {
             let dst = unsafe {
-                let p = dst.as_mut() as *mut _ as *mut [T];
+                let p = dst as *mut _ as *mut [T];
                 &mut *p
             };
             let src = &source[copied..copied + dst.len()];

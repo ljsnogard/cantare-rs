@@ -72,12 +72,14 @@ async fn chain_io_async_<'f, W, R, T, C>(
 where
     W: TrBuffWrite<T>,
     R: TrBuffRead<T>,
-    C: TrCancellationToken,
+    C: TrCancellationToken + Clone,
 {
     if mem::size_of::<T>() == 0 {
         return ChainingIoResult::NoOps;
     }
     let mut c = 0usize;
+    let mut tx_cancel = cancel.clone();
+    let mut rx_cancel = cancel.clone();
     loop {
         if buff_w.is_blocked() {
             return ChainingIoResult::TxBlocked(c);
@@ -88,7 +90,7 @@ where
         let w_demand = Demand::less_than(usize::MAX - c);
         let mut w_res = buff_w
             .write_async(&w_demand)
-            .may_cancel_with(cancel)
+            .may_cancel_with(&mut tx_cancel)
             .await;
         let opt_tx_segm = w_res.as_mut().pick_left();
 
@@ -112,7 +114,7 @@ where
                 // write operation at the top of each iteration.
                 let mut r_res = buff_r
                     .read_async(&r_demand)
-                    .may_cancel_with(abs_cancel::NonCancellableToken::shared_mut())
+                    .may_cancel_with(&mut rx_cancel)
                     .await;
 
                 let opt_rx_segm = r_res.as_mut().pick_left();
@@ -168,7 +170,7 @@ where
 /// - 目标切片中的 `MaybeUninit<T>` 在复制完成后将被视为已初始化。
 unsafe fn copy_data_<'f, T>(
     mut src_iter: impl Iterator<Item = &'f [T]>,
-    mut dst_iter: impl Iterator<Item = &'f mut [MaybeUninit<T>]>,
+    dst_iter: impl Iterator<Item = &'f mut [MaybeUninit<T>]>,
 ) -> usize
 where
     T: 'f,
@@ -180,7 +182,7 @@ where
     let mut src_offset = 0;
 
     // 逐目标切片填充
-    while let Some(dst_slice) = dst_iter.next() {
+    for dst_slice in dst_iter {
         let dst_len = dst_slice.len();
         let mut dst_offset = 0;
 

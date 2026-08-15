@@ -107,7 +107,7 @@ where
         if let Option::Some(node) = find_result {
             Result::Ok(INode::new(node.clone()))
         } else {
-            Result::Err(FsOprError::InvalidNodeId(id.clone()))
+            Result::Err(FsOprError::InvalidNodeId(*id))
         }
     }
 
@@ -124,7 +124,7 @@ where
         id: &'a NodeId,
     ) -> Result<&'a NameSegm<TNameAlloc>, FsOprError> {
         let Option::Some(node) = self.id_node_map_.get(id) else {
-            return Result::Err(FsOprError::InvalidNodeId(id.clone()))
+            return Result::Err(FsOprError::InvalidNodeId(*id))
         };
         Result::Ok(node.as_ref().name())
     }
@@ -133,7 +133,7 @@ where
         &'a self,
         id: &'a NodeId,
     ) -> Result<Path<TNodeAlloc, TNameAlloc>, FsOprError> {
-        Result::Err(FsOprError::InvalidNodeId(id.clone()))
+        Result::Err(FsOprError::InvalidNodeId(*id))
     }
 }
 
@@ -164,8 +164,8 @@ where
     C: TrCancellationToken,
 {
     let mut curr_id = root_id;
-    let Option::Some(mut curr_node) = tree.id_node_map_.get(&curr_id) else {
-        return Result::Err(FsOprError::InvalidNodeId(curr_id.clone()));
+    let Option::Some(mut curr_node) = tree.id_node_map_.get(curr_id) else {
+        return Result::Err(FsOprError::InvalidNodeId(*curr_id));
     };
     let mut segm_index = 0usize;
     let segm_vec = path.segments_vec();
@@ -178,7 +178,7 @@ where
     while segm_index < segm_vec_size {
         // the root node is not dir, no more search is available.
         if !curr_node.is_dir() {
-            return Result::Err(FsOprError::NodeIsFile(curr_id.clone()));
+            return Result::Err(FsOprError::NodeIsFile(*curr_id));
         }
         let segm_name = &segm_vec[segm_index];
         if let FsTreeNode::LocalDir(dir) = curr_node.deref() {
@@ -186,7 +186,7 @@ where
                 return Result::Err(FsOprError::InvalidPath(segm_index));
             };
             let Option::Some(child_node) = tree.id_node_map_.get(dentry.id) else {
-                return Result::Err(FsOprError::InvalidNodeId(dentry.id.clone()));
+                return Result::Err(FsOprError::InvalidNodeId(*dentry.id));
             };
             curr_id = dentry.id;
             curr_node = child_node;

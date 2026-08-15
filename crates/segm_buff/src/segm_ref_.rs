@@ -191,9 +191,9 @@ where
 
     /// Iterate the unconsumed parts of the segment slice by slice.
     #[inline]
-    fn iter_slices<'a>(
-        &'a self,
-    ) -> impl IntoIterator<Item = &'a [Self::Item]> {
+    fn iter_slices(
+        &self,
+    ) -> impl IntoIterator<Item = &[Self::Item]> {
         SegmRef::iter_slices(self)
     }
 }

@@ -94,7 +94,7 @@ where
     A: Allocator + Clone,
 {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        self.octets_.partial_cmp(&other.octets_)
+        Option::Some(self.cmp(other))
     }
 }
 
@@ -437,9 +437,7 @@ where
         &'a self,
         name: &NameSegm<TNameAlloc>,
     ) -> Option<Dentry<'a, TNameAlloc>> {
-        let Option::Some(id) = self.name_id_.get(name) else {
-            return Option::None
-        };
+        let id = self.name_id_.get(name)?;
         if let Option::Some(name) = self.id_name_.get(id) {
             Option::Some(Dentry::new_with_id_name((id, name)))
         } else {
@@ -456,14 +454,14 @@ where
     }
 
     #[inline]
-    pub fn insert_child<'a, 'lt_id, 'lt_name>(
-        &'a mut self,
+    pub fn insert_child<'lt_id, 'lt_name>(
+        &mut self,
         id: &'lt_id NodeId,
         name: &'lt_name NameSegm<TNameAlloc>,
     ) -> Option<Result<&'lt_id NodeId, &'lt_name NameSegm<TNameAlloc>>> {
-        let r1 = self.name_id_.insert(name.clone(), id.clone());
+        let r1 = self.name_id_.insert(name.clone(), *id);
         if r1.is_some(){
-            let r2 = self.id_name_.insert(id.clone(), name.clone());
+            let r2 = self.id_name_.insert(*id, name.clone());
             if r2.is_some() {
                 Option::None
             } else {

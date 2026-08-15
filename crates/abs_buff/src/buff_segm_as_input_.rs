@@ -99,7 +99,6 @@ where
     };
     let mut copied = 0usize;
     for src in parts.iter_slices() {
-        let src = src.as_ref();
         let copy_len = src.len();
         let dst = &mut target[copied..copied + copy_len];
         let src_head = (&src[0]) as *const T;

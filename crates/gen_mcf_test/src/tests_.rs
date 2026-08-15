@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-mod tests_ {
+mod tests_expanded_ {
     use abs_cancel::TrCancellationToken;
 
     /// # Usage Rules:
@@ -151,7 +151,7 @@ mod tests_ {
 #[compio::test]
 pub async fn run() {
     use abs_cancel::NonCancellableToken;
-    use tests_::do_thing_async;
+    use tests_expanded_::do_thing_async;
 
     let mut a = 1usize;
     let mut b = 2.0f32;

@@ -43,13 +43,13 @@ where
                 let mut cc = 0usize;
                 for src_slice in segm.iter_slices() {
                     let src_len = src_slice.len();
-                    let dst_slice = &mut buf[c..c + cc];
+                    let dst_slice = &mut buf[c + cc..];
 
                     assert!(src_len <= dst_slice.len());
 
                     // 获取源指针和目标指针（目标转为 *mut T，布局与 MaybeUninit<T> 相同）
-                    let src_ptr = src_slice.as_ptr() as *const u8;
-                    let dst_ptr = dst_slice.as_mut_ptr() as *mut u8;
+                    let src_ptr = src_slice.as_ptr();
+                    let dst_ptr = dst_slice.as_mut_ptr();
 
                     // 安全地复制非重叠内存
                     unsafe { ptr::copy_nonoverlapping(src_ptr, dst_ptr, src_len); }

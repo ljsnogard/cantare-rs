@@ -92,7 +92,7 @@ impl TrCancellationToken for CancelledToken {
 
     #[inline]
     fn try_spawn_child_token(&mut self) -> impl Try<Output: TrCancellationToken> {
-        Option::Some(self.clone())
+        Option::Some(*self)
     }
 
     #[inline]
@@ -150,7 +150,7 @@ impl TrCancellationToken for NonCancellableToken {
 
     #[inline]
     fn try_spawn_child_token(&mut self) -> impl Try<Output: TrCancellationToken> {
-        Option::Some(self.clone())
+        Option::Some(*self)
     }
 
     #[inline]
