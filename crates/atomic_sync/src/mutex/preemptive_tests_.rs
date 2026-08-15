@@ -68,6 +68,7 @@ fn msb_signal_boundaries() {
     assert!(Sig::is_acquired(Sig::make_acquired(msb)));
 }
 
+#[allow(clippy::zero_ptr)]
 #[test]
 fn ptr_signal_boundaries() {
     type Sig = PtrAsMutexSignal<usize>;
@@ -96,6 +97,7 @@ fn ptr_signal_boundaries() {
     assert_eq!(Sig::make_released(odd) as usize, 0x10);
 }
 
+#[allow(clippy::manual_dangling_ptr)]
 #[test]
 fn ptr_signal_odd_cell_breaks_mutex() {
     // Construct an embedded mutex whose cell already holds an ODD pointer.
