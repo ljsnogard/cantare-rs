@@ -12,17 +12,38 @@ license = "MIT/Apache-2.0"
 readme = "README.md"
 
 [dependencies]
+# -- core (async-runtime agnostic, no_std) --
 atomex = { path = "../atomex" }
+abs_buff = { path = "../abs_buff" }
+abs_cancel = { path = "../abs_cancel" }
 segm_buff = { path = "../segm_buff" }
 
-pin-project = { version = "1.1.*" }
-pin-utils = { version = "*" }
-smallvec = { version = "1.13", features = [] }
+# -- optional async-framework trait adapters ------------------------------
+# The core ring buffer never depends on any async runtime. These features
+# only add `AsyncRead`/`AsyncWrite` trait implementations for the selected
+# framework on top of the same core logic.
+compio = { version = "0.19.*", optional = true, features = ["fs", "macros", "time"] }
+tokio = { version = "1", optional = true, features = ["io-util"] }
+futures-io = { version = "0.3", optional = true }
+
+[features]
+default = ["compio"]
+
+# Support `compio::io::AsyncRead` / `compio::io::AsyncWrite` (default).
+compio = ["dep:compio"]
+
+# Support `tokio::io::AsyncRead` / `tokio::io::AsyncWrite`.
+tokio = ["dep:tokio"]
+
+# Support `futures_io::AsyncRead` / `futures_io::AsyncWrite` (smol & friends).
+smol = ["dep:futures-io"]
 
 [dev-dependencies]
-env_logger = { version = "0.11.*" }
-log = { version = "0.4.*" }
-
-chrono = { version = "0.4.*" }
+env_logger = { workspace = true }
+log = { workspace = true }
 rand = { version = "0.8.*" }
+
+atomic_sync = { path = "../atomic_sync" }
+
 tokio = { version = "1", features = ["full"] }
+futures-lite = { workspace = true }

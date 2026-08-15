@@ -1,94 +1,69 @@
-﻿use core::{
-    borrow::BorrowMut,
-    mem::MaybeUninit,
-};
+//! Reclaim functions for the segments borrowed from the ring buffer.
+//!
+//! A segment borrowed from the ring commits its whole region back to the ring
+//! when it drops (the segm_buff contract): the writer reclaim advances the
+//! writer position, the reader reclaim advances the reader position.
 
-use abs_buff::TrBuffSegmView;
-use atomex::TrCmpxchOrderings;
-use segm_buff::{x_deps::abs_buff, SegmMut, SegmRef, TrReclaim};
+use core::{mem::MaybeUninit, ops::DerefMut};
 
-use super::buffer_::RingBuffer;
+use segm_buff::{SegmMut, SegmRef, TrReclaim};
 
-pub type ReclSliceRef<'a, P, T, O> =
-    SegmRef<&'a [T], T, ReaderForwardFn<'a, P, T, O>>;
+use super::state_::RingBuffer;
 
-pub type ReclSliceMut<'a, P, T, O> =
-    SegmMut<&'a mut [MaybeUninit<T>], T, WriterForwardFn<'a, P, T, O>>;
+/// A write segment borrowed from the ring buffer.
+pub type ReclSliceMut<'a, B, T> = SegmMut<&'a mut [MaybeUninit<T>], WriterReclaim<'a, B, T>>;
 
-/// A wrapper around the internal function that forwards the reader position,
-/// and will be invoked when a `ReclSliceRef` drops.
-pub struct ReaderForwardFn<'a, P, T, O>(&'a RingBuffer<P, T, O>)
+/// A read segment borrowed from the ring buffer.
+pub type ReclSliceRef<'a, B, T> = SegmRef<&'a [T], ReaderReclaim<'a, B, T>>;
+
+/// Advances the writer position when a borrowed write segment drops.
+pub struct WriterReclaim<'a, B, T>
 where
-    P: BorrowMut<[MaybeUninit<T>]>,
-    O: TrCmpxchOrderings;
-
-impl<'a, P, T, O> ReaderForwardFn<'a, P, T, O>
-where
-    P: BorrowMut<[MaybeUninit<T>]>,
-    O: TrCmpxchOrderings,
+    B: DerefMut<Target = [T]>,
 {
-    pub const fn new(ring_buff: &'a RingBuffer<P, T, O>) -> Self {
-        ReaderForwardFn(ring_buff)
+    ring: &'a RingBuffer<B, T>,
+}
+
+impl<'a, B, T> WriterReclaim<'a, B, T>
+where
+    B: DerefMut<Target = [T]>,
+{
+    pub(super) const fn new(ring: &'a RingBuffer<B, T>) -> Self {
+        WriterReclaim { ring }
     }
 }
 
-impl<P, T, O> TrReclaim<T> for ReaderForwardFn<'_, P, T, O>
+impl<B, T> TrReclaim for WriterReclaim<'_, B, T>
 where
-    P: BorrowMut<[MaybeUninit<T>]>,
-    O: TrCmpxchOrderings,
+    B: DerefMut<Target = [T]>,
 {
-    fn reclaim<S: TrBuffSegmView<Item = T>>(&mut self, s: &mut S) {
-        let Option::Some(head) = s.iter_ptr().next() else {
-            return;
-        };
-        debug_assert!({
-            let info = self.0.state().load_state_info();
-            let buff = self.0.state().buffer_data();
-            let rp = &buff[info.rp] as *const MaybeUninit<T> as *const T;
-            core::ptr::eq(head, rp)
-        });
-        let length = s.borrowed_len();
-        let x = self.0.state().rx_forward(length);
-        assert!(x.is_ok())
+    fn reclaim(&mut self, amount: usize) {
+        self.ring.advance_write(amount);
     }
 }
 
-/// A wrapper around the internal function that forwards the writer position,
-/// and will be invoked when a `ReclSliceMut` drops.
-pub struct WriterForwardFn<'a, P, T, O>(&'a RingBuffer<P, T, O>)
+/// Advances the reader position when a borrowed read segment drops.
+pub struct ReaderReclaim<'a, B, T>
 where
-    P: BorrowMut<[MaybeUninit<T>]>,
-    O: TrCmpxchOrderings;
-
-impl<'a, P, T, O> WriterForwardFn<'a, P, T, O>
-where
-    P: BorrowMut<[MaybeUninit<T>]>,
-    O: TrCmpxchOrderings,
+    B: DerefMut<Target = [T]>,
 {
-    pub const fn new(ring_buff: &'a RingBuffer<P, T, O>) -> Self {
-        WriterForwardFn(ring_buff)
+    ring: &'a RingBuffer<B, T>,
+}
+
+impl<'a, B, T> ReaderReclaim<'a, B, T>
+where
+    B: DerefMut<Target = [T]>,
+{
+    pub(super) const fn new(ring: &'a RingBuffer<B, T>) -> Self {
+        ReaderReclaim { ring }
     }
 }
 
-impl<P, T, O> TrReclaim<MaybeUninit<T>> for WriterForwardFn<'_, P, T, O>
+impl<B, T> TrReclaim for ReaderReclaim<'_, B, T>
 where
-    P: BorrowMut<[MaybeUninit<T>]>,
-    O: TrCmpxchOrderings,
+    B: DerefMut<Target = [T]>,
 {
-    fn reclaim<S: TrBuffSegmView<Item = MaybeUninit<T>>>(&mut self, s: &mut S) {
-        let Option::Some(head) = s.iter_ptr().next() else {
-            #[cfg(test)]
-            log::warn!("[WriterForwardFn::reclaim] empty head buff segm");
-            return;
-        };
-        debug_assert!({
-            let info = self.0.state().load_state_info();
-            let buff = self.0.state().buffer_data();
-            let wp = &buff[info.wp] as *const MaybeUninit<T>;
-            core::ptr::eq(head, wp)
-        });
-        let length = s.borrowed_len();
-        let x = self.0.state().tx_forward(length);
-        assert!(x.is_ok())
+    fn reclaim(&mut self, amount: usize) {
+        self.ring.advance_read(amount);
     }
 }
