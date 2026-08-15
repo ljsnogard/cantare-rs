@@ -12,7 +12,7 @@ members = [
 
     "crates/abs_buff",
     "crates/segm_buff",
-    # "crates/buffex",
+    "crates/buffex",
 
     "crates/abs_vfs",
     "crates/mem_vfs",

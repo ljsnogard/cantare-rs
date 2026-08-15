@@ -1,0 +1,28 @@
+[package]
+name = "buffex"
+version = "0.2.0"
+edition = "2024"
+
+authors = ["lino <lino_snsalias@outlook.com>"]
+description = "BUFFer EXtensions: ring buffer and buffer chaining."
+repository = "https://github.com/ljsnogard/buffex"
+keywords = ["buffer", "io"]
+categories = ["algorithms", "no-std"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+atomex = { path = "../atomex" }
+segm_buff = { path = "../segm_buff" }
+
+pin-project = { version = "1.1.*" }
+pin-utils = { version = "*" }
+smallvec = { version = "1.13", features = [] }
+
+[dev-dependencies]
+env_logger = { version = "0.11.*" }
+log = { version = "0.4.*" }
+
+chrono = { version = "0.4.*" }
+rand = { version = "0.8.*" }
+tokio = { version = "1", features = ["full"] }
