@@ -286,7 +286,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         {
             type MayCancelOutput = #output_ty_transformed;
 
-            fn may_cancel_with<'cancel_, C: abs_cancel::TrCancellationToken>(
+            fn may_cancel_with<'cancel_, C>(
                 self,
                 cancel: &'cancel_ mut C,
             ) -> impl ::core::future::IntoFuture<Output = Self::MayCancelOutput>
@@ -296,6 +296,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
                 // cancel token 的借用必须存活不短于数据生命周期 `last_lt`，
                 // 否则无法以 `&#last_lt mut C` 的形式保存到生成的 future 里。
                 'cancel_: #last_lt,
+                C: abs_cancel::TrCancellationToken + Clone,
             {
                 #future_struct {
                     params_: ::core::mem::MaybeUninit::new(self),

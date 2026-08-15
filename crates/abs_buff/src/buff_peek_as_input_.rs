@@ -90,7 +90,7 @@ async fn buff_peek_input_async<'f, B, P, T, C>(
 where
     B: BorrowMut<P>,
     P: TrBuffPeek<T>,
-    C: TrCancellationToken,
+    C: TrCancellationToken + Clone,
 {
     let buff_p: &mut P = input.buff_p_.borrow_mut();
     let (opt_segm, opt_err) = buff_p

@@ -101,7 +101,7 @@ async fn buff_write_output_async<'f, W, T, C>(
 ) -> SomeOf<usize, <W as TrBuffWrite<T>>::Err>
 where
     W: TrBuffWrite<T>,
-    C: TrCancellationToken,
+    C: TrCancellationToken + Clone,
 {
     let mut c = 0usize;
     loop {
@@ -140,7 +140,7 @@ async fn buff_write_output_cloned_async<'f, W, T, C>(
 where
     W: TrBuffWrite<T>,
     T: Clone,
-    C: TrCancellationToken,
+    C: TrCancellationToken + Clone,
 {
     let mut c = 0usize;
     loop {

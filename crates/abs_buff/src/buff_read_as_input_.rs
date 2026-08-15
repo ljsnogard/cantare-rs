@@ -78,7 +78,7 @@ async fn buff_read_input_async<'a, R, T, C>(
 ) -> SomeOf<usize, <R as TrBuffRead<T>>::Err>
 where
     R: TrBuffRead<T>,
-    C: TrCancellationToken,
+    C: TrCancellationToken + Clone,
 {
     let mut c = 0usize;
     loop {

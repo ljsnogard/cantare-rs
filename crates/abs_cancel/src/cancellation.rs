@@ -15,7 +15,7 @@ where
 {
     type MayCancelOutput;
 
-    fn may_cancel_with<'f, C: TrCancellationToken>(
+    fn may_cancel_with<'f, C>(
         self,
         cancel: &'f mut C,
     ) -> impl IntoFuture<Output = Self::MayCancelOutput>
@@ -25,11 +25,18 @@ where
         // 生成的 future 需要把 cancel token 的借用以 `&'a mut C` 的形式保存，
         // 因此要求 cancel 借用存活期不短于 `'a`。没有这一条，宏生成的
         // `may_cancel_with` 无法用 `&'f mut C` 构造出输出类型引用 `'a` 的 future。
-        'f: 'a;
+        'f: 'a,
+        C: TrCancellationToken + Clone;
 }
 
 
 /// A cancellation token can receive cancellation signal.
+///
+/// In actual usage, a `Clone` impl is usually needed. See `may_cancel_with`
+/// for the reason why.
+///
+/// So if you are developing an cancellation token, consider adding impl for
+/// `Clone`.
 pub trait TrCancellationToken {
     /// Tests whether this token has received cancellation signal or not.
     fn is_cancelled(&self) -> bool;
