@@ -18,15 +18,16 @@ fn main() {
 
 #[cfg(all(feature = "compio", unix))]
 fn main() {
-    use std::boxed::Box;
-    use std::format;
-    use std::time::Instant;
-    use std::vec;
-    use std::vec::Vec;
-
-    use abs_buff::Demand;
-    use abs_buff::x_deps::anylr::SomeOf;
-    use abs_buff::{TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite};
+    use std::{
+        format,
+        time::Instant,
+        vec::Vec,
+    };
+    use abs_buff::{
+        x_deps::abs_cancel,
+        Demand,
+        TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
+    };
     use abs_cancel::{NonCancellableToken, TrMayCancel};
 
     use buffex::unix_stream::BufferedUnixStream;

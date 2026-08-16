@@ -2,10 +2,12 @@
 //! handling, the vectored-IO kernel handoff, the `TrRingBuffer` trait, and
 //! the multithreaded SPSC pipe without any runtime.
 
-use std::boxed::Box;
-use std::sync::Arc;
-use std::vec;
-use std::vec::Vec;
+use std::{
+    boxed::Box,
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
 
 use abs_buff::Demand;
 

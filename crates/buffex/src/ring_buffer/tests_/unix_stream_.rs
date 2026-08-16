@@ -1,17 +1,22 @@
 //! Unit tests for the compio unix-socket adapter wrapped in the abs_buff
 //! buffer traits (`TrBuffTryWrite` / `TrBuffTryRead`).
 
-use std::format;
-use std::vec;
-use std::vec::Vec;
+use std::{
+    format, vec,
+    vec::Vec,
+};
 
-use abs_buff::pipelining::PipeJoin;
-use abs_buff::Demand;
-use abs_buff::{TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite};
+use abs_buff::{
+    x_deps::abs_cancel,
+    pipelining::PipeJoin,
+    Demand,
+    TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
+};
 use abs_cancel::{NonCancellableToken, TrMayCancel};
 
-use super::{fill_segm, take_segm};
 use crate::unix_stream::BufferedUnixStream;
+
+use super::{fill_segm, take_segm};
 
 fn sock_path(name: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!("buffex-{}-{}.sock", name, std::process::id()));

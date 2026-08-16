@@ -1,10 +1,11 @@
 //! Per-framework tests: the shared scenarios plus the framework-specific
 //! `AsyncRead` / `AsyncWrite` trait implementations.
 
-use std::boxed::Box;
-use std::format;
-use std::vec;
-use std::vec::Vec;
+use std::{
+    boxed::Box,
+    format, vec,
+    vec::Vec,
+};
 
 use super::scenario_::{
     run_kernel_scenario, run_pipe_scenario, run_pipe_scenario_sync, run_scenarios_mini,

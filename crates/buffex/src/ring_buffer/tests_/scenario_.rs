@@ -4,10 +4,11 @@
 //! handoff), so the only framework-specific part is the executor
 //! (block_on + spawn / spawn_blocking).
 
-use std::boxed::Box;
-use std::future::Future;
-use std::pin::Pin;
-use std::vec::Vec;
+use std::{
+    boxed::Box,
+    pin::Pin,
+    vec::Vec,
+};
 
 use super::{
     fill_segm, make_ring, make_ring_shared, pat_byte, seq_byte, take_segm, SharedRing, SharedRx,

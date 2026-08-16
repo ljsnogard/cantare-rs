@@ -7,8 +7,12 @@ use core::{
     ops::DerefMut,
 };
 
-use abs_buff::{Demand, TrBuffPeek, TrBuffRead, TrBuffTryPeek, TrBuffTryRead};
-use abs_buff::x_deps::anylr::SomeOf;
+use anylr::SomeOf;
+
+use abs_buff::{
+    x_deps::{anylr, abs_cancel},
+    Demand, TrBuffPeek, TrBuffRead, TrBuffTryPeek, TrBuffTryRead,
+};
 
 use super::{
     error_::RxError,

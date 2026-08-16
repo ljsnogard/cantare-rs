@@ -14,8 +14,11 @@ use core::{
     task::{Context, Poll},
 };
 
+use anylr::SomeOf;
+
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
-use abs_buff::x_deps::anylr::SomeOf;
+
+use abs_buff::x_deps::{abs_cancel, anylr};
 
 use super::{
     error_::{RxError, TxError},

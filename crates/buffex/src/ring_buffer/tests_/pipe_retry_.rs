@@ -3,21 +3,25 @@
 //! must leave the reader position exactly after the data that was actually
 //! written, so retrying transfers the rest — no duplication, no loss.
 
-use std::boxed::Box;
-use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
-use std::vec;
-use std::vec::Vec;
+use std::{
+    boxed::Box,
+    future::Future,
+    sync::{atomic::{AtomicBool, Ordering}, Arc},
+    task::{Context, Poll, Waker},
+    vec,
+    vec::Vec,
+};
 
-use abs_buff::pipelining::{PipeJoin, PipeJoinIoResult};
+use abs_buff::{
+    pipelining::{PipeJoin, PipeJoinIoResult},
+    x_deps::abs_cancel,
+};
+
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 
 use crate::ring_buffer::{RingBuffer, RingRx, RingTx};
 
-use super::{fill_segm, take_segm};
-use super::mini_exec::MiniExec;
+use super::{mini_exec::MiniExec, fill_segm, take_segm};
 
 type SharedRing = Arc<RingBuffer<Box<[u8]>>>;
 type SharedTx = RingTx<SharedRing, Box<[u8]>>;
@@ -49,9 +53,8 @@ impl TrCancellationToken for FlagToken {
 }
 
 fn make_ring(cap: usize) -> (SharedRing, SharedTx, SharedRx) {
-    let ring = Arc::new(
-        RingBuffer::<Box<[u8]>>::try_new(vec![0u8; cap].into_boxed_slice()).unwrap(),
-    );
+    let ring =
+        Arc::new(RingBuffer::<Box<[u8]>>::try_new(vec![0u8; cap].into_boxed_slice()).unwrap());
     let (tx, rx) = RingBuffer::try_split_shared(ring.clone());
     (ring, tx, rx)
 }
@@ -65,7 +68,10 @@ fn fill_pattern(tx: &mut SharedTx, total: usize) {
             .try_write(core::cmp::min(1009, total - off))
             .expect("fill try_write");
         let len = segm.least_count();
-        fill_segm(&mut segm, &(0..len).map(|i| (off + i) as u8).collect::<Vec<_>>());
+        fill_segm(
+            &mut segm,
+            &(0..len).map(|i| (off + i) as u8).collect::<Vec<_>>(),
+        );
         drop(segm);
         off += len;
     }
@@ -135,8 +141,15 @@ fn pipe_cancel_retry_no_dup_no_loss() {
     }
     drain_available(&mut write_rx, &mut collected);
 
-    assert_eq!(transferred, TOTAL, "the pipe must report exactly {TOTAL} bytes");
-    assert_eq!(collected.len(), TOTAL, "exactly {TOTAL} bytes must be delivered");
+    assert_eq!(
+        transferred, TOTAL,
+        "the pipe must report exactly {TOTAL} bytes"
+    );
+    assert_eq!(
+        collected.len(),
+        TOTAL,
+        "exactly {TOTAL} bytes must be delivered"
+    );
     for (i, b) in collected.iter().enumerate() {
         assert_eq!(*b, (i % 256) as u8, "payload mismatch at {i}");
     }
@@ -219,12 +232,15 @@ fn pipe_close_midway_retry_no_dup_no_loss() {
     drain_available(&mut write_rx2, &mut collected2);
 
     assert_eq!(
-        transferred,
-        TOTAL,
+        transferred, TOTAL,
         "the pipe must report exactly {TOTAL} bytes in total"
     );
     assert_eq!(collected2.len(), TOTAL - count, "no duplication, no loss");
     for (i, b) in collected2.iter().enumerate() {
-        assert_eq!(*b, ((count + i) % 256) as u8, "payload mismatch at {count}+{i}");
+        assert_eq!(
+            *b,
+            ((count + i) % 256) as u8,
+            "payload mismatch at {count}+{i}"
+        );
     }
 }

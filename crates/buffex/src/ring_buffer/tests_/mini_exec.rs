@@ -3,13 +3,14 @@
 //! framework-agnostic futures (and the `futures_io` trait implementations)
 //! without any external runtime dependency.
 
-use std::boxed::Box;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::task::{Context, Wake, Waker};
-use std::vec::Vec;
+use std::{
+    boxed::Box,
+    future::Future,
+    pin::Pin,
+    sync::{atomic::{AtomicBool, Ordering}, Arc},
+    task::{Context, Wake, Waker},
+    vec::Vec,
+};
 
 struct MiniWaker(Arc<AtomicBool>);
 

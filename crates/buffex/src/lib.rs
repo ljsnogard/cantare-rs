@@ -17,7 +17,7 @@ pub mod unix_stream;
 
 pub mod x_deps {
     pub use abs_buff;
-    pub use abs_cancel;
+    pub use abs_buff::x_deps::{abs_cancel, anylr};
     pub use atomex;
     pub use atomex::x_deps::funty;
 }
