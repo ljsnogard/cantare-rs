@@ -1,19 +1,18 @@
-﻿use core::error::Error;
+use core::error::Error;
 
 use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
-use crate::{
-    buffer::TrBuffSegmRef,
-    Demand,
-};
+use crate::{Demand, buffer::TrBuffSegmRef};
 
 /// A kind of buffer that owns the memory for reading data by lending some
 /// segments to the consumer.
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffRead<T = u8> {
-    type SegmRef<'f>: TrBuffSegmRef<'f, T> where Self: 'f;
+    type SegmRef<'f>: TrBuffSegmRef<'f, T>
+    where
+        Self: 'f;
     type Err: Error;
 
     /// Indicates whether this buff will no longer emits any data.

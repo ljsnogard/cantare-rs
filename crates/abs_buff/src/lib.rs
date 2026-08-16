@@ -3,7 +3,6 @@
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
 #![feature(try_trait_v2)]
-
 #![no_std]
 
 // We always pull in `std` during tests, because it's just easier
@@ -23,18 +22,16 @@ mod reader_;
 mod writer_;
 
 pub use demand_::Demand;
-
 pub use peeker_::{TrBuffPeek, TrBuffTryPeek};
 pub use reader_::{TrBuffRead, TrBuffTryRead};
-pub use writer_::{TrBuffWrite, TrBuffTryWrite};
+pub use writer_::{TrBuffTryWrite, TrBuffWrite};
 
 pub mod x_deps {
-    pub use abs_iter;
     pub use abs_cancel;
+    pub use abs_iter;
     pub use anylr;
-    pub use gen_mcf_macro;
-
     pub use funty;
+    pub use gen_mcf_macro;
 }
 
 #[cfg(any(test, feature = "std_read"))]

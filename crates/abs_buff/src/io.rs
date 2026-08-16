@@ -5,15 +5,15 @@ use core::{
     ptr,
 };
 
-use anylr::SomeOf;
 use abs_cancel::TrMayCancel;
+use anylr::SomeOf;
 
 use crate::buffer::{TrBuffer, TrBufferMut};
 
 /// A device that will produce data. And the data shall be buffered when taking
 /// taking out of them from this device.
 pub trait TrInput<T = u8> {
-    type Err : Error;
+    type Err: Error;
 
     /// Read data from this input device and into the specified target buffer.
     ///
@@ -37,7 +37,7 @@ pub trait TrInput<T = u8> {
 /// A device that will consume data. And the data shall be offered with
 /// a buffer.
 pub trait TrOutput<T = u8> {
-    type Err : Error;
+    type Err: Error;
 
     /// Move data from the specified source into this output device
     fn write_async<'a>(
@@ -55,7 +55,7 @@ pub trait TrOutput<T = u8> {
     {
         if mem::size_of::<T>() == 0 {
             // Handle ZSTs separately, as copying them is unnecessary and UB
-            return self.write_async(&[])
+            return self.write_async(&[]);
         }
         unsafe {
             let src_head = &source[0] as *const T as *const MaybeUninit<T>;
@@ -72,7 +72,10 @@ pub trait TrSink<T = u8> {
 }
 
 pub trait TrFlux<T = u8> {
-    fn read_async<'a, TyBuffMut>(&'a mut self, target: TyBuffMut) -> (usize, TyBuffMut)
+    fn read_async<'a, TyBuffMut>(
+        &'a mut self,
+        target: TyBuffMut,
+    ) -> (usize, TyBuffMut)
     where
         TyBuffMut: DerefMut<Target: 'static + TrBufferMut>;
 }

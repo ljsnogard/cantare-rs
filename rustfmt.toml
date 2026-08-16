@@ -3,11 +3,15 @@
 #  官方文档：https://rust-lang.github.io/rustfmt
 # ================================================================
 
+# group_imports is unstable_features
+unstable_features = true
+
 # --- Imports 相关 -------------------------------------------------
 
 # 将同一 crate 下的多个 use 合并为单个 use 语句
 # 例如：use std::fmt; use std::io; → use std::{fmt, io};
 imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
 
 # 对 use 项按字母顺序排序
 reorder_imports = true

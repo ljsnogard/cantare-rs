@@ -1,4 +1,4 @@
-﻿use core::{
+use core::{
     cmp,
     ops::{Bound, RangeBounds},
 };
@@ -68,7 +68,7 @@ where
                 } else {
                     Err((start_bound, end_bound))
                 }
-            },
+            }
             _ => Err((start_bound, end_bound)),
         }
     }
@@ -153,7 +153,7 @@ where
 
         match &self.0 {
             AtLeast(l) => Option::Some(l),
-            Range(l, _)  => Option::Some(l),
+            Range(l, _) => Option::Some(l),
             _ => Option::None,
         }
     }
@@ -193,23 +193,33 @@ where
             (AtLeast(a), AtLeast(b)) => Some(Demand::at_least(cmp::max(a, b))),
 
             // 无下界 + 无下界 → 取较小的上界
-            (LessThan(a), LessThan(b)) => Some(Demand::less_than(cmp::min(a, b))),
+            (LessThan(a), LessThan(b)) => {
+                Some(Demand::less_than(cmp::min(a, b)))
+            }
 
             // 无下界 + 无上界 → 需满足 a <= b 才构成闭区间
             (AtLeast(a), LessThan(b)) if a <= b => Some(Demand::between(a, b)),
             (LessThan(b), AtLeast(a)) if a <= b => Some(Demand::between(a, b)),
 
             // 无上界 + 右半开区间
-            (AtLeast(a), Range(c, d)) if a <= d => Some(Demand::between(cmp::max(a, c), d)),
-            (Range(c, d), AtLeast(a)) if a <= d => Some(Demand::between(cmp::max(a, c), d)),
+            (AtLeast(a), Range(c, d)) if a <= d => {
+                Some(Demand::between(cmp::max(a, c), d))
+            }
+            (Range(c, d), AtLeast(a)) if a <= d => {
+                Some(Demand::between(cmp::max(a, c), d))
+            }
 
             // 无下界 + 闭区间
-            (LessThan(b), Range(c, d)) if c <= b => Some(Demand::between(c, cmp::min(b, d))),
-            (Range(c, d), LessThan(b)) if c <= b => Some(Demand::between(c, cmp::min(b, d))),
+            (LessThan(b), Range(c, d)) if c <= b => {
+                Some(Demand::between(c, cmp::min(b, d)))
+            }
+            (Range(c, d), LessThan(b)) if c <= b => {
+                Some(Demand::between(c, cmp::min(b, d)))
+            }
 
             // 半开区间 + 半开区间
             (Range(a, b), Range(c, d)) => {
-                if b <= c  || d <= a {
+                if b <= c || d <= a {
                     return None;
                 }
                 let lower = cmp::max(a, c);
@@ -266,8 +276,9 @@ where
 
 #[cfg(test)]
 mod try_from_usize_range_tests_ {
-    use super::*;
     use core::ops::{Bound, RangeBounds};
+
+    use super::*;
 
     #[test]
     fn demand_factory_test() {

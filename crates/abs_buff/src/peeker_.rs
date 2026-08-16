@@ -1,4 +1,4 @@
-﻿use core::error::Error;
+use core::error::Error;
 
 use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
@@ -10,7 +10,9 @@ use crate::buffer::TrBuffSegmRef;
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffPeek<T = u8> {
-    type SegmPeek<'f>: TrBuffSegmRef<'f, T> where Self: 'f;
+    type SegmPeek<'f>: TrBuffSegmRef<'f, T>
+    where
+        Self: 'f;
     type Err: Error;
 
     /// Lend some slices for peeking. The number and the length of the slices
@@ -24,7 +26,5 @@ pub trait TrBuffPeek<T = u8> {
 }
 
 pub trait TrBuffTryPeek<T = u8>: TrBuffPeek<T> {
-    fn try_peek<'f>(
-        &'f mut self
-    ) -> SomeOf<Self::SegmPeek<'f>, Self::Err>;
+    fn try_peek<'f>(&'f mut self) -> SomeOf<Self::SegmPeek<'f>, Self::Err>;
 }

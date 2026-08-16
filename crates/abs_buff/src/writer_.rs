@@ -1,19 +1,18 @@
-﻿use core::error::Error;
+use core::error::Error;
 
 use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
-use crate::{
-    buffer::TrBuffSegmMut,
-    Demand,
-};
+use crate::{Demand, buffer::TrBuffSegmMut};
 
 /// A kind of buffer that owns the memory for writing data by lending some
 /// segments to the producer.
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffWrite<T = u8> {
-    type SegmMut<'f>: TrBuffSegmMut<'f, T> where Self: 'f;
+    type SegmMut<'f>: TrBuffSegmMut<'f, T>
+    where
+        Self: 'f;
     type Err: Error;
 
     /// Indicates whethe the buff will no longer accept data writing.

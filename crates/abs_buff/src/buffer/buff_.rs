@@ -126,9 +126,7 @@ impl<T, const N: usize> TrBuffer for MaybeUninit<[T; N]> {
     fn as_slice_uninit(
         &self,
     ) -> &[MaybeUninit<<Self::Slot as TrMaybeUninit>::Inner>] {
-        unsafe {
-            mem::transmute(self.assume_init_ref().as_ref())
-        }
+        unsafe { mem::transmute(self.assume_init_ref().as_ref()) }
     }
 }
 
@@ -137,9 +135,7 @@ impl<T, const N: usize> TrBufferMut for MaybeUninit<[T; N]> {
     fn as_mut_slice_uninit(
         &mut self,
     ) -> &mut [MaybeUninit<<Self::Slot as TrMaybeUninit>::Inner>] {
-        unsafe {
-            mem::transmute(self.assume_init_mut().as_mut())
-        }
+        unsafe { mem::transmute(self.assume_init_mut().as_mut()) }
     }
 }
 
@@ -154,9 +150,7 @@ impl<T, const N: usize> TrBuffer for &mut MaybeUninit<[T; N]> {
     fn as_slice_uninit(
         &self,
     ) -> &[MaybeUninit<<Self::Slot as TrMaybeUninit>::Inner>] {
-        unsafe {
-            mem::transmute(self.assume_init_ref().as_ref())
-        }
+        unsafe { mem::transmute(self.assume_init_ref().as_ref()) }
     }
 }
 
@@ -165,9 +159,7 @@ impl<T, const N: usize> TrBufferMut for &mut MaybeUninit<[T; N]> {
     fn as_mut_slice_uninit(
         &mut self,
     ) -> &mut [MaybeUninit<<Self::Slot as TrMaybeUninit>::Inner>] {
-        unsafe {
-            mem::transmute(self.assume_init_mut().as_mut())
-        }
+        unsafe { mem::transmute(self.assume_init_mut().as_mut()) }
     }
 }
 
@@ -233,7 +225,7 @@ unsafe impl<T> TrMaybeUninit for MaybeUninit<T> {
         unsafe {
             slice::from_raw_parts(
                 self.as_ptr().cast::<MaybeUninit<u8>>(),
-                mem::size_of::<T>()
+                mem::size_of::<T>(),
             )
         }
     }
@@ -271,7 +263,9 @@ unsafe impl<T> TrMaybeUninit for MaybeUninit<T> {
 
     #[inline]
     unsafe fn assume_init_drop(&mut self) {
-        unsafe { self.assume_init_drop(); }
+        unsafe {
+            self.assume_init_drop();
+        }
     }
 
     #[inline]

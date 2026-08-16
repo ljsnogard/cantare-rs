@@ -4,6 +4,6 @@ mod segm_;
 
 pub use buff_::{TrBuffer, TrBufferMut, TrMaybeUninit};
 pub use segm_::{
-    SegmMut, SegmRef, SegmReclaim,
-    TrBuffSegmView, TrBuffSegmMut, TrBuffSegmRef, TrReclaim,
+    SegmMut, SegmReclaim, SegmRef, TrBuffSegmMut, TrBuffSegmRef,
+    TrBuffSegmView, TrReclaim,
 };

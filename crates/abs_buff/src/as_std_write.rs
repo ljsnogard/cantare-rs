@@ -4,10 +4,7 @@ use std::{io, string::ToString};
 
 use abs_cancel::{NonCancellableToken, TrCancellationToken};
 
-use crate::{
-    buffer::TrBuffSegmMut,
-    Demand, TrBuffTryWrite, TrBuffWrite,
-};
+use crate::{Demand, TrBuffTryWrite, TrBuffWrite, buffer::TrBuffSegmMut};
 
 /// An adapter that exposes a [`TrBuffTryWrite`] buffer as a non-blocking
 /// `std::io::Write`.
@@ -54,7 +51,10 @@ where
         let mut c = 0usize;
         let buf_len = buf.len();
         loop {
-            if c >= buf_len || self.buff_w_.is_blocked() || self.cancel_.is_cancelled() {
+            if c >= buf_len
+                || self.buff_w_.is_blocked()
+                || self.cancel_.is_cancelled()
+            {
                 return Result::Ok(c);
             }
             let demand = Demand::less_than(buf_len - c);
@@ -129,17 +129,16 @@ mod tests_ {
         pin::Pin,
         task::{Context, Poll},
     };
-
-    use std::vec;
-    use std::vec::Vec;
+    use std::{vec, vec::Vec};
 
     use abs_cancel::{CancelledToken, TrCancellationToken, TrMayCancel};
     use anylr::SomeOf;
 
-    use crate::buffer::{SegmMut, SegmReclaim};
-    use crate::{Demand, TrBuffTryWrite, TrBuffWrite};
-
     use super::AsStdWrite;
+    use crate::{
+        Demand, TrBuffTryWrite, TrBuffWrite,
+        buffer::{SegmMut, SegmReclaim},
+    };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestErr {
@@ -172,9 +171,14 @@ mod tests_ {
     impl<S, E> Future for ReadySegm<S, E> {
         type Output = SomeOf<S, E>;
 
-        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        fn poll(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Self::Output> {
             let this = unsafe { self.get_unchecked_mut() };
-            Poll::Ready(this.0.take().expect("a ready future must be polled once"))
+            Poll::Ready(
+                this.0.take().expect("a ready future must be polled once"),
+            )
         }
     }
 
@@ -237,7 +241,10 @@ mod tests_ {
     }
 
     impl TrBuffWrite<u8> for TestSink {
-        type SegmMut<'f> = SegmMut<'f, u8, SegmReclaim<'f>> where Self: 'f;
+        type SegmMut<'f>
+            = SegmMut<'f, u8, SegmReclaim<'f>>
+        where
+            Self: 'f;
         type Err = TestErr;
 
         fn is_blocked(&self) -> bool {
@@ -247,7 +254,10 @@ mod tests_ {
         fn write_async<'f>(
             &'f mut self,
             demand: &Demand<usize>,
-        ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>> {
+        ) -> impl TrMayCancel<
+            'f,
+            MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>,
+        > {
             let free = self.buff.len() - self.pos;
             let result = if free == 0 {
                 let e = if self.closed {
@@ -257,7 +267,10 @@ mod tests_ {
                 };
                 SomeOf::new_right(e)
             } else {
-                let take = core::cmp::min(demand.max().copied().unwrap_or(usize::MAX), free);
+                let take = core::cmp::min(
+                    demand.max().copied().unwrap_or(usize::MAX),
+                    free,
+                );
                 let segm = SegmMut::new(
                     &mut self.buff[self.pos..self.pos + take],
                     SegmReclaim::new(&mut self.pos),
@@ -282,7 +295,10 @@ mod tests_ {
                 };
                 return SomeOf::new_right(e);
             }
-            let take = core::cmp::min(demand.max().copied().unwrap_or(usize::MAX), free);
+            let take = core::cmp::min(
+                demand.max().copied().unwrap_or(usize::MAX),
+                free,
+            );
             let segm = SegmMut::new(
                 &mut self.buff[self.pos..self.pos + take],
                 SegmReclaim::new(&mut self.pos),
@@ -362,8 +378,10 @@ mod tests_ {
         let mut sink = TestSink::with_capacity(16);
 
         let n = {
-            let mut wr = AsStdWrite::new(&mut sink, CancelledToken::shared_mut());
-            wr.write(&[1u8, 2, 3]).expect("cancelled write returns Ok(0)")
+            let mut wr =
+                AsStdWrite::new(&mut sink, CancelledToken::shared_mut());
+            wr.write(&[1u8, 2, 3])
+                .expect("cancelled write returns Ok(0)")
         };
         assert_eq!(n, 0);
         assert_eq!(sink.written().len(), 0);

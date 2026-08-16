@@ -1,3 +1,3 @@
 pub mod join;
 
-pub use join::{PipeJoin, PipeIoAsync, PipeIoFuture, PipeJoinIoResult};
+pub use join::{PipeIoAsync, PipeIoFuture, PipeJoin, PipeJoinIoResult};

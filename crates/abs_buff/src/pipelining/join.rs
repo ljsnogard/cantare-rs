@@ -1,12 +1,11 @@
 use core::{marker::PhantomData, mem};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
-
 use gen_mcf_macro::gen_may_cancel_future;
 
 use crate::{
-    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView},
     Demand, TrBuffRead, TrBuffWrite,
+    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView},
 };
 
 pub enum PipeJoinIoResult<W, R, T>
@@ -44,10 +43,7 @@ where
     W: TrBuffWrite<T>,
     R: TrBuffRead<T>,
 {
-    pub const fn new(
-        buff_write: &'a mut W,
-        buff_read: &'a mut R,
-    ) -> Self {
+    pub const fn new(buff_write: &'a mut W, buff_read: &'a mut R) -> Self {
         PipeJoin {
             buff_w_: buff_write,
             buff_r_: buff_read,
@@ -117,20 +113,24 @@ where
                     c += copied;
                 }
                 if let Option::Some(tx_err) = w_res.pick_right() {
-                    return PipeJoinIoResult::TxErr { count: c, err: tx_err }
+                    return PipeJoinIoResult::TxErr {
+                        count: c,
+                        err: tx_err,
+                    };
                 }
             }
         }
         if let Option::Some(rx_err) = r_res.pick_right() {
-            return PipeJoinIoResult::RxErr { count: c, err: rx_err }
+            return PipeJoinIoResult::RxErr {
+                count: c,
+                err: rx_err,
+            };
         }
     }
 }
 
 #[cfg(test)]
 mod tests_ {
-    use super::*;
-
     use core::{
         error::Error,
         fmt,
@@ -139,13 +139,13 @@ mod tests_ {
         pin::Pin,
         task::{Context, Poll, Waker},
     };
-    use std::vec;
-    use std::vec::Vec;
+    use std::{vec, vec::Vec};
 
     use abs_cancel::{TrCancellationToken, TrMayCancel};
     use anylr::SomeOf;
 
-    use crate::buffer::{SegmMut, SegmRef, SegmReclaim};
+    use super::*;
+    use crate::buffer::{SegmMut, SegmReclaim, SegmRef};
 
     //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
     // Test doubles: a read buffer and a write buffer built directly on
@@ -187,9 +187,14 @@ mod tests_ {
     impl<S, E> Future for ReadySegm<S, E> {
         type Output = SomeOf<S, E>;
 
-        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        fn poll(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Self::Output> {
             let this = unsafe { self.get_unchecked_mut() };
-            Poll::Ready(this.0.take().expect("a ready future must be polled once"))
+            Poll::Ready(
+                this.0.take().expect("a ready future must be polled once"),
+            )
         }
     }
 
@@ -239,7 +244,10 @@ mod tests_ {
     }
 
     impl<T> TrBuffRead<T> for TestRx<T> {
-        type SegmRef<'f> = SegmRef<'f, T, SegmReclaim<'f>> where Self: 'f;
+        type SegmRef<'f>
+            = SegmRef<'f, T, SegmReclaim<'f>>
+        where
+            Self: 'f;
         type Err = TestErr;
 
         fn is_drained(&self) -> bool {
@@ -249,7 +257,10 @@ mod tests_ {
         fn read_async<'f>(
             &'f mut self,
             demand: &Demand<usize>,
-        ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>> {
+        ) -> impl TrMayCancel<
+            'f,
+            MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>,
+        > {
             let mut take = demand.max().copied().unwrap_or(usize::MAX);
             if self.chunk > 0 {
                 take = core::cmp::min(take, self.chunk);
@@ -290,7 +301,10 @@ mod tests_ {
     }
 
     impl<T> TrBuffWrite<T> for TestTx<T> {
-        type SegmMut<'f> = SegmMut<'f, T, SegmReclaim<'f>> where Self: 'f;
+        type SegmMut<'f>
+            = SegmMut<'f, T, SegmReclaim<'f>>
+        where
+            Self: 'f;
         type Err = TestErr;
 
         fn is_blocked(&self) -> bool {
@@ -300,12 +314,18 @@ mod tests_ {
         fn write_async<'f>(
             &'f mut self,
             demand: &Demand<usize>,
-        ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>> {
+        ) -> impl TrMayCancel<
+            'f,
+            MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>,
+        > {
             let free = self.buff.len() - self.pos;
             if free == 0 {
                 return ReadySegm::new(SomeOf::new_right(TestErr::Blocked));
             }
-            let take = core::cmp::min(demand.max().copied().unwrap_or(usize::MAX), free);
+            let take = core::cmp::min(
+                demand.max().copied().unwrap_or(usize::MAX),
+                free,
+            );
             let segm = SegmMut::new(
                 &mut self.buff[self.pos..self.pos + take],
                 SegmReclaim::new(&mut self.pos),
@@ -322,7 +342,9 @@ mod tests_ {
         let mut cx = Context::from_waker(waker);
         match fut.as_mut().poll(&mut cx) {
             Poll::Ready(v) => v,
-            Poll::Pending => panic!("the pipe future must complete on the first poll"),
+            Poll::Pending => {
+                panic!("the pipe future must complete on the first poll")
+            }
         }
     }
 
@@ -346,7 +368,11 @@ mod tests_ {
 
         assert!(matches!(result, PipeJoinIoResult::RxDrained(c) if c == TOTAL));
         assert_eq!(rx.pos, TOTAL, "the reader must consume everything");
-        assert_eq!(tx.collected(), expected, "the writer must receive everything in order");
+        assert_eq!(
+            tx.collected(),
+            expected,
+            "the writer must receive everything in order"
+        );
     }
 
     /// The reader yields its data in chunks: each `read_async` must hand out
@@ -400,7 +426,9 @@ mod tests_ {
             let mut pipe = PipeJoin::new(&mut tx2, &mut rx);
             pipe.pipe_async().await
         });
-        assert!(matches!(result2, PipeJoinIoResult::RxDrained(c) if c == TOTAL - TX_CAP));
+        assert!(
+            matches!(result2, PipeJoinIoResult::RxDrained(c) if c == TOTAL - TX_CAP)
+        );
         assert_eq!(tx2.collected(), expected[TX_CAP..]);
     }
 
@@ -417,7 +445,10 @@ mod tests_ {
         });
 
         assert!(matches!(result, PipeJoinIoResult::TxBlocked(0)));
-        assert_eq!(rx.pos, 0, "nothing must be consumed when the writer is blocked");
+        assert_eq!(
+            rx.pos, 0,
+            "nothing must be consumed when the writer is blocked"
+        );
     }
 
     /// The reader is already drained before the pipe starts: report
@@ -433,7 +464,10 @@ mod tests_ {
         });
 
         assert!(matches!(result, PipeJoinIoResult::RxDrained(0)));
-        assert_eq!(tx.pos, 0, "nothing must be written when the reader is drained");
+        assert_eq!(
+            tx.pos, 0,
+            "nothing must be written when the reader is drained"
+        );
     }
 
     /// A zero-sized item type short-circuits the pipe into `NoOps`.

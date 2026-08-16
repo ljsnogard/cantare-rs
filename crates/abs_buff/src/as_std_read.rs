@@ -4,10 +4,7 @@ use std::{io, mem::MaybeUninit, string::ToString};
 
 use abs_cancel::{NonCancellableToken, TrCancellationToken};
 
-use crate::{
-    buffer::TrBuffSegmRef,
-    Demand, TrBuffRead, TrBuffTryRead,
-};
+use crate::{Demand, TrBuffRead, TrBuffTryRead, buffer::TrBuffSegmRef};
 
 /// An adapter that exposes a [`TrBuffTryRead`] buffer as a non-blocking
 /// `std::io::Read`.
@@ -54,7 +51,10 @@ where
         let mut c = 0usize;
         let buf_len = buf.len();
         loop {
-            if c >= buf_len || self.buff_r_.is_drained() || self.cancel_.is_cancelled() {
+            if c >= buf_len
+                || self.buff_r_.is_drained()
+                || self.cancel_.is_cancelled()
+            {
                 return Result::Ok(c);
             }
             let demand = Demand::less_than(buf_len - c);
@@ -128,19 +128,16 @@ mod tests_ {
         pin::Pin,
         task::{Context, Poll},
     };
-
-    use std::vec;
-    use std::vec::Vec;
-
-    use std::string::ToString;
+    use std::{string::ToString, vec, vec::Vec};
 
     use abs_cancel::{CancelledToken, TrCancellationToken, TrMayCancel};
     use anylr::SomeOf;
 
-    use crate::buffer::{SegmRef, SegmReclaim};
-    use crate::{Demand, TrBuffRead, TrBuffTryRead};
-
     use super::AsStdRead;
+    use crate::{
+        Demand, TrBuffRead, TrBuffTryRead,
+        buffer::{SegmReclaim, SegmRef},
+    };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestErr {
@@ -173,9 +170,14 @@ mod tests_ {
     impl<S, E> Future for ReadySegm<S, E> {
         type Output = SomeOf<S, E>;
 
-        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        fn poll(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Self::Output> {
             let this = unsafe { self.get_unchecked_mut() };
-            Poll::Ready(this.0.take().expect("a ready future must be polled once"))
+            Poll::Ready(
+                this.0.take().expect("a ready future must be polled once"),
+            )
         }
     }
 
@@ -227,7 +229,10 @@ mod tests_ {
     }
 
     impl TrBuffRead<u8> for TestSrc {
-        type SegmRef<'f> = SegmRef<'f, u8, SegmReclaim<'f>> where Self: 'f;
+        type SegmRef<'f>
+            = SegmRef<'f, u8, SegmReclaim<'f>>
+        where
+            Self: 'f;
         type Err = TestErr;
 
         fn is_drained(&self) -> bool {
@@ -237,7 +242,10 @@ mod tests_ {
         fn read_async<'f>(
             &'f mut self,
             demand: &Demand<usize>,
-        ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>> {
+        ) -> impl TrMayCancel<
+            'f,
+            MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>,
+        > {
             let take = core::cmp::min(
                 demand.max().copied().unwrap_or(usize::MAX),
                 self.data.len() - self.pos,
