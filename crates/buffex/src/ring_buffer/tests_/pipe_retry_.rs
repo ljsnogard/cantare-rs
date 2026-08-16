@@ -1,5 +1,5 @@
 //! Cancellation-retry semantics of `abs_buff::pipelining::Pipe` with the
-//! per-piece reclaim granularity of `segm_buff`: a mid-transfer cancellation
+//! per-piece reclaim granularity of the `abs_buff` segments: a mid-transfer cancellation
 //! must leave the reader position exactly after the data that was actually
 //! written, so retrying transfers the rest — no duplication, no loss.
 
@@ -16,6 +16,7 @@ use abs_cancel::{TrCancellationToken, TrMayCancel};
 
 use crate::ring_buffer::{RingBuffer, RingRx, RingTx};
 
+use super::{fill_segm, take_segm};
 use super::mini_exec::MiniExec;
 
 type SharedRing = Arc<RingBuffer<Box<[u8]>>>;
@@ -63,13 +64,8 @@ fn fill_pattern(tx: &mut SharedTx, total: usize) {
         let mut segm = tx
             .try_write(core::cmp::min(1009, total - off))
             .expect("fill try_write");
-        let len = segm.len();
-        if let Some(dst) = segm.iter_slices_mut() {
-            // the ring borrow is a single contiguous slice starting at `off`
-            for (i, s) in dst.iter_mut().enumerate() {
-                s.write((off + i) as u8);
-            }
-        }
+        let len = segm.least_count();
+        fill_segm(&mut segm, &(0..len).map(|i| (off + i) as u8).collect::<Vec<_>>());
         drop(segm);
         off += len;
     }
@@ -78,9 +74,10 @@ fn fill_pattern(tx: &mut SharedTx, total: usize) {
 /// Drain everything currently readable at the rx end into `collected`.
 fn drain_available(rx: &mut SharedRx, collected: &mut Vec<u8>) {
     while let Ok(segm) = rx.try_read(1009) {
-        if let Some(src) = segm.iter_slices() {
-            collected.extend_from_slice(src);
-        }
+        let len = segm.least_count();
+        let mut segm = segm;
+        let got = take_segm(&mut segm, len);
+        collected.extend_from_slice(&got);
         drop(segm);
     }
 }

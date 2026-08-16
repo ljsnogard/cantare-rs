@@ -1,4 +1,4 @@
-//! Synchronous tests: abs_buff / segm_buff semantics, wrap-around, error
+//! Synchronous tests: abs_buff segment semantics, wrap-around, error
 //! handling, the vectored-IO kernel handoff, the `TrRingBuffer` trait, and
 //! the multithreaded SPSC pipe without any runtime.
 
@@ -11,7 +11,7 @@ use abs_buff::Demand;
 
 use crate::ring_buffer::{RxError, TrRingBuffer, TxError};
 
-use super::{make_ring, make_ring_shared, pat_byte, seq_byte, RING_CAP};
+use super::{fill_segm, make_ring, make_ring_shared, pat_byte, seq_byte, take_segm, RING_CAP};
 
 /// Write `[0..8)` through partial contiguous borrows and read them back,
 /// including across the wrap-around.
@@ -22,38 +22,30 @@ fn segm_borrow_roundtrip_and_wrap() {
 
     // partial writes: 3 then 5 (wp: 0 -> 3 -> 8)
     let mut segm = tx.try_write(3).expect("write 3");
-    assert_eq!(segm.len(), 3);
-    {
-        let dst = segm.as_slice_mut();
-        for (i, slot) in dst.iter_mut().enumerate() {
-            slot.write(seq_byte(i));
-        }
-    }
+    assert_eq!(segm.least_count(), 3);
+    fill_segm(&mut segm, &(0..3).map(seq_byte).collect::<Vec<_>>());
     drop(segm);
     assert_eq!(tx.data_size(), 3);
 
     let mut segm = tx.try_write(5).expect("write 5");
-    assert_eq!(segm.len(), 5);
-    {
-        let dst = segm.as_slice_mut();
-        for (i, slot) in dst.iter_mut().enumerate() {
-            slot.write(seq_byte(3 + i));
-        }
-    }
+    assert_eq!(segm.least_count(), 5);
+    fill_segm(&mut segm, &(3..8).map(seq_byte).collect::<Vec<_>>());
     drop(segm);
     assert_eq!(tx.data_size(), 8);
 
     // partial reads: 4 then 4 (rp: 0 -> 4 -> 8)
-    let segm = rx.try_read(4).expect("read 4");
-    assert_eq!(segm.len(), 4);
-    for (i, b) in segm.iter().enumerate() {
+    let mut segm = rx.try_read(4).expect("read 4");
+    assert_eq!(segm.least_count(), 4);
+    let got = take_segm(&mut segm, 4);
+    for (i, b) in got.iter().enumerate() {
         assert_eq!(*b, seq_byte(i));
     }
     drop(segm);
 
-    let segm = rx.try_read(4).expect("read 4 more");
-    assert_eq!(segm.len(), 4);
-    for (i, b) in segm.iter().enumerate() {
+    let mut segm = rx.try_read(4).expect("read 4 more");
+    assert_eq!(segm.least_count(), 4);
+    let got = take_segm(&mut segm, 4);
+    for (i, b) in got.iter().enumerate() {
         assert_eq!(*b, seq_byte(4 + i));
     }
     drop(segm);
@@ -65,18 +57,12 @@ fn segm_borrow_roundtrip_and_wrap() {
     let mut total = 0usize;
     while total < RING_CAP - 1 {
         let mut segm = tx.try_write(RING_CAP - 1 - total).expect("fill");
-        assert!(segm.len() > 0);
-        {
-            let dst = segm.as_slice_mut();
-            for (i, slot) in dst.iter_mut().enumerate() {
-                slot.write(seq_byte(100 + total + i));
-            }
-        }
-        let len = segm.len();
+        assert!(segm.least_count() > 0);
+        let len = segm.least_count();
+        fill_segm(&mut segm, &(0..len).map(|i| seq_byte(100 + total + i)).collect::<Vec<_>>());
         drop(segm);
         total += len;
     }
-    assert!(tx.ring().writer_pos() < RING_CAP);
     assert!(tx.ring().writer_pos() < RING_CAP);
     assert_eq!(tx.data_size(), RING_CAP - 1);
     // full: one slot gap
@@ -90,24 +76,16 @@ fn segm_borrow_roundtrip_and_wrap() {
             Err(RxError::Drained(_)) => break,
             Err(e) => panic!("read failed: {e:?}"),
         };
-        for b in segm.iter() {
-            assert_eq!(*b, seq_byte(100 + off));
-            off += 1;
+        let len = segm.least_count();
+        let mut segm = segm;
+        let got = take_segm(&mut segm, len);
+        for (i, b) in got.iter().enumerate() {
+            assert_eq!(*b, seq_byte(100 + off + i));
         }
         drop(segm);
+        off += len;
     }
     assert_eq!(off, RING_CAP - 1);
-}
-
-/// The whole borrowed region is committed when the segment drops (the
-/// segm_buff contract).
-#[test]
-fn reclaim_commits_full_borrow() {
-    let (_ring, mut tx, _rx) = make_ring();
-    let segm = tx.try_write(6).expect("write 6");
-    assert_eq!(segm.len(), 6);
-    drop(segm);
-    assert_eq!(tx.data_size(), 6);
 }
 
 /// `try_peek` borrows data without consuming it.
@@ -115,25 +93,23 @@ fn reclaim_commits_full_borrow() {
 fn peek_does_not_consume() {
     let (_ring, mut tx, mut rx) = make_ring();
     let mut segm = tx.try_write(4).expect("write");
-    {
-        let dst = segm.as_slice_mut();
-        for (i, slot) in dst.iter_mut().enumerate() {
-            slot.write((10 + i) as u8);
-        }
-    }
+    fill_segm(&mut segm, &[10, 11, 12, 13]);
     drop(segm);
 
     let segm = rx.try_peek().expect("peek");
-    assert_eq!(&segm[..], &[10, 11, 12, 13]);
+    let slice = segm.iter_slices().expect("peek data");
+    assert_eq!(slice, &[10u8, 11, 12, 13]);
     drop(segm); // no reclaim
 
     // still fully readable
     let segm = rx.try_peek().expect("peek again");
-    assert_eq!(segm.len(), 4);
+    assert_eq!(segm.least_count(), 4);
     drop(segm);
 
-    let segm = rx.try_read(16).expect("read all");
-    assert_eq!(segm.len(), 4);
+    let mut segm = rx.try_read(16).expect("read all");
+    assert_eq!(segm.least_count(), 4);
+    let got = take_segm(&mut segm, 4);
+    assert_eq!(got, vec![10, 11, 12, 13]);
     drop(segm);
 
     // now drained
@@ -150,14 +126,18 @@ fn error_semantics() {
     assert!(matches!(rx.try_read(1), Err(RxError::Drained(_))));
 
     // fill to capacity - 1
-    let segm = tx.try_write(RING_CAP).expect("fill");
-    assert_eq!(segm.len(), RING_CAP - 1, "one slot is always unused");
+    let mut segm = tx.try_write(RING_CAP).expect("fill");
+    let n = segm.least_count();
+    assert_eq!(n, RING_CAP - 1, "one slot is always unused");
+    fill_segm(&mut segm, &vec![0u8; n]);
     drop(segm);
     assert!(matches!(tx.try_write(1), Err(TxError::Stuffed(_))));
 
     // drain
-    let segm = rx.try_read(RING_CAP).expect("read all");
-    assert_eq!(segm.len(), RING_CAP - 1);
+    let mut segm = rx.try_read(RING_CAP).expect("read all");
+    let n = segm.least_count();
+    assert_eq!(n, RING_CAP - 1);
+    take_segm(&mut segm, n);
     drop(segm);
     assert!(matches!(rx.try_read(1), Err(RxError::Drained(_))));
 
@@ -170,7 +150,8 @@ fn error_semantics() {
     // The `Closing` error is only reported when the ring is full as well
     // (matching the documented semantics: "the output end has closed and the
     // buffer is already full").
-    let segm = tx.try_write(1).expect("write while closing still has space");
+    let mut segm = tx.try_write(1).expect("write while closing still has space");
+    fill_segm(&mut segm, &[0u8]);
     drop(segm);
 }
 
@@ -198,12 +179,7 @@ fn tr_ring_buffer_trait() {
     let Some(mut segm) = some.pick_left() else {
         panic!("TrBuffTryWrite::try_write failed")
     };
-    {
-        let dst = segm.as_slice_mut();
-        for (i, slot) in dst.iter_mut().enumerate() {
-            slot.write(seq_byte(i));
-        }
-    }
+    fill_segm(&mut segm, &(0..4).map(seq_byte).collect::<Vec<_>>());
     drop(segm);
     assert_eq!(tx.data_size(), 4);
 
@@ -213,7 +189,9 @@ fn tr_ring_buffer_trait() {
     let Some(segm) = some.pick_left() else {
         panic!("TrBuffTryRead::try_read failed")
     };
-    let got: Vec<u8> = segm.iter().copied().collect();
+    let n = segm.least_count();
+    let mut segm = segm;
+    let got: Vec<u8> = take_segm(&mut segm, n);
     drop(segm);
     assert_eq!(got, vec![0, 1, 2, 3]);
 
@@ -223,18 +201,14 @@ fn tr_ring_buffer_trait() {
     let Some(mut segm) = some.pick_left() else {
         panic!("write 4 more failed")
     };
-    {
-        let dst = segm.as_slice_mut();
-        for (i, slot) in dst.iter_mut().enumerate() {
-            slot.write((4 + i) as u8);
-        }
-    }
+    fill_segm(&mut segm, &[4, 5, 6, 7]);
     drop(segm);
     let some = TrBuffTryPeek::try_peek(&mut rx);
     let Some(segm) = some.pick_left() else {
         panic!("TrBuffTryPeek::try_peek failed")
     };
-    assert_eq!(segm[0], 4);
+    let slice = segm.iter_slices().expect("peek data");
+    assert_eq!(slice[0], 4);
     drop(segm);
 
     drop(tx);
@@ -250,12 +224,8 @@ fn iovec_take_put() {
 
     // write 6 bytes
     let mut segm = tx.try_write(6).unwrap();
-    {
-        let dst = segm.as_slice_mut();
-        for (i, slot) in dst.iter_mut().enumerate() {
-            slot.write((10 + i) as u8);
-        }
-    }
+    let n = segm.least_count();
+    fill_segm(&mut segm, &(0..n).map(|i| (10 + i) as u8).collect::<Vec<_>>());
     drop(segm);
 
     // take the send iovecs (contiguous: one non-empty slice)
@@ -269,13 +239,8 @@ fn iovec_take_put() {
     let mut off = 0usize;
     while off < RING_CAP - 1 {
         let mut segm = tx.try_write(RING_CAP - off).unwrap();
-        {
-            let dst = segm.as_slice_mut();
-            for (i, slot) in dst.iter_mut().enumerate() {
-                slot.write((20 + off + i) as u8);
-            }
-        }
-        let len = segm.len();
+        let len = segm.least_count();
+        fill_segm(&mut segm, &(0..len).map(|i| (20 + off + i) as u8).collect::<Vec<_>>());
         drop(segm);
         off += len;
     }
@@ -316,12 +281,7 @@ fn kernel_reservation_blocks_user() {
     let mut rx = RingRxShim(&ring);
 
     let mut segm = tx.try_write(4).unwrap();
-    {
-        let dst = segm.as_slice_mut();
-        for (i, slot) in dst.iter_mut().enumerate() {
-            slot.write((1 + i) as u8);
-        }
-    }
+    fill_segm(&mut segm, &[1, 2, 3, 4]);
     drop(segm);
 
     let (_a, _b) = ring.take_send_iovecs().unwrap();
@@ -341,8 +301,9 @@ fn kernel_reservation_blocks_user() {
     ring.put_back_recv(3);
 
     // now the user can read the received data
-    let segm = rx.try_read(3).unwrap();
-    assert_eq!(&segm[..], &[42, 43, 44]);
+    let mut segm = rx.try_read(3).unwrap();
+    let got = take_segm(&mut segm, 3);
+    assert_eq!(got, vec![42, 43, 44]);
     drop(segm);
 }
 
@@ -355,14 +316,11 @@ fn split_borrowed_halves() {
     .unwrap();
     let (mut tx, mut rx) = ring.split();
     let mut segm = tx.try_write(2).unwrap();
-    {
-        let dst = segm.as_slice_mut();
-        dst[0].write(1);
-        dst[1].write(2);
-    }
+    fill_segm(&mut segm, &[1, 2]);
     drop(segm);
-    let segm = rx.try_read(2).unwrap();
-    assert_eq!(&segm[..], &[1, 2]);
+    let mut segm = rx.try_read(2).unwrap();
+    let got = take_segm(&mut segm, 2);
+    assert_eq!(got, vec![1, 2]);
     drop(segm);
 }
 
@@ -388,13 +346,8 @@ fn spsc_multithread() {
             let mut progressed = false;
             match res {
                 Ok(mut segm) => {
-                    let len = segm.len();
-                    {
-                        let dst = segm.as_slice_mut();
-                        for (i, slot) in dst.iter_mut().enumerate() {
-                            slot.write(seq_byte(off + i));
-                        }
-                    }
+                    let len = segm.least_count();
+                    fill_segm(&mut segm, &(0..len).map(|i| seq_byte(off + i)).collect::<Vec<_>>());
                     drop(segm);
                     off += len;
                     progressed = true;
@@ -416,10 +369,13 @@ fn spsc_multithread() {
             }
             match rx.try_read(9) {
                 Ok(segm) => {
-                    for (i, b) in segm.iter().enumerate() {
+                    let len = segm.least_count();
+                    let mut segm = segm;
+                    let got = take_segm(&mut segm, len);
+                    for (i, b) in got.iter().enumerate() {
                         assert_eq!(*b, seq_byte(off + i), "reader mismatch at {off}+{i}");
                     }
-                    off += segm.len();
+                    off += len;
                     drop(segm);
                 }
                 Err(_) => std::thread::yield_now(),
@@ -436,13 +392,13 @@ fn spsc_multithread() {
 /// ring without holding halves.
 struct RingTxShim<'a>(&'a super::SharedRing);
 impl<'a> RingTxShim<'a> {
-    fn try_write(&mut self, n: usize) -> Result<crate::ring_buffer::ReclSliceMut<'_, Box<[u8]>, u8>, TxError<usize>> {
+    fn try_write(&mut self, n: usize) -> Result<crate::ring_buffer::ReclSliceMut<'_, u8>, TxError<usize>> {
         self.0.try_write_at(n).map(|(s, t)| self.0.write_segm(s, t))
     }
 }
 struct RingRxShim<'a>(&'a super::SharedRing);
 impl<'a> RingRxShim<'a> {
-    fn try_read(&mut self, n: usize) -> Result<crate::ring_buffer::ReclSliceRef<'_, Box<[u8]>, u8>, RxError<usize>> {
+    fn try_read(&mut self, n: usize) -> Result<crate::ring_buffer::ReclSliceRef<'_, u8>, RxError<usize>> {
         self.0.try_read_at(n).map(|(s, t)| self.0.read_segm(s, t))
     }
 }

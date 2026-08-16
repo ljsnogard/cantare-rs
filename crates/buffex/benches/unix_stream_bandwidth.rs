@@ -41,6 +41,28 @@ fn main() {
         path
     }
 
+    /// Write `data` into a write segment — the segment's buffer is the ring's
+    /// own memory — and commit exactly `data.len()` units (per-piece reclaim
+    /// granularity of the `abs_buff` segments).
+    fn fill_segm(segm: &mut buffex::ring_buffer::ReclSliceMut<'_, u8>, data: &[u8]) {
+        use core::mem::MaybeUninit;
+        let mut staging: Vec<MaybeUninit<u8>> =
+            data.iter().map(|&b| MaybeUninit::new(b)).collect();
+        let moved = unsafe { segm.move_items_from_buff(&mut staging) };
+        assert_eq!(moved, data.len());
+    }
+
+    /// Consume `len` units from a read segment into a fresh `Vec<u8>`; the
+    /// reader position advances by `len` when the segment drops.
+    fn take_segm(segm: &mut buffex::ring_buffer::ReclSliceRef<'_, u8>, len: usize) -> Vec<u8> {
+        use core::mem::MaybeUninit;
+        let mut dst: Vec<MaybeUninit<u8>> = Vec::with_capacity(len);
+        dst.resize_with(len, MaybeUninit::uninit);
+        let moved = unsafe { segm.move_items_to_buff(&mut dst) };
+        assert_eq!(moved, len);
+        dst[..len].iter().map(|m| unsafe { m.assume_init_read() }).collect()
+    }
+
     /// Push `total` bytes through `TrBuffWrite::write_async`, filling each
     /// borrowed segment completely.
     async fn send_all(buffered: &mut BufferedUnixStream, total: usize) {
@@ -55,13 +77,7 @@ fn main() {
                 panic!("write_async failed");
             };
             let len = segm.least_count();
-            let mut seen = 0usize;
-            for dst in segm.iter_slices_mut() {
-                for (i, slot) in dst.iter_mut().enumerate() {
-                    slot.write((off + seen + i) as u8);
-                }
-                seen += dst.len();
-            }
+            fill_segm(&mut segm, &(0..len).map(|i| (off + i) as u8).collect::<Vec<_>>());
             drop(segm);
             off += len;
         }
@@ -81,9 +97,8 @@ fn main() {
                 panic!("read_async failed (peer closed early?)");
             };
             let len = segm.least_count();
-            for src in segm.iter_slices() {
-                let _ = src;
-            }
+            let mut segm = segm;
+            let _ = take_segm(&mut segm, len);
             drop(segm);
             off += len;
         }
@@ -142,7 +157,6 @@ fn main() {
 
         let server = compio::runtime::spawn(async move {
             let mut buffered = BufferedUnixStream::new(server_stream, RING_CAP);
-            let mut scratch = Vec::with_capacity(CHUNK);
             let mut off = 0usize;
             while off < TOTAL {
                 let demand = Demand::less_than(CHUNK);
@@ -154,10 +168,8 @@ fn main() {
                     panic!("echo server read failed");
                 };
                 let len = segm.least_count();
-                scratch.clear();
-                for src in segm.iter_slices() {
-                    scratch.extend_from_slice(src);
-                }
+                let mut segm = segm;
+                let scratch = take_segm(&mut segm, len);
                 drop(segm);
 
                 let wdemand = Demand::less_than(len);
@@ -168,14 +180,7 @@ fn main() {
                 let Some(mut wsegm) = wx.pick_left() else {
                     panic!("echo server write failed");
                 };
-                let mut seen = 0usize;
-                for dst in wsegm.iter_slices_mut() {
-                    let copy = core::cmp::min(dst.len(), scratch.len() - seen);
-                    for (i, slot) in dst[..copy].iter_mut().enumerate() {
-                        slot.write(scratch[seen + i]);
-                    }
-                    seen += copy;
-                }
+                fill_segm(&mut wsegm, &scratch);
                 drop(wsegm);
                 off += len;
             }
@@ -192,13 +197,7 @@ fn main() {
                 let x = buffered.try_write(&demand);
                 if let Some(mut segm) = x.pick_left() {
                     let len = segm.least_count();
-                    let mut seen = 0usize;
-                    for dst in segm.iter_slices_mut() {
-                        for (i, slot) in dst.iter_mut().enumerate() {
-                            slot.write((sent + seen + i) as u8);
-                        }
-                        seen += dst.len();
-                    }
+                    fill_segm(&mut segm, &(0..len).map(|i| (sent + i) as u8).collect::<Vec<_>>());
                     drop(segm);
                     sent += len;
                 }
@@ -208,9 +207,8 @@ fn main() {
                 let x = buffered.try_read(&demand);
                 if let Some(segm) = x.pick_left() {
                     let len = segm.least_count();
-                    for src in segm.iter_slices() {
-                        let _ = src;
-                    }
+                    let mut segm = segm;
+                    let _ = take_segm(&mut segm, len);
                     drop(segm);
                     recvd += len;
                 }

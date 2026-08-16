@@ -9,7 +9,7 @@ use std::vec::Vec;
 use super::scenario_::{
     run_kernel_scenario, run_pipe_scenario, run_pipe_scenario_sync, run_scenarios_mini,
 };
-use super::{make_ring, seq_byte};
+use super::{fill_segm, make_ring, seq_byte};
 
 const TOTAL: usize = 200;
 
@@ -111,13 +111,8 @@ mod compio_ {
                     let res = tx.try_write(8);
                     match res {
                         Ok(mut segm) => {
-                            let len = segm.len();
-                            {
-                                let dst = segm.as_slice_mut();
-                                for (i, slot) in dst[..len].iter_mut().enumerate() {
-                                    slot.write(data[off + i]);
-                                }
-                            }
+                            let len = segm.least_count();
+                            fill_segm(&mut segm, &(0..len).map(|i| data[off + i]).collect::<Vec<_>>());
                             drop(segm);
                             off += len;
                             progressed = true;

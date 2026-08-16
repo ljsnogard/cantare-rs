@@ -13,7 +13,7 @@ use abs_buff::x_deps::anylr::SomeOf;
 use super::{
     error_::RxError,
     futures_::{PeekAsync, ReadAsync},
-    reclaim_::ReclSliceRef,
+    reclaim_::{ReclPeekRef, ReclSliceRef},
     state_::{RingBuffer, Waiter},
 };
 
@@ -55,7 +55,7 @@ where
 
     /// Borrow up to `length` contiguous readable units. The returned segment
     /// commits its whole borrowed region when it drops.
-    pub fn try_read(&mut self, length: usize) -> Result<ReclSliceRef<'_, B, T>, RxError<usize>> {
+    pub fn try_read(&mut self, length: usize) -> Result<ReclSliceRef<'_, T>, RxError<usize>> {
         let ring = self.ring();
         let (start, take) = ring.try_read_at(length)?;
         Ok(ring.read_segm(start, take))
@@ -68,7 +68,7 @@ where
     }
 
     /// Borrow all contiguous readable units without consuming them.
-    pub fn try_peek(&mut self) -> Result<ReclSliceRef<'_, B, T>, RxError<usize>> {
+    pub fn try_peek(&mut self) -> Result<ReclPeekRef<'_, T>, RxError<usize>> {
         let ring = self.ring();
         let (start, take) = ring.try_peek_at()?;
         Ok(ring.peek_segm(start, take))
@@ -122,7 +122,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
-    type SegmRef<'a> = ReclSliceRef<'a, B, T> where Self: 'a;
+    type SegmRef<'a> = ReclSliceRef<'a, T> where Self: 'a;
     type Err = RxError<usize>;
 
     fn is_drained(&self) -> bool {
@@ -165,7 +165,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
-    type SegmPeek<'a> = ReclSliceRef<'a, B, T> where Self: 'a;
+    type SegmPeek<'a> = ReclPeekRef<'a, T> where Self: 'a;
     type Err = RxError<usize>;
 
     fn peek_async<'f>(

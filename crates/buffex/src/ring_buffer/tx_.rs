@@ -56,10 +56,10 @@ where
     /// Borrow up to `length` contiguous writable units.
     ///
     /// The returned segment commits its *whole* borrowed region to the ring
-    /// when it drops (segm_buff semantics). When the ring wraps, only the
+    /// when it drops (the abs_buff per-piece reclaim granularity). When the ring wraps, only the
     /// contiguous part starting at the writer position is returned; call
     /// again to obtain the wrapped part.
-    pub fn try_write(&mut self, length: usize) -> Result<ReclSliceMut<'_, B, T>, TxError<usize>> {
+    pub fn try_write(&mut self, length: usize) -> Result<ReclSliceMut<'_, T>, TxError<usize>> {
         let ring = self.ring();
         let (start, take) = ring.try_write_at(length)?;
         Ok(ring.write_segm(start, take))
@@ -118,7 +118,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
-    type SegmMut<'a> = ReclSliceMut<'a, B, T> where Self: 'a;
+    type SegmMut<'a> = ReclSliceMut<'a, T> where Self: 'a;
     type Err = TxError<usize>;
 
     fn is_blocked(&self) -> bool {

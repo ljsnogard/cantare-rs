@@ -7,8 +7,12 @@
 use std::boxed::Box;
 use std::future::Future;
 use std::pin::Pin;
+use std::vec::Vec;
 
-use super::{make_ring, make_ring_shared, pat_byte, seq_byte, SharedRing, SharedRx, SharedTx};
+use super::{
+    fill_segm, make_ring, make_ring_shared, pat_byte, seq_byte, take_segm, SharedRing, SharedRx,
+    SharedTx,
+};
 
 /// The producer of the pipe scenario: writes `seq_byte`-data into the tx end
 /// in small chunks, then closes the tx end.
@@ -20,14 +24,9 @@ pub(super) async fn producer_core(mut tx: SharedTx, total: usize) {
         let Some(mut segm) = x.pick_left() else {
             panic!("[producer] write_async failed");
         };
-        let segm_len = segm.len();
-        {
-            let dst = segm.as_slice_mut();
-            assert!(segm_len <= dst.len(), "segm_len({segm_len}) > dst.len()");
-            for (i, slot) in dst[..segm_len].iter_mut().enumerate() {
-                slot.write(seq_byte(off + i));
-            }
-        }
+        let segm_len = segm.least_count();
+        assert!(segm_len <= take, "segm_len({segm_len}) > take({take})");
+        fill_segm(&mut segm, &(0..segm_len).map(|i| seq_byte(off + i)).collect::<Vec<_>>());
         drop(segm);
         off += segm_len;
     }
@@ -52,10 +51,13 @@ pub(super) async fn consumer_core(
         let Some(segm) = x.pick_left() else {
             panic!("[consumer] read_async failed");
         };
-        for (i, b) in segm.iter().enumerate() {
+        let len = segm.least_count();
+        let mut segm = segm;
+        let got = take_segm(&mut segm, len);
+        for (i, b) in got.iter().enumerate() {
             assert_eq!(*b, byte_at(off + i), "[consumer] mismatch at {off}+{i}");
         }
-        off += segm.len();
+        off += len;
         drop(segm);
     }
     rx.close();
@@ -209,13 +211,8 @@ pub(super) fn run_pipe_scenario_sync() {
                 let res = tx.try_write(5);
                 match res {
                     Ok(mut segm) => {
-                        let len = segm.len();
-                        {
-                            let dst = segm.as_slice_mut();
-                            for (i, slot) in dst.iter_mut().enumerate() {
-                                slot.write(seq_byte(off + i));
-                            }
-                        }
+                        let len = segm.least_count();
+                        fill_segm(&mut segm, &(0..len).map(|i| seq_byte(off + i)).collect::<Vec<_>>());
                         drop(segm);
                         off += len;
                         progressed = true;
@@ -237,10 +234,13 @@ pub(super) fn run_pipe_scenario_sync() {
             }
             match rx.try_read(9) {
                 Ok(segm) => {
-                    for (i, b) in segm.iter().enumerate() {
+                    let len = segm.least_count();
+                    let mut segm = segm;
+                    let got = take_segm(&mut segm, len);
+                    for (i, b) in got.iter().enumerate() {
                         assert_eq!(*b, seq_byte(off + i), "[sync pipe] mismatch");
                     }
-                    off += segm.len();
+                    off += len;
                     drop(segm);
                 }
                 Err(_) => std::thread::yield_now(),

@@ -1,9 +1,9 @@
 #![no_std]
 
-// The ring buffer tests (unix_stream_, frameworks_, pipe_retry_) use
-// `try_trait_v2` APIs (e.g. `branch()`); the feature flag applies to the
-// whole crate, tests included.
-#![feature(try_trait_v2)]
+// A test-only helper implements `core::ops::Try` (e.g. the cancellation
+// token in `tests_/pipe_retry_`), which still needs the `try_trait_v2`
+// feature; the flag applies to the whole crate, tests included.
+#![cfg_attr(test, feature(try_trait_v2))]
 
 // We always pull in `std` during tests, because it's just easier
 // to write tests when you can assume you're on a capable platform

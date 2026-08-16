@@ -19,7 +19,7 @@ use abs_buff::x_deps::anylr::SomeOf;
 
 use super::{
     error_::{RxError, TxError},
-    reclaim_::{ReclSliceMut, ReclSliceRef},
+    reclaim_::{ReclPeekRef, ReclSliceMut, ReclSliceRef},
     rx_::RingRx,
     state_::{Park, ParkSide, RingBuffer},
     tx_::RingTx,
@@ -55,7 +55,7 @@ where
     B: DerefMut<Target = [T]>,
 {
     type IntoFuture = WriteFuture<'a, 'a, NonCancellableToken, H, B, T>;
-    type Output = SomeOf<ReclSliceMut<'a, B, T>, TxError<usize>>;
+    type Output = SomeOf<ReclSliceMut<'a, T>, TxError<usize>>;
 
     fn into_future(self) -> Self::IntoFuture {
         WriteFuture::new(self.tx, self.length, NonCancellableToken::shared_mut())
@@ -67,7 +67,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
-    type MayCancelOutput = SomeOf<ReclSliceMut<'a, B, T>, TxError<usize>>;
+    type MayCancelOutput = SomeOf<ReclSliceMut<'a, T>, TxError<usize>>;
 
     fn may_cancel_with<'f, C>(
         self,
@@ -83,7 +83,6 @@ where
 }
 
 /// The poll-based write future.
-#[allow(dead_code)] // `'tok` is only used for the cancel borrow
 pub struct WriteFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
@@ -118,7 +117,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
-    type Output = SomeOf<ReclSliceMut<'ctx, B, T>, TxError<usize>>;
+    type Output = SomeOf<ReclSliceMut<'ctx, T>, TxError<usize>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
@@ -190,7 +189,7 @@ where
     B: DerefMut<Target = [T]>,
 {
     type IntoFuture = ReadFuture<'a, 'a, NonCancellableToken, H, B, T>;
-    type Output = SomeOf<ReclSliceRef<'a, B, T>, RxError<usize>>;
+    type Output = SomeOf<ReclSliceRef<'a, T>, RxError<usize>>;
 
     fn into_future(self) -> Self::IntoFuture {
         ReadFuture::new(self.rx, self.length, NonCancellableToken::shared_mut())
@@ -202,7 +201,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
-    type MayCancelOutput = SomeOf<ReclSliceRef<'a, B, T>, RxError<usize>>;
+    type MayCancelOutput = SomeOf<ReclSliceRef<'a, T>, RxError<usize>>;
 
     fn may_cancel_with<'f, C>(
         self,
@@ -218,7 +217,6 @@ where
 }
 
 /// The poll-based read future.
-#[allow(dead_code)] // `'tok` is only used for the cancel borrow
 pub struct ReadFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
@@ -253,7 +251,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
-    type Output = SomeOf<ReclSliceRef<'ctx, B, T>, RxError<usize>>;
+    type Output = SomeOf<ReclSliceRef<'ctx, T>, RxError<usize>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
@@ -324,7 +322,7 @@ where
     B: DerefMut<Target = [T]>,
 {
     type IntoFuture = PeekFuture<'a, 'a, NonCancellableToken, H, B, T>;
-    type Output = SomeOf<ReclSliceRef<'a, B, T>, RxError<usize>>;
+    type Output = SomeOf<ReclPeekRef<'a, T>, RxError<usize>>;
 
     fn into_future(self) -> Self::IntoFuture {
         PeekFuture::new(self.rx, NonCancellableToken::shared_mut())
@@ -336,7 +334,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
-    type MayCancelOutput = SomeOf<ReclSliceRef<'a, B, T>, RxError<usize>>;
+    type MayCancelOutput = SomeOf<ReclPeekRef<'a, T>, RxError<usize>>;
 
     fn may_cancel_with<'f, C>(
         self,
@@ -352,7 +350,6 @@ where
 }
 
 /// The poll-based peek future.
-#[allow(dead_code)] // `'tok` is only used for the cancel borrow
 pub struct PeekFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
@@ -385,7 +382,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
-    type Output = SomeOf<ReclSliceRef<'ctx, B, T>, RxError<usize>>;
+    type Output = SomeOf<ReclPeekRef<'ctx, T>, RxError<usize>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };

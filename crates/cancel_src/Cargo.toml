@@ -12,7 +12,7 @@ readme = "README.md"
 
 [dependencies]
 abs_cancel = { path = "../abs_cancel" }
-futures-channel = { workspace = true }
+futures-channel = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [features]
 # Enables `#![feature(allocator_api)]` and makes the public types generic over
