@@ -4,8 +4,8 @@ use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
 use crate::{
-    io::TrInput,
-    BuffReadAsInput, Demand, TrBuffSegmRef,
+    buffer::TrBuffSegmRef,
+    Demand,
 };
 
 /// A kind of buffer that owns the memory for reading data by lending some
@@ -13,7 +13,7 @@ use crate::{
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffRead<T = u8> {
-    type SegmRef<'a>: TrBuffSegmRef<T> where Self: 'a;
+    type SegmRef<'f>: TrBuffSegmRef<'f, T> where Self: 'f;
     type Err: Error;
 
     /// Indicates whether this buff will no longer emits any data.
@@ -28,15 +28,6 @@ pub trait TrBuffRead<T = u8> {
         &'f mut self,
         demand: &Demand<usize>,
     ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>>;
-
-    /// Turns the mutable borrow of the buffer into an input.
-    /// It has a default implementation that yields `BuffReadAsInput`
-    fn as_input(&mut self) -> impl TrInput<T>
-    where
-        Self: Sized,
-    {
-        BuffReadAsInput::<&mut Self, Self, T>::new(self)
-    }
 }
 
 pub trait TrBuffTryRead<T = u8>: TrBuffRead<T> {

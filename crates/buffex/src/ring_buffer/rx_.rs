@@ -126,7 +126,9 @@ where
     type Err = RxError<usize>;
 
     fn is_drained(&self) -> bool {
-        self.ring().is_rx_closed()
+        // "Drained" means no more data will ever be emitted: the rx end is
+        // closed *and* the ring holds no buffered data.
+        self.ring().data_size() == 0 && self.ring().is_rx_closed()
     }
 
     fn read_async<'f>(

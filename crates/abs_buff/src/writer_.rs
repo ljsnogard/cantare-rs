@@ -4,8 +4,8 @@ use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
 use crate::{
-    io::TrOutput,
-    BuffWriteAsOutput, Demand, TrBuffSegmMut,
+    buffer::TrBuffSegmMut,
+    Demand,
 };
 
 /// A kind of buffer that owns the memory for writing data by lending some
@@ -13,7 +13,7 @@ use crate::{
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffWrite<T = u8> {
-    type SegmMut<'a>: TrBuffSegmMut<T> where Self: 'a;
+    type SegmMut<'f>: TrBuffSegmMut<'f, T> where Self: 'f;
     type Err: Error;
 
     /// Indicates whethe the buff will no longer accept data writing.
@@ -28,15 +28,6 @@ pub trait TrBuffWrite<T = u8> {
         &'f mut self,
         demand: &Demand<usize>,
     ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>>;
-
-    /// Turns the mutable borrow of the buffer into an output.
-    /// It has a default implementation that yields `BuffWriteAsOutput`
-    fn as_output(&mut self) -> impl TrOutput<T>
-    where
-        Self: Sized,
-    {
-        BuffWriteAsOutput::<&mut Self, Self, T>::new(self)
-    }
 }
 
 pub trait TrBuffTryWrite<T = u8>: TrBuffWrite<T> {

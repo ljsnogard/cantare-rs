@@ -4,7 +4,10 @@ use std::{io, ptr, string::ToString};
 
 use abs_cancel::{NonCancellableToken, TrCancellationToken};
 
-use crate::{Demand, TrBuffSegmView, TrBuffRead, TrBuffTryRead};
+use crate::{
+    buffer::TrBuffSegmView,
+    Demand, TrBuffRead, TrBuffTryRead,
+};
 
 pub struct AsStdRead<'a, R, C = NonCancellableToken>
 where

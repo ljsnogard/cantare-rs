@@ -40,13 +40,13 @@ impl MiniExec {
 
     /// Drive the executor until the `main` future completes.
     #[allow(dead_code)]
-    pub fn block_on(&mut self, main: impl Future<Output = ()>) {
+    pub fn block_on<T>(&mut self, main: impl Future<Output = T>) -> T {
         let mut main = Box::pin(main);
         loop {
             let waker = Waker::from(Arc::new(MiniWaker(self.wake.clone())));
             let mut cx = Context::from_waker(&waker);
-            if main.as_mut().poll(&mut cx).is_ready() {
-                return;
+            if let std::task::Poll::Ready(v) = main.as_mut().poll(&mut cx) {
+                return v;
             }
             self.poll_tasks();
         }

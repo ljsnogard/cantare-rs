@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::vec;
 use std::vec::Vec;
 
-use abs_buff::pipelining::Pipe;
+use abs_buff::pipelining::PipeJoin;
 use abs_buff::Demand;
 use abs_buff::x_deps::anylr::SomeOf;
 use abs_buff::{TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite};
@@ -131,7 +131,7 @@ fn unix_stream_echo_via_chain() {
             let mut buffered = BufferedUnixStream::new(server_stream, 4096);
             {
                 let (tx, rx) = buffered.split();
-                let mut pipe = Pipe::new(tx, rx);
+                let mut pipe = PipeJoin::new(tx, rx);
                 let _ = pipe.pipe_async().await;
             }
             buffered.shutdown().await;

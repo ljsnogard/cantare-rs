@@ -3,17 +3,14 @@
 use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
-use crate::{
-    io::TrInput,
-    BuffPeekAsInput, TrBuffSegmRef,
-};
+use crate::buffer::TrBuffSegmRef;
 
 /// A kind of buffer that owns the memory for peeking the received data without
 /// consuming them.
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffPeek<T = u8> {
-    type SegmPeek<'a>: TrBuffSegmRef<T> where Self: 'a;
+    type SegmPeek<'f>: TrBuffSegmRef<'f, T> where Self: 'f;
     type Err: Error;
 
     /// Lend some slices for peeking. The number and the length of the slices
@@ -24,14 +21,6 @@ pub trait TrBuffPeek<T = u8> {
     fn peek_async<'f>(
         &'f mut self,
     ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmPeek<'f>, Self::Err>>;
-
-    /// The default implementation returned by this function is `BuffPeekAsInput`.
-    fn as_intput(&mut self) -> impl TrInput<T>
-    where
-        Self: Sized,
-    {
-        BuffPeekAsInput::<&mut Self, Self, T>::new(self, 0usize)
-    }
 }
 
 pub trait TrBuffTryPeek<T = u8>: TrBuffPeek<T> {

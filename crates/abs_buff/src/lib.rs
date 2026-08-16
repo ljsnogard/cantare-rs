@@ -13,39 +13,15 @@ extern crate std;
 
 pub use gen_mcf_macro::gen_may_cancel_future;
 
+pub mod buffer;
 pub mod io;
-
-mod buff_peek_as_input_;
-mod buff_read_as_input_;
-mod buff_write_as_output_;
-mod buff_segm_;
-mod buff_segm_as_input_;
-mod buff_segm_as_output_;
+pub mod pipelining;
 
 mod demand_;
 mod peeker_;
 mod reader_;
 mod writer_;
 
-pub mod pipelining;
-
-pub use buff_peek_as_input_::{
-    BuffPeekAsInput, BuffPeekInputAsync, BuffPeekInputFuture,
-};
-pub use buff_read_as_input_::{
-    BuffReadAsInput, BuffReadInputAsync, BuffReadInputFuture,
-};
-pub use buff_write_as_output_::{
-    BuffWriteAsOutput, BuffWriteOutputAsync, BuffWriteOutputFuture,
-};
-pub use buff_segm_::{TrBuffSegmView, TrBuffSegmMut, TrBuffSegmRef};
-pub use buff_segm_as_input_::{
-    BuffSegmRefAsInput, BuffSegmRefInputAsync, BuffSegmRefInputFuture,
-};
-pub use buff_segm_as_output_::{
-    BuffSegmMutAsOutput, BuffSegmMutOutputAsync, BuffSegmMutOutputFuture,
-    BuffSegmMutOutputClonedAsync, BuffSegmMutOutputClonedFuture,
-};
 pub use demand_::Demand;
 
 pub use peeker_::{TrBuffPeek, TrBuffTryPeek};

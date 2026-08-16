@@ -16,7 +16,6 @@ readme = "README.md"
 atomex = { path = "../atomex" }
 abs_buff = { path = "../abs_buff" }
 abs_cancel = { path = "../abs_cancel" }
-segm_buff = { path = "../segm_buff" }
 
 # -- optional async-framework trait adapters ------------------------------
 # The core ring buffer never depends on any async runtime. These features
