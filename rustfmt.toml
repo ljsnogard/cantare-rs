@@ -1,0 +1,42 @@
+# ================================================================
+#  Rustfmt 配置文件 —— 项目代码风格指南
+#  官方文档：https://rust-lang.github.io/rustfmt
+# ================================================================
+
+# --- Imports 相关 -------------------------------------------------
+
+# 将同一 crate 下的多个 use 合并为单个 use 语句
+# 例如：use std::fmt; use std::io; → use std::{fmt, io};
+imports_granularity = "Crate"
+
+# 对 use 项按字母顺序排序
+reorder_imports = true
+
+# 优先使用 use foo::{self, Bar} 而不是分开两行
+condense_wildcard_suffixes = true
+
+# --- 函数参数换行 ------------------------------------------------
+
+# 当函数签名超过 max_width 时，每个参数单独一行
+# 结合 max_width = 100，当参数过多导致行超长时自动换行
+max_width = 80
+
+# 使用块缩进风格（与代码块缩进一致）
+indent_style = "Block"
+
+# 多行列表末尾添加逗号（函数参数、结构体字段等）
+trailing_comma = "Vertical"
+
+# --- where 子句 ----------------------------------------------------
+
+# where 子句强制换行（不尝试将 where 放在同一行）
+where_single_line = false
+
+# --- 其他推荐设置 ------------------------------------------------
+
+# 使用空格缩进（若需要 tab 缩进，将 hard_tabs 设为 true）
+hard_tabs = false
+tab_spaces = 4
+
+# 使用 Rust 2024 版语法解析（根据项目实际情况调整）
+edition = "2024"

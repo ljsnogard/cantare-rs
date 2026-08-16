@@ -1,4 +1,4 @@
-﻿// to enable no hand-written poll
+// to enable no hand-written poll
 #![feature(async_fn_traits)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
@@ -39,3 +39,6 @@ pub mod x_deps {
 
 #[cfg(any(test, feature = "std_read"))]
 pub mod as_std_read;
+
+#[cfg(any(test, feature = "std_write"))]
+pub mod as_std_write;
