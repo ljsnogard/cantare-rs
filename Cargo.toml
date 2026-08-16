@@ -13,6 +13,8 @@ members = [
     "crates/abs_buff",
     # "crates/buffex",
 
+    "crates/cancel_src",
+
     "crates/abs_vfs",
     "crates/mem_vfs",
 
@@ -31,5 +33,6 @@ pin-utils = { version = "*" }
 env_logger = { version = "0.11.*" }
 log = { version = "0.4.*" }
 futures-lite = { version = "2" }
+futures-channel = { version = "0.3", default-features = false, features = ["alloc"] }
 compio = { version = "0.19.*", features = ["fs", "macros", "time"] }
 thiserror = { version = "2.0", default-features = false }

@@ -1,0 +1,22 @@
+[package]
+edition = "2024"
+name = "cancel_src"
+version = "0.1.0"
+
+description = "A C#-style CancellationTokenSource / CancellationToken built on futures-channel"
+repository = "https://github.com/ljsnogard/cantare"
+keywords = ["cancellation", "token", "async", "no-std"]
+categories = ["no-std", "asynchronous"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+abs_cancel = { path = "../abs_cancel" }
+futures-channel = { workspace = true }
+
+[features]
+# Enables `#![feature(allocator_api)]` and makes the public types generic over
+# a user-supplied allocator (`CancellationTokenSource<A>`). Without this
+# feature the crate builds on the default `Global` allocator and does not need
+# any unstable feature.
+allocator_api = []

@@ -20,6 +20,4 @@ pub mod x_deps {
     pub use abs_cancel;
     pub use atomex;
     pub use atomex::x_deps::funty;
-
-    pub use segm_buff;
 }
