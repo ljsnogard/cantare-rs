@@ -1,4 +1,4 @@
-﻿use core::{
+use core::{
     borrow::BorrowMut,
     cmp,
     marker::PhantomPinned,
@@ -101,7 +101,7 @@ where
 pub struct SegmReclaim<'a>(&'a mut usize);
 
 impl<'a> SegmReclaim<'a> {
-    const fn new(p: &'a mut usize) -> Self {
+    pub(crate) const fn new(p: &'a mut usize) -> Self {
         SegmReclaim(p)
     }
 }
@@ -179,14 +179,23 @@ where
 
     #[inline]
     pub const fn least_count(&self) -> usize {
-        self.buffer_.len()
+        self.buffer_.len() - self.offset_
     }
 
     pub const fn iter_slices(&self) -> Option<&[T]> {
-        if self.is_empty() {
+        let len = self.buffer_.len() - self.offset_;
+        if len == 0 {
             Option::None
         } else {
-            Option::Some(self.buffer_)
+            // SAFETY: `self.offset_ <= self.buffer_.len()` always holds (it is
+            // only ever advanced by at most the remaining count), so the
+            // sub-slice `[offset_, offset_ + len)` stays inside the buffer.
+            unsafe {
+                Option::Some(slice::from_raw_parts(
+                    self.buffer_.as_ptr().add(self.offset_),
+                    len,
+                ))
+            }
         }
     }
 
@@ -245,7 +254,6 @@ where
     pub fn clone_items_to_segm<TyRecl>(&self, target: &mut SegmMut<'_, T, TyRecl>) -> usize
     where
         TyRecl: TrReclaim,
-        [MaybeUninit<T>]: Sized,
         T: Clone,
     {
         let dst = &mut target.buffer_[target.offset_..];
@@ -329,22 +337,36 @@ where
 
     #[inline]
     pub const fn least_count(&self) -> usize {
-        self.buffer_.len()
+        self.buffer_.len() - self.offset_
     }
 
     pub const fn iter_slices(&self) -> Option<&[MaybeUninit<T>]> {
-        if self.is_empty() {
+        let len = self.buffer_.len() - self.offset_;
+        if len == 0 {
             Option::None
         } else {
-            Option::Some(self.buffer_)
+            // SAFETY: `self.offset_ <= self.buffer_.len()` always holds.
+            unsafe {
+                Option::Some(slice::from_raw_parts(
+                    self.buffer_.as_ptr().add(self.offset_),
+                    len,
+                ))
+            }
         }
     }
 
     pub const fn iter_slices_mut(&mut self) -> Option<&mut [MaybeUninit<T>]> {
-        if self.is_empty() {
+        let len = self.buffer_.len() - self.offset_;
+        if len == 0 {
             Option::None
         } else {
-            Option::Some(self.buffer_)
+            // SAFETY: `self.offset_ <= self.buffer_.len()` always holds.
+            unsafe {
+                Option::Some(slice::from_raw_parts_mut(
+                    self.buffer_.as_mut_ptr().add(self.offset_),
+                    len,
+                ))
+            }
         }
     }
 
@@ -367,7 +389,6 @@ where
     ) -> usize
     where
         TyRecl: TrReclaim,
-        [MaybeUninit<T>]: Sized,
     {
         source.move_items_to_segm(self)
     }
@@ -552,5 +573,412 @@ where
     #[inline]
     fn as_segm_mut<'f>(&'f mut self) -> SegmMut<'f, T, Self::Reclaimer<'f>> {
         SegmMut::as_segm_mut(self)
+    }
+}
+
+#[cfg(test)]
+mod tests_ {
+    use super::*;
+
+    use std::vec;
+    use std::vec::Vec;
+
+    /// Fill `dst` (of MaybeUninit) with the values consumed from `segm`, moving
+    /// them out of the segment.
+    fn move_all<T, R>(segm: &mut SegmRef<'_, T, R>, dst: &mut [MaybeUninit<T>]) -> usize
+    where
+        R: TrReclaim,
+    {
+        unsafe { segm.move_items_to_buff(dst) }
+    }
+
+    fn read_init<T: Copy>(dst: &[MaybeUninit<T>]) -> Vec<T> {
+        dst.iter().map(|m| unsafe { m.assume_init_read() }).collect()
+    }
+
+    //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+    // SegmRef: borrow → consume → the next borrow is exactly the next content
+    //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+    #[test]
+    fn segm_ref_take_consume_next_is_next() {
+        const LEN: usize = 64;
+        let mut data: Vec<usize> = (0..LEN).collect();
+        let mut consumed = 0usize;
+
+        let mut segm = SegmRef::new(data.as_mut_slice(), SegmReclaim::new(&mut consumed));
+
+        // 1st borrow: exactly 10 items, starting at the beginning.
+        {
+            let mut child = segm
+                .take_segm_ref(&Demand::less_than(10))
+                .expect("first take must succeed");
+            assert_eq!(child.least_count(), 10);
+            let slice = child.iter_slices().expect("child must not be empty");
+            assert_eq!(slice.len(), 10);
+            for (i, &v) in slice.iter().enumerate() {
+                assert_eq!(v, i);
+            }
+            let mut dst = [MaybeUninit::<usize>::uninit(); 10];
+            let n = move_all(&mut child, &mut dst);
+            assert_eq!(n, 10);
+            assert_eq!(child.least_count(), 0);
+            assert_eq!(read_init(&dst), (0..10).collect::<Vec<_>>());
+        }
+        // The parent consumed exactly the first 10; nothing is reclaimed to the
+        // outside until the parent itself drops (verified by the final `consumed`
+        // total at the end of this test — it equals exactly the sum of the
+        // consumed parts, so no early reclaim happened).
+        assert_eq!(segm.least_count(), LEN - 10);
+        let rest = segm.iter_slices().expect("non-empty");
+        assert_eq!(rest[0], 10, "iter_slices must skip the consumed part");
+
+        // 2nd borrow: the demand exceeds what remains, so the child is exactly
+        // the rest — which is the next content to consume.
+        {
+            let mut child = segm
+                .take_segm_ref(&Demand::less_than(LEN))
+                .expect("second take must succeed");
+            assert_eq!(child.least_count(), LEN - 10);
+            let slice = child.iter_slices().expect("non-empty");
+            for (i, &v) in slice.iter().enumerate() {
+                assert_eq!(v, i + 10, "next borrow must start right after the consumed part");
+            }
+            let mut dst = [MaybeUninit::<usize>::uninit(); 20];
+            let n = move_all(&mut child, &mut dst);
+            assert_eq!(n, 20);
+            assert_eq!(read_init(&dst), (10..30).collect::<Vec<_>>());
+        }
+        assert_eq!(segm.least_count(), LEN - 30);
+
+        // 3rd borrow: only peek, do not consume.
+        {
+            let child = segm
+                .take_segm_ref(&Demand::less_than(LEN))
+                .expect("third take must succeed");
+            assert_eq!(child.least_count(), LEN - 30);
+            let slice = child.iter_slices().expect("non-empty");
+            for (i, &v) in slice.iter().enumerate() {
+                assert_eq!(v, i + 30);
+            }
+        }
+        assert_eq!(segm.least_count(), LEN - 30);
+
+        // Dropping the parent reports the whole consumed amount to the reclaimer.
+        drop(segm);
+        assert_eq!(consumed, 30);
+    }
+
+    #[test]
+    fn segm_ref_as_segm_ref_consume_next_is_next() {
+        const LEN: usize = 24;
+        let mut data: Vec<u32> = (0..LEN as u32).collect();
+        let mut consumed = 0usize;
+
+        let mut segm = SegmRef::new(data.as_mut_slice(), SegmReclaim::new(&mut consumed));
+
+        // Round 1: as_segm_ref borrows everything that is left; consume 16.
+        {
+            let mut child = segm.as_segm_ref();
+            assert_eq!(child.least_count(), LEN);
+            let mut dst = [MaybeUninit::<u32>::uninit(); 16];
+            let n = move_all(&mut child, &mut dst);
+            assert_eq!(n, 16);
+            // The child itself still shows the remaining data as the next content.
+            assert_eq!(child.least_count(), LEN - 16);
+            let slice = child.iter_slices().expect("non-empty");
+            for (i, &v) in slice.iter().enumerate() {
+                assert_eq!(v, (i + 16) as u32);
+            }
+        }
+        assert_eq!(segm.least_count(), LEN - 16);
+
+        // Round 2: the rest.
+        {
+            let mut child = segm.as_segm_ref();
+            assert_eq!(child.least_count(), LEN - 16);
+            let mut dst = [MaybeUninit::<u32>::uninit(); 16];
+            let n = move_all(&mut child, &mut dst);
+            assert_eq!(n, LEN - 16);
+            assert_eq!(child.least_count(), 0);
+        }
+        assert_eq!(segm.least_count(), 0);
+        assert!(segm.is_empty());
+        assert!(segm.iter_slices().is_none(), "no unconsumed items -> no slices");
+
+        drop(segm);
+        assert_eq!(consumed, LEN);
+    }
+
+    #[test]
+    fn segm_ref_move_items_to_segm_transfers_in_order() {
+        const LEN: usize = 40;
+        let mut src_data: Vec<u64> = (0..LEN as u64).collect();
+        let mut src_consumed = 0usize;
+        let mut dst1_data = [MaybeUninit::<u64>::uninit(); 16];
+        let mut dst1_consumed = 0usize;
+        let mut dst2_data = [MaybeUninit::<u64>::uninit(); 16];
+        let mut dst2_consumed = 0usize;
+
+        let mut src = SegmRef::new(src_data.as_mut_slice(), SegmReclaim::new(&mut src_consumed));
+
+        // Move as much as the first destination can take: 16 of 40.
+        let mut dst1 = SegmMut::new(&mut dst1_data[..], SegmReclaim::new(&mut dst1_consumed));
+        {
+            let mut src_child = src.as_segm_ref();
+            let mut dst_child = dst1.as_segm_mut();
+            let n = src_child.move_items_to_segm(&mut dst_child);
+            assert_eq!(n, 16);
+            assert_eq!(src_child.least_count(), LEN - 16);
+            assert_eq!(dst_child.least_count(), 0);
+        }
+        assert_eq!(src.least_count(), LEN - 16);
+        assert_eq!(dst1.least_count(), 0);
+
+        // The next move picks up right after the first 16 items.
+        let mut dst2 = SegmMut::new(&mut dst2_data[..], SegmReclaim::new(&mut dst2_consumed));
+        {
+            let mut src_child = src.as_segm_ref();
+            let mut dst_child = dst2.as_segm_mut();
+            let n = src_child.move_items_to_segm(&mut dst_child);
+            assert_eq!(n, 16);
+            assert_eq!(src_child.least_count(), LEN - 32);
+        }
+        assert_eq!(src.least_count(), LEN - 32);
+
+        drop(src);
+        drop(dst1);
+        drop(dst2);
+        assert_eq!(read_init(&dst1_data), (0..16).collect::<Vec<_>>(), "dst1 holds src[0..16]");
+        assert_eq!(read_init(&dst2_data), (16..32).collect::<Vec<_>>(), "dst2 holds src[16..32]");
+        assert_eq!(src_consumed, 32);
+        assert_eq!(dst1_consumed, 16);
+        assert_eq!(dst2_consumed, 16);
+    }
+
+    #[test]
+    fn segm_ref_move_items_from_segm_into_mut() {
+        let mut src_data = [7usize, 8, 9, 10];
+        let mut src_consumed = 0usize;
+        let mut dst_data = [MaybeUninit::<usize>::uninit(); 4];
+        let mut dst_consumed = 0usize;
+
+        let mut src = SegmRef::new(src_data.as_mut_slice(), SegmReclaim::new(&mut src_consumed));
+        let mut dst = SegmMut::new(&mut dst_data[..], SegmReclaim::new(&mut dst_consumed));
+
+        {
+            let mut src_child = src.as_segm_ref();
+            let mut dst_child = dst.as_segm_mut();
+            let n = dst_child.move_items_from_segm(&mut src_child);
+            assert_eq!(n, 4);
+            assert_eq!(src_child.least_count(), 0);
+            assert_eq!(dst_child.least_count(), 0);
+        }
+        drop(src);
+        drop(dst);
+        assert_eq!(read_init(&dst_data), vec![7, 8, 9, 10]);
+        assert_eq!(src_consumed, 4);
+        assert_eq!(dst_consumed, 4);
+    }
+
+    #[test]
+    fn segm_ref_clone_items_keeps_source_position() {
+        const LEN: usize = 24;
+        let mut src_data: Vec<usize> = (0..LEN).collect();
+        let mut src_consumed = 0usize;
+        let mut dst_data = [MaybeUninit::<usize>::uninit(); 12];
+        let mut dst_consumed = 0usize;
+
+        let mut src = SegmRef::new(src_data.as_mut_slice(), SegmReclaim::new(&mut src_consumed));
+        let mut dst = SegmMut::new(&mut dst_data[..], SegmReclaim::new(&mut dst_consumed));
+
+        // Cloning does NOT advance the source; the first 8 items land in dst.
+        {
+            let src_child = src.as_segm_ref();
+            let mut dst_child = dst
+                .take_segm_mut(&Demand::less_than(8))
+                .expect("dst take must succeed");
+            let n = src_child.clone_items_to_segm(&mut dst_child);
+            assert_eq!(n, 8);
+            assert_eq!(src_child.least_count(), LEN, "cloning must not consume the source");
+        }
+        assert_eq!(src.least_count(), LEN);
+        assert_eq!(dst.least_count(), 12 - 8);
+
+        // Clone again: the same source content fills the remaining dst slots.
+        {
+            let src_child = src.as_segm_ref();
+            let mut dst_child = dst
+                .take_segm_mut(&Demand::less_than(8))
+                .expect("dst take must succeed");
+            let n = src_child.clone_items_to_segm(&mut dst_child);
+            assert_eq!(n, 4);
+        }
+        assert_eq!(src.least_count(), LEN);
+        assert_eq!(dst.least_count(), 0);
+
+        let mut expected: Vec<usize> = (0..8).collect();
+        expected.extend(0..4);
+        drop(src);
+        drop(dst);
+        assert_eq!(read_init(&dst_data), expected);
+        assert_eq!(src_consumed, 0, "cloning must never reclaim from the source");
+        assert_eq!(dst_consumed, 12);
+    }
+
+    #[test]
+    fn segm_ref_clone_items_to_buff() {
+        let mut data = [10usize, 20, 30, 40];
+        let mut consumed = 0usize;
+        let segm = SegmRef::new(data.as_mut_slice(), SegmReclaim::new(&mut consumed));
+
+        let mut dst = [MaybeUninit::<usize>::uninit(); 4];
+        let n = unsafe { segm.clone_items_to_buff(&mut dst) };
+        assert_eq!(n, 4);
+        assert_eq!(segm.least_count(), 4, "clone leaves the source untouched");
+        assert_eq!(read_init(&dst), vec![10, 20, 30, 40]);
+
+        drop(segm);
+        assert_eq!(consumed, 0);
+    }
+
+    //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+    // SegmMut: borrow → write → the next borrow is exactly the next free part
+    //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+    #[test]
+    fn segm_mut_take_write_next_is_next() {
+        const LEN: usize = 32;
+        let mut storage = [MaybeUninit::<u64>::uninit(); LEN];
+        let mut consumed = 0usize;
+
+        let mut segm = SegmMut::new(&mut storage[..], SegmReclaim::new(&mut consumed));
+
+        // 1st borrow: 8 slots; receive 8 items.
+        let mut src1: Vec<MaybeUninit<u64>> = (0..8).map(MaybeUninit::new).collect();
+        {
+            let mut child = segm
+                .take_segm_mut(&Demand::less_than(8))
+                .expect("first take must succeed");
+            assert_eq!(child.least_count(), 8);
+            let n = unsafe { child.move_items_from_buff(&mut src1) };
+            assert_eq!(n, 8);
+            assert_eq!(child.least_count(), 0);
+        }
+        assert_eq!(segm.least_count(), LEN - 8);
+
+        // 2nd borrow: demand exceeds what is left → the child is exactly the
+        // remaining free space, which starts right after the first 8 items.
+        let mut src2: Vec<MaybeUninit<u64>> = (10..20).map(MaybeUninit::new).collect();
+        {
+            let mut child = segm
+                .take_segm_mut(&Demand::less_than(LEN))
+                .expect("second take must succeed");
+            assert_eq!(child.least_count(), LEN - 8);
+            let n = unsafe { child.move_items_from_buff(&mut src2) };
+            assert_eq!(n, 10);
+        }
+        assert_eq!(segm.least_count(), LEN - 18);
+
+        drop(segm);
+        // The two borrows wrote into storage in order: [0..8) then [8..18).
+        assert_eq!(read_init(&storage[..8]), (0..8).collect::<Vec<_>>());
+        assert_eq!(read_init(&storage[8..18]), (10..20).collect::<Vec<_>>());
+        assert_eq!(consumed, 18);
+    }
+
+    #[test]
+    fn segm_mut_as_segm_mut_write_next_is_next() {
+        const LEN: usize = 16;
+        let mut storage = [MaybeUninit::<u8>::uninit(); LEN];
+        let mut consumed = 0usize;
+
+        let mut segm = SegmMut::new(&mut storage[..], SegmReclaim::new(&mut consumed));
+
+        // Round 1: receive 6 items.
+        let mut src1: Vec<MaybeUninit<u8>> = (1..=6).map(MaybeUninit::new).collect();
+        {
+            let mut child = segm.as_segm_mut();
+            let n = unsafe { child.move_items_from_buff(&mut src1) };
+            assert_eq!(n, 6);
+            // The child's own view now starts at slot 6.
+            let slots = child.iter_slices_mut().expect("non-empty");
+            assert_eq!(slots.len(), LEN - 6);
+        }
+        assert_eq!(segm.least_count(), LEN - 6);
+
+        // Round 2: the rest.
+        let mut src2: Vec<MaybeUninit<u8>> = (7..=16).map(MaybeUninit::new).collect();
+        {
+            let mut child = segm.as_segm_mut();
+            let n = unsafe { child.move_items_from_buff(&mut src2) };
+            assert_eq!(n, 10);
+            assert_eq!(child.least_count(), 0);
+        }
+        assert_eq!(segm.least_count(), 0);
+        assert!(segm.is_empty());
+        assert!(segm.iter_slices_mut().is_none(), "no free space -> no slices");
+
+        drop(segm);
+        assert_eq!(read_init(&storage), (1..=16).collect::<Vec<_>>());
+        assert_eq!(consumed, LEN);
+    }
+
+    #[test]
+    fn segm_mut_clone_items_from_buff() {
+        const LEN: usize = 16;
+        let mut storage = [MaybeUninit::<usize>::uninit(); LEN];
+        let mut consumed = 0usize;
+
+        let mut segm = SegmMut::new(&mut storage[..], SegmReclaim::new(&mut consumed));
+
+        {
+            let mut child = segm
+                .take_segm_mut(&Demand::less_than(8))
+                .expect("take must succeed");
+            let n = child.clone_items_from_buff(&[1usize, 2, 3, 4, 5]);
+            assert_eq!(n, 5);
+            assert_eq!(child.least_count(), 8 - 5);
+        }
+        assert_eq!(segm.least_count(), LEN - 5);
+
+        drop(segm);
+        assert_eq!(read_init(&storage[..5]), vec![1, 2, 3, 4, 5]);
+        assert_eq!(consumed, 5);
+    }
+
+    //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+    // Reclaim behavior
+    //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+    #[test]
+    fn segm_reclaim_reports_amount_before_consumption() {
+        let mut counter = 0usize;
+        let r = SegmReclaim::new(&mut counter);
+        assert_eq!(r.reclaim(3), 0, "returns the amount before the consumption");
+        assert_eq!(r.reclaim(4), 3);
+        assert_eq!(counter, 7);
+    }
+
+    #[test]
+    fn segm_reclaim_reclaimed_only_on_drop() {
+        let mut data = [1u8, 2, 3, 4];
+        let mut consumed = 0usize;
+        {
+            let mut segm = SegmRef::new(data.as_mut_slice(), SegmReclaim::new(&mut consumed));
+            {
+                let mut child = segm
+                    .take_segm_ref(&Demand::less_than(2))
+                    .expect("take must succeed");
+                let mut dst = [MaybeUninit::<u8>::uninit(); 2];
+                let n = move_all(&mut child, &mut dst);
+                assert_eq!(n, 2);
+            }
+            // The segment accounted for the consumption internally; the outside
+            // counter only changes when the segment itself drops (checked after
+            // the scope ends, via the exact final total).
+            assert_eq!(segm.least_count(), 2);
+        }
+        assert_eq!(consumed, 2);
     }
 }
