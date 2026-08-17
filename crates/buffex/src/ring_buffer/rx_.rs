@@ -57,6 +57,17 @@ where
         self.ring.borrow()
     }
 
+    /// The underlying shared handle (`H`), e.g. `&Arc<RingBuffer>`.
+    ///
+    /// Used after a `try_split_shared` split to clone the handle for a
+    /// runtime-side (kernel handoff) task. Cloning keeps the strong count
+    /// above one, so a further `try_split_shared` is rejected — the
+    /// one-pair SPSC invariant is preserved.
+    #[inline]
+    pub(crate) fn shared(&self) -> &H {
+        &self.ring
+    }
+
     /// Borrow up to `length` contiguous readable units. The returned segment
     /// commits its whole borrowed region when it drops.
     pub fn try_read(&mut self, length: usize) -> Result<ReclSliceRef<'_, T>, RxError<usize>> {

@@ -404,3 +404,105 @@ impl<'a> RingRxShim<'a> {
         self.0.try_read_at(n).map(|(s, t)| self.0.read_segm(s, t))
     }
 }
+
+// ---------------------------------------------------------------------------
+// try_split_shared 的 SPSC 拆分保护
+// ---------------------------------------------------------------------------
+//
+// 测试意图：`try_split_shared` 会把同一个共享句柄（Arc）clone 进写/读两个半区，
+// 从而产生"一对"生产者与消费者。若调用前 Arc 已被 clone（引用计数 > 1），
+// 其它 clone 就可能再被拿去拆分出第二对（甚至更多对），把 SPSC 退化成 MPMC：
+// 两个写者会竞争推进 wp、两个读者会竞争推进 rp，还可能拿到重叠的 &mut 区域，
+// 使 ring 的 lock-free 状态机失效。因此拆分必须在"调用方持有唯一引用"
+// （引用计数 == 1）时才被允许。
+//
+// 内部执行设计：每条用例都通过 `Arc::strong_count` 观察引用计数，分别验证
+// 三种情形——(1) 唯一持有者拆分成功且半区可用；(2) 已存在其它 clone 时拆分
+// 被拒绝并把句柄原样退回；(3) 拆分成功一次后，从半区 clone 出的句柄（驱动
+// 任务的典型用法）无法再拆出第二对；旧半区全部释放后允许重新拆分。
+
+/// 唯一持有者（引用计数 == 1）拆分成功，产出的半区能完成一次写→读往返。
+#[test]
+fn split_shared_succeeds_for_sole_owner() {
+    // 新建 Arc 时计数为 1，满足"唯一持有者"前提；
+    let ring = Arc::new(
+        crate::ring_buffer::RingBuffer::<Box<[u8]>>::try_new(vec![0u8; RING_CAP].into_boxed_slice())
+            .unwrap(),
+    );
+    let (mut tx, mut rx) = crate::ring_buffer::RingBuffer::try_split_shared(
+        ring,
+        std::sync::Arc::strong_count, std::sync::Arc::weak_count,
+    )
+    .expect("唯一持有者拆分必须成功");
+
+    // 拆出的半区必须真的可用：写两个字节，再原样读回；
+    let mut segm = tx.try_write(2).expect("write 2");
+    fill_segm(&mut segm, &[1u8, 2]);
+    drop(segm);
+    let mut segm = rx.try_read(2).expect("read 2");
+    let got = take_segm(&mut segm, 2);
+    assert_eq!(got, vec![1, 2]);
+    drop(segm);
+}
+
+/// 调用前已有其它 clone（引用计数 > 1）时，拆分被拒绝，并把句柄原样退回，
+/// 调用方仍可继续使用它。
+#[test]
+fn split_shared_rejects_non_sole_owner() {
+    let ring = Arc::new(
+        crate::ring_buffer::RingBuffer::<Box<[u8]>>::try_new(vec![0u8; RING_CAP].into_boxed_slice())
+            .unwrap(),
+    );
+    // 模拟"还有别处握着 Arc"：clone 一个副本，计数变为 2；
+    let clone = ring.clone();
+
+    // 引用计数 == 2 > 1 → 拆分必须失败，且 Err 退回的正是被移入的那个 Arc；
+    let err = match crate::ring_buffer::RingBuffer::try_split_shared(ring, std::sync::Arc::strong_count, std::sync::Arc::weak_count) {
+        Result::Err(e) => e,
+        Result::Ok(_) => panic!("引用计数 > 1 时拆分必须被拒绝"),
+    };
+    assert!(Arc::ptr_eq(&err, &clone), "Err 必须原样退回句柄");
+
+    // 退回的句柄依然可用（拆分失败不应污染状态），例如能正常查询容量；
+    assert_eq!(err.capacity(), RING_CAP);
+}
+
+/// 拆分成功一次后，即使从半区 clone 出句柄（驱动任务的典型用法），也无法再
+/// 拆出第二对生产者/消费者；只有旧半区全部释放后，ring 才允许被重新拆分。
+#[test]
+fn split_shared_rejects_second_pair_until_halves_dropped() {
+    let ring = Arc::new(
+        crate::ring_buffer::RingBuffer::<Box<[u8]>>::try_new(vec![0u8; RING_CAP].into_boxed_slice())
+            .unwrap(),
+    );
+    let (tx, rx) = crate::ring_buffer::RingBuffer::try_split_shared(ring, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
+        .expect("唯一持有者拆分必须成功");
+
+    // 从写半区 clone 出驱动侧句柄：此时计数 >= 2，任何新拆分都被拒绝，
+    // 否则驱动句柄就能拆出第二对生产者/消费者，破坏 SPSC；
+    let driver = tx.shared().clone();
+    let err = match crate::ring_buffer::RingBuffer::try_split_shared(driver, std::sync::Arc::strong_count, std::sync::Arc::weak_count) {
+        Result::Err(e) => e,
+        Result::Ok(_) => panic!("半区存活期间不允许第二对拆分"),
+    };
+    // 退回的句柄与 driver 是同一个分配，计数至少为 2（tx/rx 各持一份）；
+    assert!(Arc::strong_count(&err) >= 2);
+
+    // 旧半区全部释放后，只剩 err 这一个引用（计数回到 1），此时允许重新
+    // 拆分——但同一时刻仍然只有一对生产者/消费者，SPSC 依旧成立；
+    drop(tx);
+    drop(rx);
+    let (mut tx2, mut rx2) = crate::ring_buffer::RingBuffer::try_split_shared(
+        err,
+        std::sync::Arc::strong_count, std::sync::Arc::weak_count,
+    )
+    .expect("旧半区全部释放后允许重新拆分");
+    // 重新拆分出的半区同样可用；
+    let mut segm = tx2.try_write(1).expect("write 1");
+    fill_segm(&mut segm, &[7u8]);
+    drop(segm);
+    let mut segm = rx2.try_read(1).expect("read 1");
+    let got = take_segm(&mut segm, 1);
+    assert_eq!(got, vec![7]);
+    drop(segm);
+}

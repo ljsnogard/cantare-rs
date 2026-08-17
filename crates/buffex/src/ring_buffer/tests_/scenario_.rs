@@ -7,6 +7,7 @@
 use std::{
     boxed::Box,
     pin::Pin,
+    sync::Arc,
     vec::Vec,
 };
 
@@ -180,16 +181,22 @@ pub(super) async fn run_kernel_scenario(
     const TOTAL: usize = 200;
 
     // ring_out: user writes -> kernel writev
+    //
+    // 设计思路：`try_split_shared` 要求唯一持有者拆分（引用计数 == 1），
+    // 所以先把新建的 Arc 移入拆分；驱动任务所需的 Arc 在拆分之后从写半区
+    // clone 得到（计数 >= 2，第二次拆分会被拒绝，SPSC 不破坏）。
     let ring_out = make_ring_shared();
-    let (tx_out, _) = super::RingBuffer::try_split_shared(ring_out.clone());
-    let driver_out_ring = ring_out.clone();
+    let (tx_out, _) = super::RingBuffer::try_split_shared(ring_out, Arc::strong_count, Arc::weak_count)
+        .expect("ring_out 拆分必须成功");
+    let driver_out_ring = tx_out.shared().clone();
     let driver_out = spawn_blocking(Box::new(move || send_driver_core(driver_out_ring, TOTAL)));
     let producer = spawn(Box::pin(producer_core(tx_out, TOTAL)));
 
     // ring_in: kernel readv -> user reads
     let ring_in = make_ring_shared();
-    let (_, rx_in) = super::RingBuffer::try_split_shared(ring_in.clone());
-    let driver_in_ring = ring_in.clone();
+    let (_, rx_in) = super::RingBuffer::try_split_shared(ring_in, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
+        .expect("ring_in 拆分必须成功");
+    let driver_in_ring = rx_in.shared().clone();
     let driver_in = spawn_blocking(Box::new(move || recv_driver_core(driver_in_ring)));
     let consumer = spawn(Box::pin(consumer_core(rx_in, TOTAL, pat_byte)));
 
@@ -265,15 +272,22 @@ pub(super) fn run_scenarios_mini(exec: &mut super::mini_exec::MiniExec) {
         exec.spawn(consumer_core(rx, TOTAL, seq_byte));
     }
     // kernel scenario (cooperative drivers)
+    //
+    // 设计思路：与 run_kernel_scenario 相同——以唯一持有者身份拆分，驱动侧
+    // 所需 Arc 在拆分后从半区 clone 得到，避免产生第二对生产者/消费者。
     {
         let ring_out = make_ring_shared();
-        let (tx_out, _) = super::RingBuffer::try_split_shared(ring_out.clone());
-        exec.spawn(send_driver_core_async(ring_out.clone(), TOTAL));
+        let (tx_out, _) = super::RingBuffer::try_split_shared(ring_out, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
+            .expect("ring_out 拆分必须成功");
+        let driver_out_ring = tx_out.shared().clone();
+        exec.spawn(send_driver_core_async(driver_out_ring, TOTAL));
         exec.spawn(producer_core(tx_out, TOTAL));
 
         let ring_in = make_ring_shared();
-        let (_, rx_in) = super::RingBuffer::try_split_shared(ring_in.clone());
-        exec.spawn(recv_driver_core_async(ring_in.clone()));
+        let (_, rx_in) = super::RingBuffer::try_split_shared(ring_in, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
+            .expect("ring_in 拆分必须成功");
+        let driver_in_ring = rx_in.shared().clone();
+        exec.spawn(recv_driver_core_async(driver_in_ring));
         exec.spawn(consumer_core(rx_in, TOTAL, pat_byte));
     }
 }

@@ -52,10 +52,19 @@ impl TrCancellationToken for FlagToken {
     }
 }
 
+/// 创建一个容量为 `cap` 的 ring，并拆出写/读半区。
+///
+/// 设计思路：`try_split_shared` 要求以唯一持有者身份拆分（引用计数 == 1），
+/// 否则已有 clone 可能被再次拆分出第二对生产者/消费者，破坏 SPSC。这里把
+/// 新建的 `Arc`（计数 1）直接移入拆分；调用方（如读取侧校验）仍需要的
+/// `Arc` 在拆分后从写半区 clone 得到（计数 >= 2，第二次拆分会被拒绝）。
 fn make_ring(cap: usize) -> (SharedRing, SharedTx, SharedRx) {
     let ring =
         Arc::new(RingBuffer::<Box<[u8]>>::try_new(vec![0u8; cap].into_boxed_slice()).unwrap());
-    let (tx, rx) = RingBuffer::try_split_shared(ring.clone());
+    let (tx, rx) = RingBuffer::
+        try_split_shared(ring, Arc::strong_count, Arc::weak_count)
+        .expect("新建 ring 的引用计数为 1，拆分必须成功");
+    let ring = tx.shared().clone();
     (ring, tx, rx)
 }
 
