@@ -1,6 +1,6 @@
 [package]
 name = "buffex"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 authors = ["lino <lino_snsalias@outlook.com>"]
@@ -15,7 +15,6 @@ readme = "README.md"
 # -- core (async-runtime agnostic, no_std) --
 atomex = { path = "../atomex" }
 abs_buff = { path = "../abs_buff" }
-abs_cancel = { path = "../abs_cancel" }
 
 # -- optional async-framework trait adapters ------------------------------
 # The core ring buffer never depends on any async runtime. These features

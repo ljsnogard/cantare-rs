@@ -290,14 +290,14 @@ impl RingCore {
     }
 
     #[inline]
-    fn load_state(&self) -> usize {
+    fn load_state_(&self) -> usize {
         self.state.load(Ordering::Acquire)
     }
 
     /// Spin compare-exchange loop: replace the state word with `f(state)`,
     /// retrying on contention (the `atomic_sync` way of updating packed
     /// flags).
-    fn update_state(&self, f: impl Fn(usize) -> usize) {
+    fn update_state_(&self, f: impl Fn(usize) -> usize) {
         let mut state = self.state.load(Ordering::Acquire);
         loop {
             match self.state.compare_exchange_weak(
@@ -312,8 +312,8 @@ impl RingCore {
         }
     }
 
-    fn set_flag(&self, flag: usize) {
-        self.update_state(|s| s | flag);
+    fn set_flag_(&self, flag: usize) {
+        self.update_state_(|s| s | flag);
     }
 
     /// The ring is shared by both the user pipe ends and the runtime drivers,
@@ -329,7 +329,7 @@ impl RingCore {
     /// Atomically advance the writer position by `amount` (mod `cap`),
     /// preserving the flags.
     pub(super) fn advance_write(&self, cap: usize, amount: usize) {
-        self.update_state(|s| {
+        self.update_state_(|s| {
             let (rp, wp) = unpack(s);
             debug_assert!(rp < cap && wp < cap);
             pack(rp, (wp + amount) % cap) | (s & FLAG_MASK)
@@ -340,7 +340,7 @@ impl RingCore {
     /// Atomically advance the reader position by `amount` (mod `cap`),
     /// preserving the flags.
     pub(super) fn advance_read(&self, cap: usize, amount: usize) {
-        self.update_state(|s| {
+        self.update_state_(|s| {
             let (rp, wp) = unpack(s);
             debug_assert!(rp < cap && wp < cap);
             pack((rp + amount) % cap, wp) | (s & FLAG_MASK)
@@ -349,12 +349,12 @@ impl RingCore {
     }
 
     fn close_tx(&self) {
-        self.set_flag(TX_CLOSED);
+        self.set_flag_(TX_CLOSED);
         self.signal_all();
     }
 
     fn close_rx(&self) {
-        self.set_flag(RX_CLOSED);
+        self.set_flag_(RX_CLOSED);
         self.signal_all();
     }
 
@@ -415,69 +415,63 @@ where
         })
     }
 
-    /// The buffer length (the ring's capacity).
-    #[inline]
-    fn cap(&self) -> usize {
-        self.buffer.len()
-    }
-
     /// The buffer length.
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.cap()
+        self.buffer.len()
     }
 
     /// A snapshot of the number of buffered items.
     #[inline]
     pub fn data_size(&self) -> usize {
-        let (rp, wp) = unpack(self.core.load_state());
+        let (rp, wp) = unpack(self.core.load_state_());
         self.data_(rp, wp)
     }
 
     /// The number of free slots.
     #[inline]
     pub fn free_size(&self) -> usize {
-        let (rp, wp) = unpack(self.core.load_state());
+        let (rp, wp) = unpack(self.core.load_state_());
         self.free_(rp, wp)
     }
 
     #[inline]
     fn data_(&self, rp: usize, wp: usize) -> usize {
-        (wp + self.cap() - rp) % self.cap()
+        (wp + self.capacity() - rp) % self.capacity()
     }
 
     /// Free slots; the single-gap scheme always keeps one slot unused.
     #[inline]
     fn free_(&self, rp: usize, wp: usize) -> usize {
-        self.cap() - 1 - self.data_(rp, wp)
+        self.capacity() - 1 - self.data_(rp, wp)
     }
 
     /// The reader position.
     pub fn reader_pos(&self) -> usize {
-        unpack(self.core.load_state()).0
+        unpack(self.core.load_state_()).0
     }
 
     /// The writer position.
     pub fn writer_pos(&self) -> usize {
-        unpack(self.core.load_state()).1
+        unpack(self.core.load_state_()).1
     }
 
     pub fn is_tx_closed(&self) -> bool {
-        has_flag(self.core.load_state(), TX_CLOSED)
+        has_flag(self.core.load_state_(), TX_CLOSED)
     }
 
     pub fn is_rx_closed(&self) -> bool {
-        has_flag(self.core.load_state(), RX_CLOSED)
+        has_flag(self.core.load_state_(), RX_CLOSED)
     }
 
     /// Atomically advance the writer position by `amount` (mod `cap`).
-    pub fn advance_write(&self, amount: usize) {
-        self.core.advance_write(self.cap(), amount);
+    pub(crate) fn advance_write(&self, amount: usize) {
+        self.core.advance_write(self.capacity(), amount);
     }
 
     /// Atomically advance the reader position by `amount` (mod `cap`).
-    pub fn advance_read(&self, amount: usize) {
-        self.core.advance_read(self.cap(), amount);
+    pub(crate) fn advance_read(&self, amount: usize) {
+        self.core.advance_read(self.capacity(), amount);
     }
 
     // ------------------------------------------------------------------
@@ -489,9 +483,9 @@ where
     /// * `TxError::Stuffed` — the ring is full (or the writable region is
     ///   reserved by the runtime for a kernel read).
     /// * `TxError::Closing` — the tx end is closed.
-    pub fn try_write_at(&self, length: usize) -> Result<(usize, usize), super::TxError<usize>> {
+    pub(crate) fn try_write_at(&self, length: usize) -> Result<(usize, usize), super::TxError<usize>> {
         use super::TxError;
-        let state = self.core.load_state();
+        let state = self.core.load_state_();
         let (rp, wp) = unpack(state);
         let free = self.free_(rp, wp);
         if free == 0 || has_flag(state, RECV_IN_FLIGHT) {
@@ -500,7 +494,7 @@ where
             }
             return Err(TxError::Stuffed(wp));
         }
-        let take = core::cmp::min(length, core::cmp::min(free, self.cap() - wp));
+        let take = core::cmp::min(length, core::cmp::min(free, self.capacity() - wp));
         debug_assert!(take > 0);
         Ok((wp, take))
     }
@@ -510,9 +504,9 @@ where
     // ------------------------------------------------------------------
 
     /// Borrow up to `length` contiguous readable items starting at `rp`.
-    pub fn try_read_at(&self, length: usize) -> Result<(usize, usize), super::RxError<usize>> {
+    pub(crate) fn try_read_at(&self, length: usize) -> Result<(usize, usize), super::RxError<usize>> {
         use super::RxError;
-        let state = self.core.load_state();
+        let state = self.core.load_state_();
         let (rp, wp) = unpack(state);
         let data = self.data_(rp, wp);
         if data == 0 || has_flag(state, SEND_IN_FLIGHT) {
@@ -521,15 +515,15 @@ where
             }
             return Err(RxError::Drained(rp));
         }
-        let take = core::cmp::min(length, core::cmp::min(data, self.cap() - rp));
+        let take = core::cmp::min(length, core::cmp::min(data, self.capacity() - rp));
         debug_assert!(take > 0);
         Ok((rp, take))
     }
 
     /// Borrow all contiguous readable items starting at `rp` (for peeking).
-    pub fn try_peek_at(&self) -> Result<(usize, usize), super::RxError<usize>> {
+    pub(crate) fn try_peek_at(&self) -> Result<(usize, usize), super::RxError<usize>> {
         use super::RxError;
-        let state = self.core.load_state();
+        let state = self.core.load_state_();
         let (rp, wp) = unpack(state);
         let data = self.data_(rp, wp);
         if data == 0 || has_flag(state, SEND_IN_FLIGHT) {
@@ -538,7 +532,7 @@ where
             }
             return Err(RxError::Drained(rp));
         }
-        let take = core::cmp::min(data, self.cap() - rp);
+        let take = core::cmp::min(data, self.capacity() - rp);
         debug_assert!(take > 0);
         Ok((rp, take))
     }
@@ -558,8 +552,8 @@ where
     ///
     /// With `T = u8` the slices can be submitted to compio directly, e.g.
     /// `socket.write_vectored((a, b)).await` — a single syscall.
-    pub fn take_send_iovecs(&self) -> Option<(&'static [T], &'static [T])> {
-        let mut state = self.core.load_state();
+    pub(crate) fn take_send_iovecs(&self) -> Option<(&'static [T], &'static [T])> {
+        let mut state = self.core.load_state_();
         loop {
             let (rp, wp) = unpack(state);
             let data = self.data_(rp, wp);
@@ -583,9 +577,9 @@ where
 
     /// Return the reserved region after the kernel `writev` completed,
     /// advancing the reader position by `written`.
-    pub fn put_back_send(&self, written: usize) {
-        let cap = self.cap();
-        self.core.update_state(|s| {
+    pub(crate) fn put_back_send(&self, written: usize) {
+        let cap = self.capacity();
+        self.core.update_state_(|s| {
             let (rp, wp) = unpack(s);
             debug_assert!(has_flag(s, SEND_IN_FLIGHT));
             let nr = (rp + written) % cap;
@@ -602,8 +596,8 @@ where
     /// (`TxError::Stuffed`). After the kernel completes, call
     /// [`RingBuffer::put_back_recv`] with the number of bytes actually read,
     /// which advances the writer position.
-    pub fn take_recv_iovecs(&self) -> Option<(&'static mut [T], &'static mut [T])> {
-        let mut state = self.core.load_state();
+    pub(crate) fn take_recv_iovecs(&self) -> Option<(&'static mut [T], &'static mut [T])> {
+        let mut state = self.core.load_state_();
         loop {
             let (rp, wp) = unpack(state);
             let free = self.free_(rp, wp);
@@ -627,9 +621,9 @@ where
 
     /// Return the reserved region after the kernel `readv` completed,
     /// advancing the writer position by `received`.
-    pub fn put_back_recv(&self, received: usize) {
-        let cap = self.cap();
-        self.core.update_state(|s| {
+    pub(crate) fn put_back_recv(&self, received: usize) {
+        let cap = self.capacity();
+        self.core.update_state_(|s| {
             let (rp, wp) = unpack(s);
             debug_assert!(has_flag(s, RECV_IN_FLIGHT));
             let nw = (wp + received) % cap;
@@ -642,7 +636,7 @@ where
     /// The readable region `[rp, rp+len)` as up to two slices.
     fn readable_slices_(&self, rp: usize, len: usize) -> (&'static [T], &'static [T]) {
         let base = self.buffer.as_ptr();
-        let first = core::cmp::min(len, self.cap() - rp);
+        let first = core::cmp::min(len, self.capacity() - rp);
         let a = unsafe { core::slice::from_raw_parts(base.add(rp), first) };
         let b = if first < len {
             unsafe { core::slice::from_raw_parts(base, len - first) }
@@ -655,7 +649,7 @@ where
     /// The writable region `[wp, wp+len)` as up to two slices.
     fn writable_slices_(&self, wp: usize, len: usize) -> (&'static mut [T], &'static mut [T]) {
         let base = self.buffer.as_ptr().cast_mut();
-        let first = core::cmp::min(len, self.cap() - wp);
+        let first = core::cmp::min(len, self.capacity() - wp);
         let a = unsafe { core::slice::from_raw_parts_mut(base.add(wp), first) };
         let b = if first < len {
             unsafe { core::slice::from_raw_parts_mut(base, len - first) }
@@ -668,7 +662,7 @@ where
     /// A read view over the whole buffer (used by the framework adapters).
     #[inline]
     pub(super) fn buffer_ref(&self) -> &[T] {
-        unsafe { core::slice::from_raw_parts(self.buffer.as_ptr(), self.cap()) }
+        unsafe { core::slice::from_raw_parts(self.buffer.as_ptr(), self.capacity()) }
     }
 
     /// A write view over the whole buffer (used by the framework adapters).
@@ -682,7 +676,7 @@ where
         unsafe {
             core::slice::from_raw_parts_mut(
                 self.buffer.as_ptr().cast_mut().cast::<MaybeUninit<T>>(),
-                self.cap(),
+                self.capacity(),
             )
         }
     }
@@ -694,14 +688,14 @@ where
 
     /// Buffered data is available for a kernel `writev`.
     pub(super) fn has_tx_data(&self) -> bool {
-        let state = self.core.load_state();
+        let state = self.core.load_state_();
         let (rp, wp) = unpack(state);
         self.data_(rp, wp) > 0 && !has_flag(state, SEND_IN_FLIGHT)
     }
 
     /// Free space is available for a kernel `readv`.
     pub(super) fn has_recv_space(&self) -> bool {
-        let state = self.core.load_state();
+        let state = self.core.load_state_();
         let (rp, wp) = unpack(state);
         self.free_(rp, wp) > 0 && !has_flag(state, RECV_IN_FLIGHT)
     }
@@ -714,7 +708,7 @@ where
     pub(super) fn write_segm<'a>(&'a self, start: usize, take: usize) -> ReclSliceMut<'a, T> {
         let whole: &'a mut [MaybeUninit<T>] = self.buffer_uninit();
         let slice: &'a mut [MaybeUninit<T>] = &mut whole[start..start + take];
-        SegmMut::new(slice, WriterReclaim::new(&self.core, self.cap()))
+        SegmMut::new(slice, WriterReclaim::new(&self.core, self.capacity()))
     }
 
     /// Borrow a read segment over `[start, start + take)`.
@@ -735,7 +729,7 @@ where
         // kernel reads).
         let base = self.buffer.as_ptr().cast_mut();
         let slice: &'a mut [T] = unsafe { core::slice::from_raw_parts_mut(base.add(start), take) };
-        SegmRef::new(slice, ReaderReclaim::new(&self.core, self.cap()))
+        SegmRef::new(slice, ReaderReclaim::new(&self.core, self.capacity()))
     }
 
     /// Borrow a peek segment (no reclaim) over `[start, start + take)`.
@@ -750,12 +744,12 @@ where
     // ------------------------------------------------------------------
 
     /// Close the tx end: no more data will be written by the user.
-    pub fn close_tx(&self) {
+    pub(crate) fn close_tx(&self) {
         self.core.close_tx();
     }
 
     /// Close the rx end: no more data will be read by the user.
-    pub fn close_rx(&self) {
+    pub(crate) fn close_rx(&self) {
         self.core.close_rx();
     }
 
@@ -863,7 +857,7 @@ where
         // slices. Returning them (put_back_*) before the last reference to
         // the ring drops is part of the protocol; dropping the ring
         // otherwise would dangle those references.
-        let state = self.core.load_state();
+        let state = self.core.load_state_();
         debug_assert!(
             !has_flag(state, SEND_IN_FLIGHT) && !has_flag(state, RECV_IN_FLIGHT),
             "[RingBuffer::drop] a region is still reserved by the runtime"
