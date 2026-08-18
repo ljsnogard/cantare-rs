@@ -32,7 +32,7 @@ use super::{
 // Write
 // ---------------------------------------------------------------------------
 
-/// The write end's async borrow future (see [`RingTx::write_async`]).
+/// The write end's async borrow future (see [`RingTx::write_at_most_async`]).
 pub struct WriteAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
@@ -166,7 +166,7 @@ where
 // Read
 // ---------------------------------------------------------------------------
 
-/// The read end's async borrow future (see [`RingRx::read_async`]).
+/// The read end's async borrow future (see [`RingRx::read_at_most_async`]).
 pub struct ReadAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,

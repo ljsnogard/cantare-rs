@@ -57,11 +57,12 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use abs_buff::buffer::{SegmMut, SegmRef};
-
 use super::{
     futures_::{WaitFlushed, WaitRxIdle},
-    reclaim_::{NoReclaim, ReaderReclaim, ReclPeekRef, ReclSliceMut, ReclSliceRef, WriterReclaim},
+    reclaim_::{
+        ReadReclaim, ReaderReclaim, ReclPeekRef, ReclSliceMut, ReclSliceRef, SegmSlicesMut,
+        SegmSlicesRef, WriterReclaim,
+    },
     rx_::RingRx,
     tx_::RingTx,
 };
@@ -515,10 +516,17 @@ where
     }
 
     // ------------------------------------------------------------------
-    // user side: write (contiguous borrow)
+    // user side: write (borrow of the whole writable region)
+    //
+    // The returned `(start, take)` may describe a region that wraps around
+    // the buffer end; the two-piece segment types ([`ReclSliceMut`]) express
+    // it as one logical segment.
     // ------------------------------------------------------------------
 
-    /// Borrow up to `length` contiguous writable items starting at `wp`.
+    /// Borrow up to `length` writable items starting at `wp`.
+    ///
+    /// The region may wrap around the buffer end; the caller must build a
+    /// two-piece segment via [`RingBuffer::write_segm`].
     ///
     /// * `TxError::Stuffed` — the ring is full (or the writable region is
     ///   reserved by the runtime for a kernel read).
@@ -534,16 +542,20 @@ where
             }
             return Err(TxError::Stuffed(wp));
         }
-        let take = core::cmp::min(length, core::cmp::min(free, self.capacity() - wp));
+        // 取整个可写区域（最多 `length`），跨末端环绕时由两段式写段表达；
+        let take = core::cmp::min(length, free);
         debug_assert!(take > 0);
         Ok((wp, take))
     }
 
     // ------------------------------------------------------------------
-    // user side: read (contiguous borrow)
+    // user side: read (borrow of the whole readable region)
     // ------------------------------------------------------------------
 
-    /// Borrow up to `length` contiguous readable items starting at `rp`.
+    /// Borrow up to `length` readable items starting at `rp`.
+    ///
+    /// The region may wrap around the buffer end; the caller must build a
+    /// two-piece segment via [`RingBuffer::read_segm`].
     pub(crate) fn try_read_at(&self, length: usize) -> Result<(usize, usize), super::RxError<usize>> {
         use super::RxError;
         let state = self.core.load_state_();
@@ -555,12 +567,13 @@ where
             }
             return Err(RxError::Drained(rp));
         }
-        let take = core::cmp::min(length, core::cmp::min(data, self.capacity() - rp));
+        // 取整个可读区域（最多 `length`）；
+        let take = core::cmp::min(length, data);
         debug_assert!(take > 0);
         Ok((rp, take))
     }
 
-    /// Borrow all contiguous readable items starting at `rp` (for peeking).
+    /// Borrow the whole readable region starting at `rp` (for peeking).
     pub(crate) fn try_peek_at(&self) -> Result<(usize, usize), super::RxError<usize>> {
         use super::RxError;
         let state = self.core.load_state_();
@@ -572,7 +585,8 @@ where
             }
             return Err(RxError::Drained(rp));
         }
-        let take = core::cmp::min(data, self.capacity() - rp);
+        // 取整个可读区域；
+        let take = data;
         debug_assert!(take > 0);
         Ok((rp, take))
     }
@@ -750,45 +764,80 @@ where
         self.free_(rp, wp) > 0 && !has_flag(state, RECV_IN_FLIGHT)
     }
 
-    /// Borrow a write segment over `[start, start + take)`.
+    /// Borrow a write segment over the region `[start, start + take)`, which
+    /// may wrap around the buffer end (then it is a two-piece segment, see
+    /// [`reclaim_`](self)).
     ///
     /// The segment's buffer is the ring's own memory. When it drops it
-    /// commits the amount actually consumed to the ring (the `abs_buff`
-    /// per-piece reclaim granularity).
+    /// commits the amount actually consumed to the ring (the per-piece
+    /// reclaim granularity).
     pub(super) fn write_segm<'a>(&'a self, start: usize, take: usize) -> ReclSliceMut<'a, T> {
         let whole: &'a mut [MaybeUninit<T>] = self.buffer_uninit();
-        let slice: &'a mut [MaybeUninit<T>] = &mut whole[start..start + take];
-        SegmMut::new(slice, WriterReclaim::new(&self.core, self.capacity()))
+        let cap = self.capacity();
+        let first = core::cmp::min(take, cap - start);
+        let pieces = if first < take {
+            // 跨末端环绕：两段物理空间 [start, cap) + [0, take - first)；
+            // 先用 split_at_mut 切出 [0, start)，再从中取环绕段。
+            let (head, tail) = whole.split_at_mut(start);
+            let b = &mut head[..take - first];
+            SegmSlicesMut::Two(tail, b)
+        } else {
+            SegmSlicesMut::One(&mut whole[start..start + take])
+        };
+        ReclSliceMut::new(pieces, WriterReclaim::new(&self.core, cap))
     }
 
-    /// Borrow a read segment over `[start, start + take)`.
+    /// Borrow a read segment over the region `[start, start + take)`, which
+    /// may wrap around the buffer end (then it is a two-piece segment).
     ///
     /// The segment's buffer is the ring's own memory. When it drops it
     /// commits the amount actually consumed to the ring.
     ///
     /// # Safety
     ///
-    /// The returned `SegmRef` wraps `&'a mut [T]` over the readable region
-    /// `[start, start + take)`. This is **not** enforced by the ring: the
-    /// caller must ensure the region is not concurrently touched by a runtime
-    /// reservation ([`RingBuffer::take_send_iovecs`]) or by another reader /
-    /// writer while the segment is alive, and must not overlap two live
-    /// segments. The SPSC contract of the ring is meant to rule this out, but
-    /// it is a caller obligation, not a type-level guarantee.
+    /// The returned segment wraps `&'a mut [T]` over the readable region.
+    /// This is **not** enforced by the ring: the caller must ensure the
+    /// region is not concurrently touched by a runtime reservation
+    /// (`RingBuffer::take_send_iovecs`) or by another reader / writer while
+    /// the segment is alive, and must not overlap two live segments. The SPSC
+    /// contract of the ring is meant to rule this out, but it is a caller
+    /// obligation, not a type-level guarantee.
     pub(super) fn read_segm<'a>(&'a self, start: usize, take: usize) -> ReclSliceRef<'a, T> {
         // SAFETY: the caller obtained `start`/`take` from `try_read_at`, so
-        // `[start, start + take)` is within the buffer; the aliasing
-        // obligation is documented above.
+        // the region is within the buffer; the aliasing obligation is
+        // documented above.
         let base = self.buffer.as_ptr().cast_mut();
-        let slice: &'a mut [T] = unsafe { core::slice::from_raw_parts_mut(base.add(start), take) };
-        SegmRef::new(slice, ReaderReclaim::new(&self.core, self.capacity()))
+        let cap = self.capacity();
+        let first = core::cmp::min(take, cap - start);
+        let pieces = if first < take {
+            let a = unsafe { core::slice::from_raw_parts_mut(base.add(start), first) };
+            let b = unsafe { core::slice::from_raw_parts_mut(base, take - first) };
+            SegmSlicesRef::Two(a, b)
+        } else {
+            let a = unsafe { core::slice::from_raw_parts_mut(base.add(start), take) };
+            SegmSlicesRef::One(a)
+        };
+        ReclSliceRef::new(
+            pieces,
+            ReadReclaim::Consume(ReaderReclaim::new(&self.core, cap)),
+        )
     }
 
-    /// Borrow a peek segment (no reclaim) over `[start, start + take)`.
+    /// Borrow a peek segment (drop does not move the reader) over the region
+    /// `[start, start + take)`, which may wrap around the buffer end.
     pub(super) fn peek_segm<'a>(&'a self, start: usize, take: usize) -> ReclPeekRef<'a, T> {
         let base = self.buffer.as_ptr().cast_mut();
-        let slice: &'a mut [T] = unsafe { core::slice::from_raw_parts_mut(base.add(start), take) };
-        SegmRef::new(slice, NoReclaim)
+        let cap = self.capacity();
+        let first = core::cmp::min(take, cap - start);
+        let pieces = if first < take {
+            let a = unsafe { core::slice::from_raw_parts_mut(base.add(start), first) };
+            let b = unsafe { core::slice::from_raw_parts_mut(base, take - first) };
+            SegmSlicesRef::Two(a, b)
+        } else {
+            let a = unsafe { core::slice::from_raw_parts_mut(base.add(start), take) };
+            SegmSlicesRef::One(a)
+        };
+        ReclSliceRef::new(pieces, ReadReclaim::Peek)
     }
 
     // ------------------------------------------------------------------

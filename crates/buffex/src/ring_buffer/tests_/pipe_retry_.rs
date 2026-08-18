@@ -74,7 +74,7 @@ fn fill_pattern(tx: &mut SharedTx, total: usize) {
     while off < total {
         // "borrow N commits N": never demand more than what remains to write
         let mut segm = tx
-            .try_write(core::cmp::min(1009, total - off))
+            .try_write_at_most(core::cmp::min(1009, total - off))
             .expect("fill try_write");
         let len = segm.least_count();
         fill_segm(
@@ -88,7 +88,7 @@ fn fill_pattern(tx: &mut SharedTx, total: usize) {
 
 /// Drain everything currently readable at the rx end into `collected`.
 fn drain_available(rx: &mut SharedRx, collected: &mut Vec<u8>) {
-    while let Ok(segm) = rx.try_read(1009) {
+    while let Ok(segm) = rx.try_read_at_most(1009) {
         let len = segm.least_count();
         let mut segm = segm;
         let got = take_segm(&mut segm, len);

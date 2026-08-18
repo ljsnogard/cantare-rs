@@ -23,20 +23,20 @@ fn segm_borrow_roundtrip_and_wrap() {
     let (_ring, mut tx, mut rx) = make_ring();
 
     // partial writes: 3 then 5 (wp: 0 -> 3 -> 8)
-    let mut segm = tx.try_write(3).expect("write 3");
+    let mut segm = tx.try_write_at_most(3).expect("write 3");
     assert_eq!(segm.least_count(), 3);
     fill_segm(&mut segm, &(0..3).map(seq_byte).collect::<Vec<_>>());
     drop(segm);
     assert_eq!(tx.data_size(), 3);
 
-    let mut segm = tx.try_write(5).expect("write 5");
+    let mut segm = tx.try_write_at_most(5).expect("write 5");
     assert_eq!(segm.least_count(), 5);
     fill_segm(&mut segm, &(3..8).map(seq_byte).collect::<Vec<_>>());
     drop(segm);
     assert_eq!(tx.data_size(), 8);
 
     // partial reads: 4 then 4 (rp: 0 -> 4 -> 8)
-    let mut segm = rx.try_read(4).expect("read 4");
+    let mut segm = rx.try_read_at_most(4).expect("read 4");
     assert_eq!(segm.least_count(), 4);
     let got = take_segm(&mut segm, 4);
     for (i, b) in got.iter().enumerate() {
@@ -44,7 +44,7 @@ fn segm_borrow_roundtrip_and_wrap() {
     }
     drop(segm);
 
-    let mut segm = rx.try_read(4).expect("read 4 more");
+    let mut segm = rx.try_read_at_most(4).expect("read 4 more");
     assert_eq!(segm.least_count(), 4);
     let got = take_segm(&mut segm, 4);
     for (i, b) in got.iter().enumerate() {
@@ -58,7 +58,7 @@ fn segm_borrow_roundtrip_and_wrap() {
     // contiguous, so the wrap is reached through repeated borrows.
     let mut total = 0usize;
     while total < RING_CAP - 1 {
-        let mut segm = tx.try_write(RING_CAP - 1 - total).expect("fill");
+        let mut segm = tx.try_write_at_most(RING_CAP - 1 - total).expect("fill");
         assert!(segm.least_count() > 0);
         let len = segm.least_count();
         fill_segm(&mut segm, &(0..len).map(|i| seq_byte(100 + total + i)).collect::<Vec<_>>());
@@ -68,12 +68,12 @@ fn segm_borrow_roundtrip_and_wrap() {
     assert!(tx.ring().writer_pos() < RING_CAP);
     assert_eq!(tx.data_size(), RING_CAP - 1);
     // full: one slot gap
-    assert!(matches!(tx.try_write(1), Err(TxError::Stuffed(_))));
+    assert!(matches!(tx.try_write_at_most(1), Err(TxError::Stuffed(_))));
 
     // read everything back (this may wrap at the reader side too)
     let mut off = 0usize;
     loop {
-        let segm = match rx.try_read(7) {
+        let segm = match rx.try_read_at_most(7) {
             Ok(s) => s,
             Err(RxError::Drained(_)) => break,
             Err(e) => panic!("read failed: {e:?}"),
@@ -94,28 +94,115 @@ fn segm_borrow_roundtrip_and_wrap() {
 #[test]
 fn peek_does_not_consume() {
     let (_ring, mut tx, mut rx) = make_ring();
-    let mut segm = tx.try_write(4).expect("write");
+    let mut segm = tx.try_write_at_most(4).expect("write");
     fill_segm(&mut segm, &[10, 11, 12, 13]);
     drop(segm);
 
     let segm = rx.try_peek().expect("peek");
-    let slice = segm.iter_slices().expect("peek data");
-    assert_eq!(slice, &[10u8, 11, 12, 13]);
-    drop(segm); // no reclaim
+    // 窥视段的 `iter_slices` 返回剩余可读空间按物理段切出的迭代器（最多两段，
+    // 此处数据不跨末端，只有一段）；收集后与期望内容比较；
+    let slices: Vec<&[u8]> = segm.iter_slices().collect();
+    assert_eq!(slices, vec![&[10u8, 11, 12, 13][..]]);
+    drop(segm); // 窥视段 drop 不推进读位置（无回收）
 
     // still fully readable
     let segm = rx.try_peek().expect("peek again");
     assert_eq!(segm.least_count(), 4);
     drop(segm);
 
-    let mut segm = rx.try_read(16).expect("read all");
+    let mut segm = rx.try_read_at_most(16).expect("read all");
     assert_eq!(segm.least_count(), 4);
     let got = take_segm(&mut segm, 4);
     assert_eq!(got, vec![10, 11, 12, 13]);
     drop(segm);
 
     // now drained
-    assert!(matches!(rx.try_read(1), Err(RxError::Drained(_))));
+    assert!(matches!(rx.try_read_at_most(1), Err(RxError::Drained(_))));
+}
+
+// ---------------------------------------------------------------------------
+// 跨末端的两段式（scatter/gather）段：一次拿到"逻辑上连续、物理上分段"的空位
+// ---------------------------------------------------------------------------
+//
+// 测试意图：普通的 abs_buff `SegmMut` / `SegmRef` 只能表达**一段物理连续**的
+// 缓冲区。但 RingBuffer 的可用空间在环绕缓冲区末端时会被物理拆成两段（例如
+// 末端 2 格 + 开端 2 格），逻辑上它们才是一段连续空间。本用例验证：当空闲
+// 空间被物理拆成两段时，生产者**一次性**要求"至少全部空位"（不要求物理连续），
+// RingBuffer 必须能用一个逻辑段满足——否则在"必须一次写入整块"的用法（例如
+// 管道按整段搬运）下就会卡死。
+//
+// 内部执行设计：
+//   1. 容量 10：生产者一次写入 8 个字节（wp = 8）。
+//   2. 消费者消费 3 个（rp = 3）：data = 5。
+//      （题述为"消费 2 个"，但单间隙方案始终预留 1 格，消费 2 个只能腾出
+//       2+1 格；改为消费 3 个后恰好得到 2+2，与题述"末端 2 个 + 开端 2 个"
+//       的图景一致。）
+//   3. 单间隙方案下可写空间 = 容量 - 1 - data = 10 - 1 - 5 = 4，物理上分为
+//      两段：[8, 10)（末端 2 格）+ [0, 2)（开端 2 格，刚被消费掉）。
+//   4. 生产者调用 `try_write(4)` 一次性要求 4 个空位：
+//      - 旧实现（单连续 slice）只能给出 min(4, 容量 - wp) = 2 格，
+//        "一次给 4 个"的语义无法满足，下面的断言会失败（即要修复的 bug）；
+//      - 修复后应返回覆盖两段的逻辑段，least_count() == 4。
+//   5. 跨两段写入 4 个元素后，读者按序读回全部 9 个字节（读侧同样会跨末端
+//      环绕，因此读段也必须是两段式的）。
+#[test]
+fn write_one_shot_satisfies_wrapped_free_space() {
+    // 容量 10 的 ring，以唯一持有者身份拆分；
+    let ring = Arc::new(
+        crate::ring_buffer::RingBuffer::<Box<[u8]>>::try_new(vec![0u8; 10].into_boxed_slice())
+            .unwrap(),
+    );
+    let (mut tx, mut rx) = crate::ring_buffer::RingBuffer::try_split_shared(
+        ring,
+        std::sync::Arc::strong_count, std::sync::Arc::weak_count,
+    )
+    .expect("唯一持有者拆分必须成功");
+
+    // —— 1. 生产者一次写入 8 个字节（wp -> 8）——
+    let mut off = 0usize;
+    while off < 8 {
+        let mut segm = tx.try_write_at_most(8 - off).expect("write");
+        let len = segm.least_count();
+        fill_segm(&mut segm, &(off..off + len).map(seq_byte).collect::<Vec<_>>());
+        drop(segm);
+        off += len;
+    }
+    assert_eq!(tx.data_size(), 8);
+
+    // —— 2. 消费者消费 3 个字节（rp -> 3）——
+    let mut segm = rx.try_read_at_most(3).expect("read 3");
+    let _ = take_segm(&mut segm, 3);
+    drop(segm);
+    assert_eq!(tx.data_size(), 5);
+
+    // —— 3. 确认空闲空间被物理拆成两段：末端 2 格 + 开端 2 格 ——
+    assert_eq!(tx.ring().writer_pos(), 8, "wp 应在 8");
+    assert_eq!(tx.ring().reader_pos(), 3, "rp 应在 3");
+    assert_eq!(tx.ring().free_size(), 4, "可写空间共 4 格");
+
+    // —— 4. 核心断言：一次性要求全部 4 个空位（逻辑上连续）——
+    let mut segm = tx.try_write_at_most(4).expect("一次要求 4 个空位");
+    assert_eq!(
+        segm.least_count(),
+        4,
+        "两段物理空间应被视作逻辑上的一段，一次给出全部 4 个空位"
+    );
+
+    // —— 5. 跨两段写入 4 个元素并提交；读者按序读回全部 9 个字节 ——
+    fill_segm(&mut segm, &[100u8, 101, 102, 103]);
+    drop(segm);
+    assert_eq!(tx.data_size(), 9);
+
+    let mut expected: Vec<u8> = (3..8).map(seq_byte).collect();
+    expected.extend_from_slice(&[100, 101, 102, 103]);
+    let mut got = Vec::new();
+    while let Ok(segm) = rx.try_read_at_most(5) {
+        let len = segm.least_count();
+        let mut segm = segm;
+        got.extend_from_slice(&take_segm(&mut segm, len));
+        drop(segm);
+    }
+    assert_eq!(got, expected, "读者应按序读回全部数据");
 }
 
 /// Error semantics: `Stuffed` when full, `Drained` when empty, `Closing`
@@ -125,34 +212,34 @@ fn error_semantics() {
     let (_ring, mut tx, mut rx) = make_ring();
 
     // empty
-    assert!(matches!(rx.try_read(1), Err(RxError::Drained(_))));
+    assert!(matches!(rx.try_read_at_most(1), Err(RxError::Drained(_))));
 
     // fill to capacity - 1
-    let mut segm = tx.try_write(RING_CAP).expect("fill");
+    let mut segm = tx.try_write_at_most(RING_CAP).expect("fill");
     let n = segm.least_count();
     assert_eq!(n, RING_CAP - 1, "one slot is always unused");
     fill_segm(&mut segm, &vec![0u8; n]);
     drop(segm);
-    assert!(matches!(tx.try_write(1), Err(TxError::Stuffed(_))));
+    assert!(matches!(tx.try_write_at_most(1), Err(TxError::Stuffed(_))));
 
     // drain
-    let mut segm = rx.try_read(RING_CAP).expect("read all");
+    let mut segm = rx.try_read_at_most(RING_CAP).expect("read all");
     let n = segm.least_count();
     assert_eq!(n, RING_CAP - 1);
     take_segm(&mut segm, n);
     drop(segm);
-    assert!(matches!(rx.try_read(1), Err(RxError::Drained(_))));
+    assert!(matches!(rx.try_read_at_most(1), Err(RxError::Drained(_))));
 
     // closing
     rx.close();
-    assert!(matches!(rx.try_read(1), Err(RxError::Closing)));
+    assert!(matches!(rx.try_read_at_most(1), Err(RxError::Closing)));
     assert!(matches!(rx.try_peek(), Err(RxError::Closing)));
 
     tx.close();
     // The `Closing` error is only reported when the ring is full as well
     // (matching the documented semantics: "the output end has closed and the
     // buffer is already full").
-    let mut segm = tx.try_write(1).expect("write while closing still has space");
+    let mut segm = tx.try_write_at_most(1).expect("write while closing still has space");
     fill_segm(&mut segm, &[0u8]);
     drop(segm);
 }
@@ -209,8 +296,9 @@ fn tr_ring_buffer_trait() {
     let Some(segm) = some.pick_left() else {
         panic!("TrBuffTryPeek::try_peek failed")
     };
-    let slice = segm.iter_slices().expect("peek data");
-    assert_eq!(slice[0], 4);
+    // 窥视段的 `iter_slices` 按物理段切出（最多两段，此处只有一段）；
+    let slices: Vec<&[u8]> = segm.iter_slices().collect();
+    assert_eq!(slices[0][0], 4);
     drop(segm);
 
     drop(tx);
@@ -225,7 +313,7 @@ fn iovec_take_put() {
     let mut tx = RingTxShim(&ring);
 
     // write 6 bytes
-    let mut segm = tx.try_write(6).unwrap();
+    let mut segm = tx.try_write_at_most(6).unwrap();
     let n = segm.least_count();
     fill_segm(&mut segm, &(0..n).map(|i| (10 + i) as u8).collect::<Vec<_>>());
     drop(segm);
@@ -240,7 +328,7 @@ fn iovec_take_put() {
     // fill the ring to force a wrap, then take the wrapped send iovecs
     let mut off = 0usize;
     while off < RING_CAP - 1 {
-        let mut segm = tx.try_write(RING_CAP - off).unwrap();
+        let mut segm = tx.try_write_at_most(RING_CAP - off).unwrap();
         let len = segm.least_count();
         fill_segm(&mut segm, &(0..len).map(|i| (20 + off + i) as u8).collect::<Vec<_>>());
         drop(segm);
@@ -282,16 +370,16 @@ fn kernel_reservation_blocks_user() {
     let mut tx = RingTxShim(&ring);
     let mut rx = RingRxShim(&ring);
 
-    let mut segm = tx.try_write(4).unwrap();
+    let mut segm = tx.try_write_at_most(4).unwrap();
     fill_segm(&mut segm, &[1, 2, 3, 4]);
     drop(segm);
 
     let (_a, _b) = ring.take_send_iovecs().unwrap();
     // the user reader is blocked while the kernel owns the region
-    assert!(matches!(rx.try_read(1), Err(RxError::Drained(_))));
+    assert!(matches!(rx.try_read_at_most(1), Err(RxError::Drained(_))));
     ring.put_back_send(4);
     // the kernel wrote the data out: the ring is drained again
-    assert!(matches!(rx.try_read(1), Err(RxError::Drained(_))));
+    assert!(matches!(rx.try_read_at_most(1), Err(RxError::Drained(_))));
 
     // the runtime reserves the writable region for a kernel read; the user
     // writer is blocked meanwhile
@@ -299,11 +387,11 @@ fn kernel_reservation_blocks_user() {
     a[0] = 42;
     a[1] = 43;
     a[2] = 44;
-    assert!(matches!(tx.try_write(1), Err(TxError::Stuffed(_))));
+    assert!(matches!(tx.try_write_at_most(1), Err(TxError::Stuffed(_))));
     ring.put_back_recv(3);
 
     // now the user can read the received data
-    let mut segm = rx.try_read(3).unwrap();
+    let mut segm = rx.try_read_at_most(3).unwrap();
     let got = take_segm(&mut segm, 3);
     assert_eq!(got, vec![42, 43, 44]);
     drop(segm);
@@ -317,10 +405,10 @@ fn split_borrowed_halves() {
     )
     .unwrap();
     let (mut tx, mut rx) = ring.split();
-    let mut segm = tx.try_write(2).unwrap();
+    let mut segm = tx.try_write_at_most(2).unwrap();
     fill_segm(&mut segm, &[1, 2]);
     drop(segm);
-    let mut segm = rx.try_read(2).unwrap();
+    let mut segm = rx.try_read_at_most(2).unwrap();
     let got = take_segm(&mut segm, 2);
     assert_eq!(got, vec![1, 2]);
     drop(segm);
@@ -344,17 +432,14 @@ fn spsc_multithread() {
     let writer = std::thread::spawn(move || {
         let mut off = 0usize;
         while off < TOTAL {
-            let res = tx.try_write(5);
+            let res = tx.try_write_at_most(5);
             let mut progressed = false;
-            match res {
-                Ok(mut segm) => {
-                    let len = segm.least_count();
-                    fill_segm(&mut segm, &(0..len).map(|i| seq_byte(off + i)).collect::<Vec<_>>());
-                    drop(segm);
-                    off += len;
-                    progressed = true;
-                }
-                Err(_) => {}
+            if let Ok(mut segm) = res {
+                let len = segm.least_count();
+                fill_segm(&mut segm, &(0..len).map(|i| seq_byte(off + i)).collect::<Vec<_>>());
+                drop(segm);
+                off += len;
+                progressed = true;
             }
             if !progressed {
                 std::thread::yield_now();
@@ -369,7 +454,7 @@ fn spsc_multithread() {
             if off >= TOTAL {
                 break;
             }
-            match rx.try_read(9) {
+            match rx.try_read_at_most(9) {
                 Ok(segm) => {
                     let len = segm.least_count();
                     let mut segm = segm;
@@ -394,13 +479,13 @@ fn spsc_multithread() {
 /// ring without holding halves.
 struct RingTxShim<'a>(&'a super::SharedRing);
 impl<'a> RingTxShim<'a> {
-    fn try_write(&mut self, n: usize) -> Result<crate::ring_buffer::ReclSliceMut<'_, u8>, TxError<usize>> {
+    fn try_write_at_most(&mut self, n: usize) -> Result<crate::ring_buffer::ReclSliceMut<'_, u8>, TxError<usize>> {
         self.0.try_write_at(n).map(|(s, t)| self.0.write_segm(s, t))
     }
 }
 struct RingRxShim<'a>(&'a super::SharedRing);
 impl<'a> RingRxShim<'a> {
-    fn try_read(&mut self, n: usize) -> Result<crate::ring_buffer::ReclSliceRef<'_, u8>, RxError<usize>> {
+    fn try_read_at_most(&mut self, n: usize) -> Result<crate::ring_buffer::ReclSliceRef<'_, u8>, RxError<usize>> {
         self.0.try_read_at(n).map(|(s, t)| self.0.read_segm(s, t))
     }
 }
@@ -436,10 +521,10 @@ fn split_shared_succeeds_for_sole_owner() {
     .expect("唯一持有者拆分必须成功");
 
     // 拆出的半区必须真的可用：写两个字节，再原样读回；
-    let mut segm = tx.try_write(2).expect("write 2");
+    let mut segm = tx.try_write_at_most(2).expect("write 2");
     fill_segm(&mut segm, &[1u8, 2]);
     drop(segm);
-    let mut segm = rx.try_read(2).expect("read 2");
+    let mut segm = rx.try_read_at_most(2).expect("read 2");
     let got = take_segm(&mut segm, 2);
     assert_eq!(got, vec![1, 2]);
     drop(segm);
@@ -498,10 +583,10 @@ fn split_shared_rejects_second_pair_until_halves_dropped() {
     )
     .expect("旧半区全部释放后允许重新拆分");
     // 重新拆分出的半区同样可用；
-    let mut segm = tx2.try_write(1).expect("write 1");
+    let mut segm = tx2.try_write_at_most(1).expect("write 1");
     fill_segm(&mut segm, &[7u8]);
     drop(segm);
-    let mut segm = rx2.try_read(1).expect("read 1");
+    let mut segm = rx2.try_read_at_most(1).expect("read 1");
     let got = take_segm(&mut segm, 1);
     assert_eq!(got, vec![7]);
     drop(segm);

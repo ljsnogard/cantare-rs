@@ -68,21 +68,28 @@ where
         &self.ring
     }
 
-    /// Borrow up to `length` contiguous writable units.
+    /// Borrow up to `length` writable units (no more than `length`).
     ///
-    /// The returned segment commits its *whole* borrowed region to the ring
-    /// when it drops (the abs_buff per-piece reclaim granularity). When the ring wraps, only the
-    /// contiguous part starting at the writer position is returned; call
-    /// again to obtain the wrapped part.
-    pub fn try_write(&mut self, length: usize) -> Result<ReclSliceMut<'_, T>, TxError<usize>> {
+    /// The region may wrap around the buffer end; the returned segment is
+    /// then a two-piece segment that treats the two physical slices as one
+    /// logical segment, so a single borrow can cover the whole free space.
+    /// When it drops, the segment commits exactly the amount consumed
+    /// (the per-piece reclaim granularity).
+    ///
+    /// The name carries `_at_most` to tell it apart from the
+    /// [`TrBuffTryWrite::try_write`] trait method, which takes a
+    /// [`Demand`](abs_buff::Demand) instead of a plain length.
+    pub fn try_write_at_most(&mut self, length: usize) -> Result<ReclSliceMut<'_, T>, TxError<usize>> {
         let ring = self.ring();
         let (start, take) = ring.try_write_at(length)?;
         Ok(ring.write_segm(start, take))
     }
 
-    /// Borrow up to `length` contiguous writable units in an async manner,
-    /// waiting for free space automatically.
-    pub fn write_async(&mut self, length: usize) -> WriteAsync<'_, H, B, T> {
+    /// Borrow up to `length` writable units in an async manner, waiting for
+    /// free space automatically. See [`RingTx::try_write_at_most`] for the
+    /// `_at_most` naming (vs the [`TrBuffWrite::write_async`] trait method
+    /// which takes a [`Demand`](abs_buff::Demand)).
+    pub fn write_at_most_async(&mut self, length: usize) -> WriteAsync<'_, H, B, T> {
         WriteAsync::new(self, length)
     }
 
@@ -148,7 +155,7 @@ where
         MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>,
     > {
         let length = demand.max().copied().unwrap_or(usize::MAX);
-        self.write_async(length)
+        self.write_at_most_async(length)
     }
 }
 
@@ -162,7 +169,7 @@ where
         demand: &Demand<usize>,
     ) -> SomeOf<Self::SegmMut<'f>, Self::Err> {
         let length = demand.max().copied().unwrap_or(usize::MAX);
-        match RingTx::try_write(self, length) {
+        match RingTx::try_write_at_most(self, length) {
             Ok(segm) => SomeOf::new_left(segm),
             Err(err) => SomeOf::new_right(err),
         }

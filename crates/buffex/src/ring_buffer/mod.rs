@@ -44,16 +44,23 @@
 //!
 //! # Segments (abs_buff compatibility)
 //!
-//! The user-side borrows are `abs_buff::buffer` segments ([`SegmMut`] /
-//! [`SegmRef`], re-exported as [`ReclSliceMut`] / [`ReclSliceRef`]) whose
-//! buffer **is the ring's own memory** — produced / consumed data is written
-//! directly into the ring, with no intermediate copy. Segments use the
-//! `abs_buff` *per-piece reclaim granularity*: when a segment drops it
+//! The user-side borrows are **RingBuffer-specific** segments ([`ReclSliceMut`]
+//! / [`ReclSliceRef`]) that implement the `abs_buff` traits (`TrBuffSegmView`,
+//! `TrBuffSegmMut`, `TrBuffSegmRef`), so they work with the `abs_buff` pipe
+//! machinery. Unlike the plain abs_buff segments, their internal representation
+//! is an enum over **one or two physical slices**: when the writable/readable
+//! region wraps around the buffer end it is handed out as two slices that are
+//! logically one segment — so a producer asking for the whole free space in one
+//! go is satisfied even though the space is physically fragmented.
+//!
+//! The segments' buffer **is the ring's own memory** — produced / consumed
+//! data is written directly into the ring, with no intermediate copy. Segments
+//! use the `abs_buff` *per-piece reclaim granularity*: when a segment drops it
 //! commits to the ring exactly the amount it consumed (the writer position
-//! advances by the units handed over, the reader position by the units
-//! taken), so a mid-transfer cancellation leaves the positions right after
-//! the transferred data — no duplication, no loss. Peeking uses
-//! [`ReclPeekRef`], a segment whose drop does not move the reader.
+//! advances by the units handed over, the reader position by the units taken),
+//! so a mid-transfer cancellation leaves the positions right after the
+//! transferred data — no duplication, no loss. Peeking uses [`ReclPeekRef`], a
+//! segment whose drop does not move the reader.
 //!
 //! # Async framework support
 //!

@@ -22,7 +22,7 @@ pub(super) async fn producer_core(mut tx: SharedTx, total: usize) {
     let mut off = 0usize;
     while off < total {
         let take = core::cmp::min(7, total - off);
-        let x = tx.write_async(take).await;
+        let x = tx.write_at_most_async(take).await;
         let Some(mut segm) = x.pick_left() else {
             panic!("[producer] write_async failed");
         };
@@ -49,7 +49,7 @@ pub(super) async fn consumer_core(
             break;
         }
         let take = core::cmp::min(11, expected - off);
-        let x = rx.read_async(take).await;
+        let x = rx.read_at_most_async(take).await;
         let Some(segm) = x.pick_left() else {
             panic!("[consumer] read_async failed");
         };
@@ -216,16 +216,13 @@ pub(super) fn run_pipe_scenario_sync() {
         while off < TOTAL {
             let mut progressed = false;
             {
-                let res = tx.try_write(5);
-                match res {
-                    Ok(mut segm) => {
-                        let len = segm.least_count();
-                        fill_segm(&mut segm, &(0..len).map(|i| seq_byte(off + i)).collect::<Vec<_>>());
-                        drop(segm);
-                        off += len;
-                        progressed = true;
-                    }
-                    Err(_) => {}
+                let res = tx.try_write_at_most(5);
+                if let Ok(mut segm) = res {
+                    let len = segm.least_count();
+                    fill_segm(&mut segm, &(0..len).map(|i| seq_byte(off + i)).collect::<Vec<_>>());
+                    drop(segm);
+                    off += len;
+                    progressed = true;
                 }
             }
             if !progressed {
@@ -240,7 +237,7 @@ pub(super) fn run_pipe_scenario_sync() {
             if off >= TOTAL {
                 break;
             }
-            match rx.try_read(9) {
+            match rx.try_read_at_most(9) {
                 Ok(segm) => {
                     let len = segm.least_count();
                     let mut segm = segm;

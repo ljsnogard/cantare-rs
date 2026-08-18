@@ -68,17 +68,27 @@ where
         &self.ring
     }
 
-    /// Borrow up to `length` contiguous readable units. The returned segment
-    /// commits its whole borrowed region when it drops.
-    pub fn try_read(&mut self, length: usize) -> Result<ReclSliceRef<'_, T>, RxError<usize>> {
+    /// Borrow up to `length` readable units (no more than `length`).
+    ///
+    /// The region may wrap around the buffer end; the returned segment is
+    /// then a two-piece segment that treats the two physical slices as one
+    /// logical segment. When it drops, the segment commits exactly the amount
+    /// consumed (the per-piece reclaim granularity).
+    ///
+    /// The name carries `_at_most` to tell it apart from the
+    /// [`TrBuffTryRead::try_read`] trait method, which takes a
+    /// [`Demand`](abs_buff::Demand) instead of a plain length.
+    pub fn try_read_at_most(&mut self, length: usize) -> Result<ReclSliceRef<'_, T>, RxError<usize>> {
         let ring = self.ring();
         let (start, take) = ring.try_read_at(length)?;
         Ok(ring.read_segm(start, take))
     }
 
-    /// Borrow up to `length` contiguous readable units in an async manner,
-    /// waiting for data (or closing) automatically.
-    pub fn read_async(&mut self, length: usize) -> ReadAsync<'_, H, B, T> {
+    /// Borrow up to `length` readable units in an async manner, waiting for
+    /// data (or closing) automatically. See [`RingRx::try_read_at_most`] for
+    /// the `_at_most` naming (vs the [`TrBuffRead::read_async`] trait method
+    /// which takes a [`Demand`](abs_buff::Demand)).
+    pub fn read_at_most_async(&mut self, length: usize) -> ReadAsync<'_, H, B, T> {
         ReadAsync::new(self, length)
     }
 
@@ -154,7 +164,7 @@ where
         MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>,
     > {
         let length = demand.max().copied().unwrap_or(usize::MAX);
-        self.read_async(length)
+        self.read_at_most_async(length)
     }
 }
 
@@ -168,7 +178,7 @@ where
         demand: &Demand<usize>,
     ) -> SomeOf<Self::SegmRef<'f>, Self::Err> {
         let length = demand.max().copied().unwrap_or(usize::MAX);
-        match RingRx::try_read(self, length) {
+        match RingRx::try_read_at_most(self, length) {
             Ok(segm) => SomeOf::new_left(segm),
             Err(err) => SomeOf::new_right(err),
         }

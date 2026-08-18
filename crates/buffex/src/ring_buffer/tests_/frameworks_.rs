@@ -8,7 +8,7 @@ use std::{
 };
 
 use super::scenario_::{
-    run_kernel_scenario, run_pipe_scenario, run_pipe_scenario_sync, run_scenarios_mini,
+    run_kernel_scenario, run_pipe_scenario, run_pipe_scenario_sync,
 };
 use super::{fill_segm, make_ring, seq_byte};
 
@@ -118,16 +118,15 @@ mod compio_ {
             while off < data.len() {
                 let mut progressed = false;
                 {
-                    let res = tx.try_write(8);
-                    match res {
-                        Ok(mut segm) => {
-                            let len = segm.least_count();
-                            fill_segm(&mut segm, &(0..len).map(|i| data[off + i]).collect::<Vec<_>>());
-                            drop(segm);
-                            off += len;
-                            progressed = true;
-                        }
-                        Err(_) => {}
+                    let res = tx.try_write_at_most(8);
+                    if let Ok(mut segm) = res {
+                        // 段可能比剩余源数据更长（ring 的空位可能多于剩余字节），
+                        // 只填入实际剩余的部分，避免越过 data 末尾；
+                        let len = core::cmp::min(segm.least_count(), data.len() - off);
+                        fill_segm(&mut segm, &(0..len).map(|i| data[off + i]).collect::<Vec<_>>());
+                        drop(segm);
+                        off += len;
+                        progressed = true;
                     }
                 }
                 if !progressed {

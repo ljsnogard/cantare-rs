@@ -245,7 +245,7 @@ where
             ptr::copy_nonoverlapping(src, dst, count);
         }
         self.offset_ += count;
-        return count;
+        count
     }
 
     pub fn clone_items_to_segm<TyRecl>(
@@ -300,9 +300,7 @@ where
             return Option::None;
         };
         let available = Demand::less_than(c);
-        let Option::Some(agreement) = demand.compromise(&available) else {
-            return Option::None;
-        };
+        let agreement = demand.compromise(&available)?;
         let max_len = agreement.max()?;
         let dst = &mut self.buffer_[self.offset_..self.offset_ + max_len];
         let reclaim = SegmReclaim::new(&mut self.offset_);
@@ -414,7 +412,7 @@ where
             ptr::copy_nonoverlapping(src, dst, count);
         }
         self.offset_ += count;
-        return count;
+        count
     }
 
     pub fn clone_items_from_buff(&mut self, source: &[T]) -> usize
@@ -444,9 +442,7 @@ where
             return Option::None;
         };
         let available = Demand::less_than(c);
-        let Option::Some(agreement) = demand.compromise(&available) else {
-            return Option::None;
-        };
+        let agreement = demand.compromise(&available)?;
         let max_len = agreement.max()?;
         let dst = &mut self.buffer_[self.offset_..self.offset_ + max_len];
         let reclaim = SegmReclaim::new(&mut self.offset_);
