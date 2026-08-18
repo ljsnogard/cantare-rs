@@ -78,10 +78,10 @@ where
         if c == usize::MAX {
             return PipeJoinIoResult::SizeLimit(c);
         }
-        if buff_w.is_blocked() {
+        if buff_w.is_blocked_closing() {
             return PipeJoinIoResult::TxBlocked(c);
         }
-        if buff_r.is_drained() {
+        if buff_r.is_drained_closing() {
             return PipeJoinIoResult::RxDrained(c);
         }
         let r_demand = Demand::less_than(usize::MAX - c);
@@ -250,7 +250,7 @@ mod tests_ {
             Self: 'f;
         type Err = TestErr;
 
-        fn is_drained(&self) -> bool {
+        fn is_drained_closing(&self) -> bool {
             self.closed && self.pos == self.data.len()
         }
 
@@ -307,7 +307,7 @@ mod tests_ {
             Self: 'f;
         type Err = TestErr;
 
-        fn is_blocked(&self) -> bool {
+        fn is_blocked_closing(&self) -> bool {
             self.pos == self.buff.len()
         }
 

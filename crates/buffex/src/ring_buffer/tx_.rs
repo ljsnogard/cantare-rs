@@ -68,6 +68,20 @@ where
         &self.ring
     }
 
+    pub fn is_blocked_closing(&self) -> bool {
+        !self.ring().has_tx_space() || self.ring().is_tx_closed()
+    }
+
+    pub fn write_async<'f>(
+        &'f mut self,
+        demand: &Demand<usize>,
+    ) -> WriteAsync<'f, H, B, T> {
+        // 尊重 Demand 的 [min, max] 区间：可写空间不足 min 时未来保持 Pending；
+        let min_len = demand.min().copied().unwrap_or(0);
+        let max_len = demand.max().copied().unwrap_or(usize::MAX);
+        WriteAsync::new(self, min_len, max_len)
+    }
+
     /// Borrow up to `length` writable units (no more than `length`).
     ///
     /// The region may wrap around the buffer end; the returned segment is
@@ -143,20 +157,19 @@ where
     type SegmMut<'a> = ReclSliceMut<'a, T> where Self: 'a;
     type Err = TxError<usize>;
 
-    fn is_blocked(&self) -> bool {
-        !self.ring().has_tx_space()
+    #[inline]
+    fn is_blocked_closing(&self) -> bool {
+        RingTx::is_blocked_closing(&self)
     }
 
+    #[inline]
     fn write_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
     ) -> impl abs_cancel::TrMayCancel<'f, MayCancelOutput =
         SomeOf<Self::SegmMut<'f>, Self::Err>>
     {
-        // 尊重 Demand 的 [min, max] 区间：可写空间不足 min 时未来保持 Pending；
-        let min_len = demand.min().copied().unwrap_or(0);
-        let max_len = demand.max().copied().unwrap_or(usize::MAX);
-        WriteAsync::new(self, min_len, max_len)
+        RingTx::write_async(self, demand)
     }
 }
 

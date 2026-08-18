@@ -52,7 +52,7 @@ where
         let buf_len = buf.len();
         loop {
             if c >= buf_len
-                || self.buff_r_.is_drained()
+                || self.buff_r_.is_drained_closing()
                 || self.cancel_.is_cancelled()
             {
                 return Result::Ok(c);
@@ -235,7 +235,7 @@ mod tests_ {
             Self: 'f;
         type Err = TestErr;
 
-        fn is_drained(&self) -> bool {
+        fn is_drained_closing(&self) -> bool {
             self.closed && self.pos == self.data.len()
         }
 

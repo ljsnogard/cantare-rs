@@ -19,7 +19,7 @@ pub trait TrBuffRead<T = u8> {
     ///
     /// This function lets the user knows when to stop consuming loop regardless
     /// any knowledge of the error type.
-    fn is_drained(&self) -> bool;
+    fn is_drained_closing(&self) -> bool;
 
     /// Emits borrowed segment which carries the buffered items. The amount of items
     /// can be specified by the parameter `demand`.

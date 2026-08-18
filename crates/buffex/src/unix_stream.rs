@@ -171,8 +171,8 @@ impl TrBuffWrite<u8> for BufferedUnixStream {
         Self: 'a;
     type Err = TxError<usize>;
 
-    fn is_blocked(&self) -> bool {
-        self.tx.is_blocked()
+    fn is_blocked_closing(&self) -> bool {
+        self.tx.is_blocked_closing()
     }
 
     fn write_async<'f>(
@@ -201,8 +201,8 @@ impl TrBuffRead<u8> for BufferedUnixStream {
         Self: 'a;
     type Err = RxError<usize>;
 
-    fn is_drained(&self) -> bool {
-        self.rx.is_drained()
+    fn is_drained_closing(&self) -> bool {
+        self.rx.is_drained_closing()
     }
 
     fn read_async<'f>(

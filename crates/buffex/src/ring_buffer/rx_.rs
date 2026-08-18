@@ -69,6 +69,19 @@ where
         &self.ring
     }
 
+    pub fn is_drained_closing(&self) -> bool {
+        // "Drained" means no more data will ever be emitted: the rx end is
+        // closed *and* the ring holds no buffered data.
+        self.ring().data_size() == 0 && self.ring().is_rx_closed()
+    }
+
+    pub fn read_async(&mut self, demand: &Demand<usize>) -> ReadAsync<'_, H, B, T> {
+        // 尊重 Demand 的 [min, max] 区间：可读数据不足 min 时未来保持 Pending；
+        let min_len = demand.min().copied().unwrap_or(0);
+        let max_len = demand.max().copied().unwrap_or(usize::MAX);
+        ReadAsync::new(self, min_len, max_len)
+    }
+
     /// Borrow up to `length` readable units (no more than `length`).
     ///
     /// The region may wrap around the buffer end; the returned segment is
@@ -151,22 +164,19 @@ where
     type SegmRef<'a> = ReclSliceRef<'a, T> where Self: 'a;
     type Err = RxError<usize>;
 
-    fn is_drained(&self) -> bool {
-        // "Drained" means no more data will ever be emitted: the rx end is
-        // closed *and* the ring holds no buffered data.
-        self.ring().data_size() == 0 && self.ring().is_rx_closed()
+    #[inline]
+    fn is_drained_closing(&self) -> bool {
+        RingRx::is_drained_closing(self)
     }
 
+    #[inline]
     fn read_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
     ) -> impl TrMayCancel<'f, MayCancelOutput =
         SomeOf<Self::SegmRef<'f>, Self::Err>>
     {
-        // 尊重 Demand 的 [min, max] 区间：可读数据不足 min 时未来保持 Pending；
-        let min_len = demand.min().copied().unwrap_or(0);
-        let max_len = demand.max().copied().unwrap_or(usize::MAX);
-        ReadAsync::new(self, min_len, max_len)
+        RingRx::read_async(self, demand)
     }
 }
 

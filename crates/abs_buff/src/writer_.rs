@@ -19,7 +19,7 @@ pub trait TrBuffWrite<T = u8> {
     ///
     /// This function lets the user knows when to stop producing loop regardless
     /// any knowledge of the error type.
-    fn is_blocked(&self) -> bool;
+    fn is_blocked_closing(&self) -> bool;
 
     /// Lend some segments for writing in an async manner. The total amount of
     /// items is specified by the parameter `demand`.

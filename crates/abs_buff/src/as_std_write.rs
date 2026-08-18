@@ -52,7 +52,7 @@ where
         let buf_len = buf.len();
         loop {
             if c >= buf_len
-                || self.buff_w_.is_blocked()
+                || self.buff_w_.is_blocked_closing()
                 || self.cancel_.is_cancelled()
             {
                 return Result::Ok(c);
@@ -247,7 +247,7 @@ mod tests_ {
             Self: 'f;
         type Err = TestErr;
 
-        fn is_blocked(&self) -> bool {
+        fn is_blocked_closing(&self) -> bool {
             self.pos == self.buff.len()
         }
 
