@@ -3,6 +3,7 @@
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
 #![feature(try_trait_v2)]
+#![feature(min_specialization)]
 #![no_std]
 
 // We always pull in `std` during tests, because it's just easier
@@ -19,6 +20,7 @@ pub mod pipelining;
 mod demand_;
 mod peeker_;
 mod reader_;
+mod slice_impl_;
 mod writer_;
 
 pub use demand_::Demand;

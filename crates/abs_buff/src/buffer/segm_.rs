@@ -208,7 +208,7 @@ pub struct SegmRef<'a, T, R>
 where
     R: TrReclaim,
 {
-    buffer_: &'a mut [T],
+    buffer_: &'a [T],
     offset_: usize,
     reclaim_: Option<R>,
     _pinned_: PhantomPinned,
@@ -235,7 +235,7 @@ where
     /// Create by borrowing a slice from an implicit source. And the items of
     /// this slice will be returned back to or moved out of the source by
     /// `reclaim`.
-    pub const fn new(buffer: &'a mut [T], reclaim: R) -> Self {
+    pub const fn new(buffer: &'a [T], reclaim: R) -> Self {
         SegmRef {
             buffer_: buffer,
             offset_: 0usize,
@@ -272,7 +272,7 @@ where
     }
 
     pub fn as_segm_ref<'f>(&'f mut self) -> SegmRef<'f, T, SegmReclaim<'f>> {
-        let buffer = &mut self.buffer_[self.offset_..];
+        let buffer = &self.buffer_[self.offset_..];
         let reclaim = SegmReclaim::new(&mut self.offset_);
         SegmRef::new(buffer, reclaim)
     }
@@ -380,7 +380,7 @@ where
         let available = Demand::less_than(c);
         let agreement = demand.compromise(&available)?;
         let max_len = agreement.max()?;
-        let dst = &mut self.buffer_[self.offset_..self.offset_ + max_len];
+        let dst = &self.buffer_[self.offset_..self.offset_ + max_len];
         let reclaim = SegmReclaim::new(&mut self.offset_);
         let child = SegmRef::new(dst, reclaim);
         Option::Some(child)
