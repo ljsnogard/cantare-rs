@@ -78,7 +78,10 @@ where
         target: &'f mut TyTarget,
     ) -> usize
     where
-        TyTarget: TrBuffSegmMut<'f, T>,
+        // 注意：trait 生命周期 `'a` 与借用生命周期 `'f` 解耦——若把约束写为
+        // `TrBuffSegmMut<'f, T>`，`'f` 会被绑定到目标段的生命周期，导致搬移后
+        // 段仍处于借用中、无法继续使用。
+        TyTarget: TrBuffSegmMut<'a, T>,
     {
         let mut c = 0usize;
         while self.least_count() > 0 && target.least_count() > 0 {
@@ -137,7 +140,8 @@ where
         source: &'f mut TySource,
     ) -> usize
     where
-        TySource: TrBuffSegmRef<'f, T>,
+        // 同 [`TrBuffSegmRef::move_items_to_segm`]：trait 生命周期与借用解耦。
+        TySource: TrBuffSegmRef<'a, T>,
     {
         let mut c = 0usize;
         while self.least_count() > 0 && source.least_count() > 0 {
@@ -1122,5 +1126,111 @@ mod tests_ {
             assert_eq!(segm.least_count(), 2);
         }
         assert_eq!(consumed, 2);
+    }
+
+    //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+    // 泛型段测试：move_items_* 的 trait 默认实现（SegmRef / SegmMut）
+    //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+    //
+    // 测试意图：abs_buff 把 `move_items_*` 提升为 `TrBuffSegmRef` /
+    // `TrBuffSegmMut` 的 trait 默认方法，任何实现者都必须满足这些默认实现的
+    // 语义。这里用 `buffer::segm_tests` 的泛型函数验证本 crate 自己的
+    // `SegmRef` / `SegmMut`：数据按序搬移、消费量正确推进、无重复无丢失。
+    //
+    // 内部执行设计：每个方向用一个"源 Vec + 目标数组"的简单存储，段持有
+    // `SegmReclaim` 计数器；泛型函数在段层面断言搬移数量与消费量，测试主体
+    // 在底层存储上断言内容按序到达、回收计数器精确提交。
+
+    /// 通过 trait 默认实现把 `SegmRef` 的全部元素搬进 `SegmMut`
+    /// （`move_items_to_segm` 与镜像的 `move_items_from_segm` 都验证）。
+    #[test]
+    fn segm_move_items_trait_defaults() {
+        use crate::buffer::segm_tests as t;
+
+        // —— move_items_to_segm（源段一侧发起）——
+        {
+            let mut src_data: Vec<u64> = (0..16).collect();
+            let mut dst_data = [MaybeUninit::<u64>::uninit(); 16];
+            let mut src_consumed = 0usize;
+            let mut dst_consumed = 0usize;
+            let expect: Vec<u64> = (0..16).collect();
+            let mut src = SegmRef::new(
+                src_data.as_mut_slice(),
+                SegmReclaim::new(&mut src_consumed),
+            );
+            let mut dst = SegmMut::new(
+                &mut dst_data[..],
+                SegmReclaim::new(&mut dst_consumed),
+            );
+            let moved = t::test_move_items_to_segm(&mut src, &mut dst, &expect);
+            assert_eq!(moved, 16, "泛型函数应返回搬移数量");
+            // 泛型函数已内部断言 src/dst 的 least_count == 0；这里再校验
+            // 底层存储与回收计数（段 drop 时提交消费量）；
+            drop(src);
+            drop(dst);
+            assert_eq!(read_init(&dst_data), expect, "内容必须按序搬入目标");
+            assert_eq!(src_consumed, 16, "源段必须按消费量提交");
+            assert_eq!(dst_consumed, 16, "目标段必须按消费量提交");
+        }
+
+        // —— move_items_from_segm（目标段一侧发起，镜像）——
+        {
+            let mut src_data: Vec<u32> = (10..26).collect();
+            let mut dst_data = [MaybeUninit::<u32>::uninit(); 16];
+            let mut src_consumed = 0usize;
+            let mut dst_consumed = 0usize;
+            let expect: Vec<u32> = (10..26).collect();
+            let mut src = SegmRef::new(
+                src_data.as_mut_slice(),
+                SegmReclaim::new(&mut src_consumed),
+            );
+            let mut dst = SegmMut::new(
+                &mut dst_data[..],
+                SegmReclaim::new(&mut dst_consumed),
+            );
+            let moved = t::test_move_items_from_segm(&mut src, &mut dst, &expect);
+            assert_eq!(moved, 16);
+            drop(src);
+            drop(dst);
+            assert_eq!(read_init(&dst_data), expect, "内容必须按序搬入目标");
+            assert_eq!(src_consumed, 16);
+            assert_eq!(dst_consumed, 16);
+        }
+
+        // —— move_items_to_buff（源段 → 普通缓冲）——
+        {
+            let mut src_data: Vec<u8> = (0..16).collect();
+            let mut dst_buf = [MaybeUninit::<u8>::uninit(); 16];
+            let mut consumed = 0usize;
+            let expect: Vec<u8> = (0..16).collect();
+            let mut src = SegmRef::new(
+                src_data.as_mut_slice(),
+                SegmReclaim::new(&mut consumed),
+            );
+            // SAFETY: u8 无 drop，位拷贝安全；
+            let moved = unsafe { t::test_move_items_to_buff(&mut src, &mut dst_buf, &expect) };
+            assert_eq!(moved, 16);
+            drop(src);
+            assert_eq!(read_init(&dst_buf), expect, "缓冲内容必须按序");
+            assert_eq!(consumed, 16);
+        }
+
+        // —— move_items_from_buff（普通缓冲 → 目标段）——
+        {
+            let mut dst_data = [MaybeUninit::<usize>::uninit(); 16];
+            let mut src_buf = [MaybeUninit::<usize>::uninit(); 16];
+            let mut consumed = 0usize;
+            let expect: Vec<usize> = (100..116).collect();
+            let mut dst = SegmMut::new(
+                &mut dst_data[..],
+                SegmReclaim::new(&mut consumed),
+            );
+            // SAFETY: usize 无 drop，位拷贝安全；
+            let moved = unsafe { t::test_move_items_from_buff(&mut dst, &mut src_buf, &expect) };
+            assert_eq!(moved, 16);
+            drop(dst);
+            assert_eq!(read_init(&dst_data), expect, "目标段内容必须按序");
+            assert_eq!(consumed, 16);
+        }
     }
 }

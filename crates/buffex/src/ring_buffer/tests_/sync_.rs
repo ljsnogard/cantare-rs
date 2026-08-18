@@ -814,3 +814,119 @@ fn split_shared_rejects_second_pair_until_halves_dropped() {
     assert_eq!(got, vec![7]);
     drop(segm);
 }
+
+// ---------------------------------------------------------------------------
+// 泛型段测试：move_items_* 的 trait 默认实现（ReclSliceRef / ReclSliceMut）
+// ---------------------------------------------------------------------------
+//
+// 测试意图：abs_buff 把 `move_items_*` 提升为 `TrBuffSegmRef` / `TrBuffSegmMut`
+// 的 trait 默认方法，任何实现者都必须满足这些默认实现的语义。这里用 abs_buff
+// 导出的泛型测试函数（`abs_buff::buffer::segm_tests`，需启用 `segm-tests`
+// feature）验证 RingBuffer 专属的两段式段 `ReclSliceRef` / `ReclSliceMut`：
+// 数据按序搬移、消费量正确推进、无重复无丢失。
+//
+// 内部执行设计：每个方向用两个独立 ring（源环装数据、目标环留空）分别借出
+// 读段与写段，调用泛型函数完成搬移；随后在目标环上读回内容、在源环上确认
+// 已全部消费，验证数据真正按序到达目标存储。
+
+/// 通过 abs_buff 的泛型段测试函数验证 `ReclSliceRef` / `ReclSliceMut` 的
+/// `move_items_*` trait 默认实现（四个方向全部覆盖）。
+#[test]
+fn recl_segm_move_items_trait_defaults() {
+    use abs_buff::buffer::segm_tests as t;
+    use core::mem::MaybeUninit;
+
+    // —— move_items_to_segm（读段 → 写段，跨两个 ring）——
+    {
+        let (src_ring, mut src_tx, mut src_rx) = make_ring();
+        let (dst_ring, mut dst_tx, mut dst_rx) = make_ring();
+        let expect: Vec<u8> = (0..15).collect();
+
+        // 源环写入 16 字节；
+        let mut ws = src_tx.try_write_at_most(15).expect("源环写入");
+        fill_segm(&mut ws, &expect);
+        drop(ws);
+        // 分别借出读段（源环）与写段（目标环）；
+        let mut src_segm = src_rx.try_read_at_most(15).expect("源环读段");
+        let mut dst_segm = dst_tx.try_write_at_most(15).expect("目标环写段");
+        let moved = t::test_move_items_to_segm(&mut src_segm, &mut dst_segm, &expect);
+        assert_eq!(moved, 15, "泛型函数应返回搬移数量");
+        drop(src_segm);
+        drop(dst_segm);
+
+        assert_eq!(src_ring.data_size(), 0, "源环必须被全部消费");
+        assert_eq!(dst_ring.data_size(), 15, "目标环必须收到全部数据");
+        // 目标环读回内容按序校验；
+        let mut got = Vec::new();
+        while let Ok(segm) = dst_rx.try_read_at_most(8) {
+            let len = segm.least_count();
+            let mut segm = segm;
+            got.extend_from_slice(&take_segm(&mut segm, len));
+            drop(segm);
+        }
+        assert_eq!(got, expect, "目标环内容必须按序到达");
+    }
+
+    // —— move_items_from_segm（镜像：写段一侧发起，跨两个 ring）——
+    {
+        let (src_ring, mut src_tx, mut src_rx) = make_ring();
+        let (dst_ring, mut dst_tx, mut dst_rx) = make_ring();
+        let expect: Vec<u8> = (0..15).collect();
+
+        let mut ws = src_tx.try_write_at_most(15).expect("源环写入");
+        fill_segm(&mut ws, &expect);
+        drop(ws);
+        let mut src_segm = src_rx.try_read_at_most(15).expect("源环读段");
+        let mut dst_segm = dst_tx.try_write_at_most(15).expect("目标环写段");
+        let moved = t::test_move_items_from_segm(&mut src_segm, &mut dst_segm, &expect);
+        assert_eq!(moved, 15);
+        drop(src_segm);
+        drop(dst_segm);
+
+        assert_eq!(src_ring.data_size(), 0, "源环必须被全部消费");
+        assert_eq!(dst_ring.data_size(), 15, "目标环必须收到全部数据");
+        let mut got = Vec::new();
+        while let Ok(segm) = dst_rx.try_read_at_most(8) {
+            let len = segm.least_count();
+            let mut segm = segm;
+            got.extend_from_slice(&take_segm(&mut segm, len));
+            drop(segm);
+        }
+        assert_eq!(got, expect, "目标环内容必须按序到达");
+    }
+
+    // —— move_items_to_buff（读段 → 本地缓冲，内容由泛型函数校验）——
+    {
+        let (_src_ring, mut src_tx, mut src_rx) = make_ring();
+        let expect: Vec<u8> = (0..15).collect();
+        let mut ws = src_tx.try_write_at_most(15).expect("源环写入");
+        fill_segm(&mut ws, &expect);
+        drop(ws);
+        let mut src_segm = src_rx.try_read_at_most(15).expect("源环读段");
+        let mut dst_buf = [MaybeUninit::<u8>::uninit(); 15];
+        // SAFETY: u8 无 drop，位拷贝安全；
+        let moved = unsafe { t::test_move_items_to_buff(&mut src_segm, &mut dst_buf, &expect) };
+        assert_eq!(moved, 15);
+        drop(src_segm);
+    }
+
+    // —— move_items_from_buff（本地缓冲 → 写段，目标环读回校验）——
+    {
+        let (_dst_ring, mut dst_tx, mut dst_rx) = make_ring();
+        let expect: Vec<u8> = (100..115).collect();
+        let mut src_buf = [MaybeUninit::<u8>::uninit(); 15];
+        let mut dst_segm = dst_tx.try_write_at_most(15).expect("目标环写段");
+        // SAFETY: u8 无 drop，位拷贝安全；
+        let moved = unsafe { t::test_move_items_from_buff(&mut dst_segm, &mut src_buf, &expect) };
+        assert_eq!(moved, 15);
+        drop(dst_segm);
+        let mut got = Vec::new();
+        while let Ok(segm) = dst_rx.try_read_at_most(8) {
+            let len = segm.least_count();
+            let mut segm = segm;
+            got.extend_from_slice(&take_segm(&mut segm, len));
+            drop(segm);
+        }
+        assert_eq!(got, expect, "目标环内容必须按序到达");
+    }
+}

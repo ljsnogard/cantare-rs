@@ -14,7 +14,8 @@ readme = "README.md"
 [dependencies]
 # -- core (async-runtime agnostic, no_std) --
 atomex = { path = "../atomex" }
-abs_buff = { path = "../abs_buff" }
+# `segm-tests` 仅在测试中启用 abs_buff 的泛型段测试模块（编译时无运行时开销）。
+abs_buff = { path = "../abs_buff", features = ["segm-tests"] }
 
 # -- optional async-framework trait adapters ------------------------------
 # The core ring buffer never depends on any async runtime. These features
