@@ -764,6 +764,24 @@ where
         self.free_(rp, wp) > 0 && !has_flag(state, RECV_IN_FLIGHT)
     }
 
+    /// The writable space is at least `amount` units (and not reserved by the
+    /// runtime for a kernel read). Used to honour the lower bound of a
+    /// [`Demand`](abs_buff::Demand).
+    pub(super) fn has_free_at_least(&self, amount: usize) -> bool {
+        let state = self.core.load_state_();
+        let (rp, wp) = unpack(state);
+        self.free_(rp, wp) >= amount && !has_flag(state, RECV_IN_FLIGHT)
+    }
+
+    /// The readable data is at least `amount` units (and not reserved by the
+    /// runtime for a kernel write). Used to honour the lower bound of a
+    /// [`Demand`](abs_buff::Demand).
+    pub(super) fn has_data_at_least(&self, amount: usize) -> bool {
+        let state = self.core.load_state_();
+        let (rp, wp) = unpack(state);
+        self.data_(rp, wp) >= amount && !has_flag(state, SEND_IN_FLIGHT)
+    }
+
     /// Borrow a write segment over the region `[start, start + take)`, which
     /// may wrap around the buffer end (then it is a two-piece segment, see
     /// [`reclaim_`](self)).
@@ -1036,6 +1054,25 @@ where
     B: DerefMut<Target = [T]>,
 {
     ring.try_peek_at().is_ok() || ring.is_rx_closed()
+}
+
+/// Demand 下限版的 [`check_tx_writable`]：可写空间必须至少 `arg` 格（`arg` 为
+/// `Demand::min`，无下限时传 0）才允许写者继续。用于尊重 `Demand::at_least`
+/// 语义：空间不足下限时，等待中的写者不会被放行（保持 Pending）。
+pub(super) fn check_tx_writable_at_least<B, T>(ring: &RingBuffer<B, T>, arg: usize) -> bool
+where
+    B: DerefMut<Target = [T]>,
+{
+    ring.has_free_at_least(arg.max(1))
+}
+
+/// Demand 下限版的 [`check_rx_readable`]：可读数据必须至少 `arg` 格（`arg` 为
+/// `Demand::min`，无下限时传 0），或 rx 已关闭（EOF），才允许读者继续。
+pub(super) fn check_rx_readable_at_least<B, T>(ring: &RingBuffer<B, T>, arg: usize) -> bool
+where
+    B: DerefMut<Target = [T]>,
+{
+    ring.has_data_at_least(arg.max(1)) || ring.is_rx_closed()
 }
 
 /// The runtime can proceed if buffered data is available for a kernel write,

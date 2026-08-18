@@ -90,7 +90,7 @@ where
     /// the `_at_most` naming (vs the [`TrBuffRead::read_async`] trait method
     /// which takes a [`Demand`](abs_buff::Demand)).
     pub fn read_at_most_async(&mut self, length: usize) -> ReadAsync<'_, H, B, T> {
-        ReadAsync::new(self, length)
+        ReadAsync::new(self, 0, length)
     }
 
     /// Borrow all contiguous readable units without consuming them.
@@ -163,9 +163,10 @@ where
     ) -> impl TrMayCancel<'f, MayCancelOutput =
         SomeOf<Self::SegmRef<'f>, Self::Err>>
     {
-        // TODO: this implement does not respect Demand::at_least
-        let length = demand.max().copied().unwrap_or(usize::MAX);
-        self.read_at_most_async(length)
+        // 尊重 Demand 的 [min, max] 区间：可读数据不足 min 时未来保持 Pending；
+        let min_len = demand.min().copied().unwrap_or(0);
+        let max_len = demand.max().copied().unwrap_or(usize::MAX);
+        ReadAsync::new(self, min_len, max_len)
     }
 }
 
@@ -178,10 +179,24 @@ where
         &'f mut self,
         demand: &Demand<usize>,
     ) -> SomeOf<Self::SegmRef<'f>, Self::Err> {
-        // TODO: this implement does not respect Demand::at_least
-        let length = demand.max().copied().unwrap_or(usize::MAX);
-        match RingRx::try_read_at_most(self, length) {
-            Ok(segm) => SomeOf::new_left(segm),
+        // 尊重 Demand 的 [min, max] 区间：可读数据不足 min 时按 Drained 处理，
+        // 不返回一个不满足下限要求的段；
+        let min_len = demand.min().copied().unwrap_or(0);
+        let max_len = demand.max().copied().unwrap_or(usize::MAX);
+        let ring = self.ring();
+        match ring.try_read_at(max_len) {
+            Ok((start, take)) => {
+                if take < min_len {
+                    let e = if ring.is_rx_closed() {
+                        RxError::Closing
+                    } else {
+                        RxError::Drained(start)
+                    };
+                    SomeOf::new_right(e)
+                } else {
+                    SomeOf::new_left(ring.read_segm(start, take))
+                }
+            }
             Err(err) => SomeOf::new_right(err),
         }
     }

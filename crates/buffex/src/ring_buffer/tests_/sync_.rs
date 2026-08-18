@@ -121,6 +121,229 @@ fn peek_does_not_consume() {
 }
 
 // ---------------------------------------------------------------------------
+// Demand::at_least 下限语义：read_async / write_async / try_read / try_write
+// ---------------------------------------------------------------------------
+//
+// 测试意图：`TrBuffRead::read_async(&Demand)` / `TrBuffWrite::write_async(&Demand)`
+// 收到的 Demand 除了上界（max）还有下界（min，例如 `Demand::at_least(n)`）。
+// 旧实现只取 max、忽略 min——即使环里只有 2 个就绪元素、而 demand 要求至少 4 个，
+// 也会立刻返回一个 2 元素的段，违背"至少 n 个"的语义。修复后：
+//   - 异步版：数量不足 min 时必须保持 Pending（不返回不满足要求的段），
+//     直到数量达到 min 才就绪；
+//   - try 版：数量不足 min 时返回错误（Stuffed / Drained），而不是部分段；
+//   - 读侧 EOF（rx 已关闭）时没有更多数据会来，返回现有部分数据。
+//
+// 内部执行设计：用手写 executor 逐次 poll future——先 poll 一次确认 Pending，
+// 再改变环的状态（补充数据 / 腾出空间 / 关闭），再次 poll 确认就绪或返回，
+// 从而精确验证"数量不足时不放行等待任务"的行为。
+
+/// `read_async(&Demand::at_least(4))`：环里只有 2 个字节时必须保持 Pending，
+/// 补充数据达到 4 个后应就绪并返回不少于 4 的段。
+#[test]
+fn read_async_honours_at_least() {
+    use std::task::{Context, Poll, Waker};
+
+    let (_ring, mut tx, mut rx) = make_ring();
+
+    // 环里先放 2 个字节；
+    let mut ws = tx.try_write_at_most(2).expect("write 2");
+    fill_segm(&mut ws, &[1, 2]);
+    drop(ws);
+
+    // read_async(&Demand::at_least(4))：2 < 4 → 必须 Pending，不能返回 2 字节的段；
+    // 说明：trait 的 `read_async(&Demand)` 返回不透明 `impl TrMayCancel`，无法在
+    // 测试中手动驱动；这里直接构造其内部的具体 future——trait impl 正是把 Demand
+    // 的 [min, max] 转发给 `ReadAsync::new`，故验证的语义完全相同。
+    let mut fut = Box::pin(crate::ring_buffer::ReadAsync::new(&mut rx, 4, usize::MAX).into_future());
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    assert!(
+        fut.as_mut().poll(&mut cx).is_pending(),
+        "2 < 4：数量不足下限时必须保持 Pending"
+    );
+
+    // 再补 3 个字节 → 环里 5 >= 4 → 应就绪；
+    let mut ws = tx.try_write_at_most(3).expect("write 3 more");
+    fill_segm(&mut ws, &[3, 4, 5]);
+    drop(ws);
+
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(res) => {
+            // 先用共享引用判定哪一侧（pick_left / pick_right 都会消费 res）；
+            if res.as_ref().pick_right().is_some() {
+                panic!("future 失败：{:?}", res.pick_right().unwrap());
+            }
+            let segm = res.pick_left().expect("SomeOf 必有且仅有一侧");
+                assert!(segm.least_count() >= 4, "就绪时段的长度必须满足下限");
+                let n = segm.least_count();
+                let mut segm = segm;
+                let got = take_segm(&mut segm, n);
+                drop(segm);
+                assert_eq!(got, vec![1, 2, 3, 4, 5], "读出的内容必须按序");
+
+        }
+        Poll::Pending => panic!("5 >= 4：数量达标后必须就绪"),
+    }
+}
+
+/// `write_async(&Demand::at_least(5))`：可写空间只有 3 格时必须保持 Pending，
+/// 读者腾出空间达到 5 格后应就绪并返回不少于 5 的段。
+#[test]
+fn write_async_honours_at_least() {
+    use std::task::{Context, Poll, Waker};
+
+    let (_ring, mut tx, mut rx) = make_ring(); // 容量 16
+
+    // 先写满 12 个字节：data = 12，free = 16 - 1 - 12 = 3；
+    let mut off = 0usize;
+    while off < 12 {
+        let mut ws = tx.try_write_at_most(12 - off).expect("write");
+        let len = ws.least_count();
+        fill_segm(&mut ws, &(off..off + len).map(seq_byte).collect::<Vec<_>>());
+        drop(ws);
+        off += len;
+    }
+    assert_eq!(tx.free_size(), 3);
+
+    // write_async(&Demand::at_least(5))：free = 3 < 5 → 必须 Pending；
+    // （同读侧：trait impl 把 Demand 的 [min, max] 转发给 `WriteAsync::new`）
+    let mut fut = Box::pin(crate::ring_buffer::WriteAsync::new(&mut tx, 5, usize::MAX).into_future());
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    assert!(
+        fut.as_mut().poll(&mut cx).is_pending(),
+        "free = 3 < 5：可写空间不足下限时必须保持 Pending"
+    );
+
+    // 读者消费 3 个 → data = 9，free = 6 >= 5 → 应就绪；
+    let mut rs = rx.try_read_at_most(3).expect("read 3");
+    let _ = take_segm(&mut rs, 3);
+    drop(rs);
+
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(res) => {
+            // 先用共享引用判定哪一侧（pick_left / pick_right 都会消费 res）；
+            if res.as_ref().pick_right().is_some() {
+                panic!("future 失败：{:?}", res.pick_right().unwrap());
+            }
+            let segm = res.pick_left().expect("SomeOf 必有且仅有一侧");
+                assert!(segm.least_count() >= 5, "就绪时段的长度必须满足下限");
+                drop(segm);
+
+        }
+        Poll::Pending => panic!("free = 6 >= 5：空间达标后必须就绪"),
+    }
+}
+
+/// `try_read(&Demand::at_least(4))`：环里只有 2 个字节时不得返回 2 字节的段，
+/// 而应返回 Drained 错误（数量不足下限）。
+#[test]
+fn try_read_honours_at_least() {
+    use abs_buff::{Demand, TrBuffTryRead};
+
+    let (_ring, mut tx, mut rx) = make_ring();
+    let mut ws = tx.try_write_at_most(2).expect("write 2");
+    fill_segm(&mut ws, &[1, 2]);
+    drop(ws);
+
+    // 2 < 4 → 必须报 Drained，而不是给一个 2 字节的段；
+    let some = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(4));
+    assert!(
+        matches!(some.pick_right(), Option::Some(RxError::Drained(_))),
+        "数量不足下限时必须返回 Drained"
+    );
+}
+
+/// `try_write(&Demand::at_least(4))`：可写空间只有 3 格时不得返回 3 字节的段，
+/// 而应返回 Stuffed 错误。
+#[test]
+fn try_write_honours_at_least() {
+    use abs_buff::{Demand, TrBuffTryWrite};
+
+    let (_ring, mut tx, _rx) = make_ring(); // 容量 16
+    // 写满 12 个字节：free = 3；
+    let mut off = 0usize;
+    while off < 12 {
+        let mut ws = tx.try_write_at_most(12 - off).expect("write");
+        let len = ws.least_count();
+        fill_segm(&mut ws, &(0..len).map(seq_byte).collect::<Vec<_>>());
+        drop(ws);
+        off += len;
+    }
+    assert_eq!(tx.free_size(), 3);
+
+    let some = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(4));
+    assert!(
+        matches!(some.pick_right(), Option::Some(TxError::Stuffed(_))),
+        "可写空间不足下限时必须返回 Stuffed"
+    );
+}
+
+/// 读侧 EOF 特例：rx 已关闭且数据不足下限时，没有更多数据会来，
+/// `read_async` 应返回现有部分数据，而不是永远等待。
+#[test]
+fn read_async_at_least_returns_partial_on_eof() {
+    use std::task::{Context, Poll, Waker};
+
+    let (ring, mut tx, mut rx) = make_ring();
+    let mut ws = tx.try_write_at_most(2).expect("write 2");
+    fill_segm(&mut ws, &[7, 8]);
+    drop(ws);
+    drop(tx);
+    ring.close_rx(); // 模拟 EOF：不会再有多余数据到达
+
+    let mut fut = Box::pin(crate::ring_buffer::ReadAsync::new(&mut rx, 4, usize::MAX).into_future());
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(res) => {
+            // 先用共享引用判定哪一侧（pick_left / pick_right 都会消费 res）；
+            if res.as_ref().pick_right().is_some() {
+                panic!("future 失败：{:?}", res.pick_right().unwrap());
+            }
+            let segm = res.pick_left().expect("SomeOf 必有且仅有一侧");
+                // EOF：返回现有 2 个字节（不足下限）作为最后一段；
+                assert_eq!(segm.least_count(), 2);
+                let n = segm.least_count();
+                let mut segm = segm;
+                let got = take_segm(&mut segm, n);
+                drop(segm);
+                assert_eq!(got, vec![7, 8]);
+
+        }
+        Poll::Pending => panic!("rx 已关闭：不得永远等待"),
+    }
+}
+
+/// `Demand::less_than`（无下限）行为保持不变：环里有多少就返回多少。
+#[test]
+fn read_async_less_than_still_partial() {
+    use std::task::{Context, Poll, Waker};
+
+    let (_ring, mut tx, mut rx) = make_ring();
+    let mut ws = tx.try_write_at_most(2).expect("write 2");
+    fill_segm(&mut ws, &[1, 2]);
+    drop(ws);
+
+    let mut fut = Box::pin(crate::ring_buffer::ReadAsync::new(&mut rx, 0, 8).into_future());
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(res) => {
+            // 先用共享引用判定哪一侧（pick_left / pick_right 都会消费 res）；
+            if res.as_ref().pick_right().is_some() {
+                panic!("future 失败：{:?}", res.pick_right().unwrap());
+            }
+            let segm = res.pick_left().expect("SomeOf 必有且仅有一侧");
+                assert_eq!(segm.least_count(), 2, "无下限时返回现有全部数据");
+                drop(segm);
+
+        }
+        Poll::Pending => panic!("2 > 0：有数据就必须就绪"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 跨末端的两段式（scatter/gather）段：一次拿到"逻辑上连续、物理上分段"的空位
 // ---------------------------------------------------------------------------
 //

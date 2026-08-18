@@ -8,7 +8,7 @@ use std::{
 };
 
 use super::scenario_::{
-    run_kernel_scenario, run_pipe_scenario, run_pipe_scenario_sync,
+    run_kernel_scenario, run_pipe_scenario, run_pipe_scenario_sync, run_scenarios_mini,
 };
 use super::{fill_segm, make_ring, seq_byte};
 
