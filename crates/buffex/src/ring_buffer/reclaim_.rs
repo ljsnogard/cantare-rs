@@ -12,12 +12,14 @@
 //! 当前物理段的一个子段，父段的 offset 在子段 drop 时累计，段整体 drop 时
 //! 按已消费量提交给 ring（逐段回收粒度）。
 
-use core::{mem::MaybeUninit, ops::Try, ptr};
+use core::{mem::MaybeUninit, ops::Try};
 
 use abs_buff::{
-    buffer::{SegmMut, SegmRef, TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrReclaim},
     Demand,
+    buffer::{SegmMut, SegmRef, TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrReclaim},
+    // x_deps::abs_iter,
 };
+// use abs_iter::TrAsSlice;
 
 use super::state_::RingCore;
 
@@ -101,19 +103,19 @@ impl<'a, T> SegmSlicesRef<'a, T> {
         }
     }
 
-    fn remaining_mut(&mut self, offset: usize) -> [&mut [T]; 2] {
-        match self {
-            SegmSlicesRef::One(a) => [&mut a[offset..], &mut []],
-            SegmSlicesRef::Two(a, b) => {
-                let la = a.len();
-                if offset < la {
-                    [&mut a[offset..], b]
-                } else {
-                    [&mut b[offset - la..], &mut []]
-                }
-            }
-        }
-    }
+    // fn remaining_mut(&mut self, offset: usize) -> [&mut [T]; 2] {
+    //     match self {
+    //         SegmSlicesRef::One(a) => [&mut a[offset..], &mut []],
+    //         SegmSlicesRef::Two(a, b) => {
+    //             let la = a.len();
+    //             if offset < la {
+    //                 [&mut a[offset..], b]
+    //             } else {
+    //                 [&mut b[offset - la..], &mut []]
+    //             }
+    //         }
+    //     }
+    // }
 
     fn current_mut(&mut self, offset: usize) -> &mut [T] {
         match self {
@@ -267,31 +269,43 @@ impl<'a, T> ReclSliceMut<'a, T> {
             .filter(|s| !s.is_empty())
     }
 
-    /// 把 `src` 的元素搬进本段（按两段顺序填充），并推进已消费量。
+    /// 当前物理段的剩余部分作为一个 abs_buff 子段；子段 drop 时通过
+    /// [`ChildReclaim`] 把其已消费量累计到父段的 `offset`。
+    pub fn as_segm_mut<'f>(&'f mut self) -> SegmMut<'f, T, ChildReclaim<'f>> {
+        // 直接借用 `self.pieces` 与 `self.offset`（不同字段，借用检查器
+        // 可判定互斥），与 abs_buff 内部 `SegmRef::as_segm_ref` 的做法一致。
+        let slice = self.pieces.current_mut(self.offset);
+        let reclaim = ChildReclaim::new(&mut self.offset);
+        SegmMut::new(slice, reclaim)
+    }
+
+    pub fn take_segm_mut<'f>(
+        &'f mut self,
+        demand: &Demand<usize>,
+    ) -> Option<SegmMut<'f, T, ChildReclaim<'f>>> {
+        let c = self.least_count();
+        if c == 0 {
+            return Option::None;
+        }
+        let available = Demand::less_than(c);
+        let agreement = demand.compromise(&available)?;
+        let max_len = agreement.max()?;
+        // 子段只能覆盖当前物理段；跨段部分由下一次 take 处理。
+        let cur = self.pieces.current_mut(self.offset);
+        let take = core::cmp::min(*max_len, cur.len());
+        let slice = &mut cur[..take];
+        let reclaim = ChildReclaim::new(&mut self.offset);
+        Option::Some(SegmMut::new(slice, reclaim))
+    }
+
+    /// See `TrBuffSegmMut::move_items_from_buff`.
     ///
     /// ## Safety
     ///
-    /// 搬移为位拷贝：`src` 中被搬走的元素在搬移后不再被 drop，调用方需保证
-    /// `T` 无需要 drop 的资源（或自行处理 `src` 剩余元素）。
+    /// - See `TrBuffSegmMut::move_items_from_buff`
+    #[inline]
     pub unsafe fn move_items_from_buff(&mut self, src: &mut [MaybeUninit<T>]) -> usize {
-        let mut copied = 0usize;
-        let mut slices = self.pieces.remaining_mut(self.offset);
-        for dst in slices.iter_mut() {
-            let n = core::cmp::min(dst.len(), src.len() - copied);
-            if n > 0 {
-                // SAFETY: 源 / 目标均为 `MaybeUninit<T>`，位拷贝 `n` 个元素；
-                // 两段物理空间互不相交，`dst` 与 `src` 也互不重叠。
-                unsafe {
-                    ptr::copy_nonoverlapping(src.as_ptr().add(copied), dst.as_mut_ptr(), n);
-                }
-            }
-            copied += n;
-            if copied == src.len() {
-                break;
-            }
-        }
-        self.offset += copied;
-        copied
+        unsafe { TrBuffSegmMut::move_items_from_buff(self, src) }
     }
 }
 
@@ -329,38 +343,17 @@ impl<'a, T> TrBuffSegmView for ReclSliceMut<'a, T> {
 impl<'a, T> TrBuffSegmMut<'a, T> for ReclSliceMut<'a, T> {
     type Reclaimer<'f> = ChildReclaim<'f> where Self: 'f;
 
-    /// 当前物理段的剩余部分作为一个 abs_buff 子段；子段 drop 时通过
-    /// [`ChildReclaim`] 把其已消费量累计到父段的 `offset`。
+    #[inline]
     fn as_segm_mut<'f>(&'f mut self) -> SegmMut<'f, T, Self::Reclaimer<'f>> {
-        // 直接借用 `self.pieces` 与 `self.offset`（不同字段，借用检查器
-        // 可判定互斥），与 abs_buff 内部 `SegmRef::as_segm_ref` 的做法一致。
-        let slice = self.pieces.current_mut(self.offset);
-        let reclaim = ChildReclaim::new(&mut self.offset);
-        SegmMut::new(slice, reclaim)
+        ReclSliceMut::as_segm_mut(self)
     }
 
-    #[allow(clippy::question_mark)] // 返回类型是透明 `impl Try`，无法使用 `?` 短路
+    #[inline]
     fn take_segm_mut<'f>(
         &'f mut self,
         demand: &Demand<usize>,
     ) -> impl Try<Output: TrBuffSegmMut<'f, T>> {
-        let c = self.least_count();
-        if c == 0 {
-            return Option::None;
-        }
-        let available = Demand::less_than(c);
-        let Option::Some(agreement) = demand.compromise(&available) else {
-            return Option::None;
-        };
-        let Option::Some(max_len) = agreement.max() else {
-            return Option::None;
-        };
-        // 子段只能覆盖当前物理段；跨段部分由下一次 take 处理。
-        let cur = self.pieces.current_mut(self.offset);
-        let take = core::cmp::min(*max_len, cur.len());
-        let slice = &mut cur[..take];
-        let reclaim = ChildReclaim::new(&mut self.offset);
-        Option::Some(SegmMut::new(slice, reclaim))
+        ReclSliceMut::take_segm_mut(self, demand)
     }
 }
 
@@ -412,35 +405,38 @@ impl<'a, T> ReclSliceRef<'a, T> {
             .filter(|s| !s.is_empty())
     }
 
-    /// 把本段剩余元素搬出到 `dst`（按两段顺序取出），并推进已消费量。
+    pub fn take_segm_ref<'f>(
+        &'f mut self,
+        demand: &Demand<usize>,
+    ) -> Option<SegmRef<'f, T, ChildReclaim<'f>>> {
+        let c = self.least_count();
+        if c == 0 {
+            return Option::None;
+        }
+        let available = Demand::less_than(c);
+        let agreement = demand.compromise(&available)?;
+        let max_len = agreement.max()?;
+        let cur = self.pieces.current_mut(self.offset);
+        let take = core::cmp::min(*max_len, cur.len());
+        let slice = &mut cur[..take];
+        let reclaim = ChildReclaim::new(&mut self.offset);
+        Option::Some(SegmRef::new(slice, reclaim))
+    }
+
+    /// 当前物理段的剩余部分作为一个 abs_buff 子段（同写段的设计）。
+    pub fn as_segm_ref<'f>(&'f mut self) -> SegmRef<'f, T, ChildReclaim<'f>> {
+        let slice = self.pieces.current_mut(self.offset);
+        let reclaim = ChildReclaim::new(&mut self.offset);
+        SegmRef::new(slice, reclaim)
+    }
+
+    /// See [abs_buff::buffer::TrBuffSegmRef::move_items_to_buff]
     ///
     /// ## Safety
     ///
-    /// 搬移为位拷贝：被搬出的元素不再由本段 drop，调用方需保证 `T` 无需要
-    /// drop 的资源（或由 `dst` 负责）。
+    /// - See [abs_buff::buffer::TrBuffSegmRef::move_items_to_buff]
     pub unsafe fn move_items_to_buff(&mut self, dst: &mut [MaybeUninit<T>]) -> usize {
-        let mut copied = 0usize;
-        let mut slices = self.pieces.remaining_mut(self.offset);
-        for src in slices.iter_mut() {
-            let n = core::cmp::min(src.len(), dst.len() - copied);
-            if n > 0 {
-                // SAFETY: 位拷贝 `n` 个元素（`&mut [T]` 与 `&mut [MaybeUninit<T>]`
-                // 布局相同），两段物理空间互不相交。
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        src.as_ptr() as *const MaybeUninit<T>,
-                        dst.as_mut_ptr().add(copied),
-                        n,
-                    );
-                }
-            }
-            copied += n;
-            if copied == dst.len() {
-                break;
-            }
-        }
-        self.offset += copied;
-        copied
+        unsafe { TrBuffSegmRef::move_items_to_buff(self, dst) }
     }
 }
 
@@ -483,33 +479,16 @@ impl<'a, T> TrBuffSegmView for ReclSliceRef<'a, T> {
 impl<'a, T> TrBuffSegmRef<'a, T> for ReclSliceRef<'a, T> {
     type Reclaimer<'f> = ChildReclaim<'f> where Self: 'f;
 
-    /// 当前物理段的剩余部分作为一个 abs_buff 子段（同写段的设计）。
+    #[inline]
     fn as_segm_ref<'f>(&'f mut self) -> SegmRef<'f, T, Self::Reclaimer<'f>> {
-        let slice = self.pieces.current_mut(self.offset);
-        let reclaim = ChildReclaim::new(&mut self.offset);
-        SegmRef::new(slice, reclaim)
+        ReclSliceRef::as_segm_ref(self)
     }
 
-    #[allow(clippy::question_mark)] // 返回类型是透明 `impl Try`，无法使用 `?` 短路
+    #[inline]
     fn take_segm_ref<'f>(
         &'f mut self,
         demand: &Demand<usize>,
     ) -> impl Try<Output: TrBuffSegmRef<'f, T>> {
-        let c = self.least_count();
-        if c == 0 {
-            return Option::None;
-        }
-        let available = Demand::less_than(c);
-        let Option::Some(agreement) = demand.compromise(&available) else {
-            return Option::None;
-        };
-        let Option::Some(max_len) = agreement.max() else {
-            return Option::None;
-        };
-        let cur = self.pieces.current_mut(self.offset);
-        let take = core::cmp::min(*max_len, cur.len());
-        let slice = &mut cur[..take];
-        let reclaim = ChildReclaim::new(&mut self.offset);
-        Option::Some(SegmRef::new(slice, reclaim))
+        ReclSliceRef::take_segm_ref(self, demand)
     }
 }

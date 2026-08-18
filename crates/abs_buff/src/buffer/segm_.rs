@@ -66,6 +66,44 @@ where
     /// To end the evaluation of recursive downcast from TrBuffSegmRef.
     /// A `SegmRef<T>` can move items to a `SegmMut<T>`.
     fn as_segm_ref<'f>(&'f mut self) -> SegmRef<'f, T, Self::Reclaimer<'f>>;
+
+    /// Do a memory copy to the target `SegmMut<T>`.
+    ///
+    /// The items that are being memory copied will be treated as moved and
+    /// will no longer drop by this `SegmRef<T>`. And the return result of
+    /// `least_count()`, either from this `SegmRef<T>` or from the target
+    /// `SegmMut<T>` shall change.
+    fn move_items_to_segm<'f, TyTarget>(
+        &'f mut self,
+        target: &'f mut TyTarget,
+    ) -> usize
+    where
+        TyTarget: TrBuffSegmMut<'f, T>,
+    {
+        let mut c = 0usize;
+        while self.least_count() > 0 && target.least_count() > 0 {
+            let mut src_segm = self.as_segm_ref();
+            let mut dst_segm = target.as_segm_mut();
+            c += src_segm.move_items_to_segm(&mut dst_segm);
+        }
+        c
+    }
+
+    /// 把本段剩余元素搬出到 `dst`（按两段顺序取出），并推进已消费量。
+    ///
+    /// ## Safety
+    ///
+    /// 搬移为位拷贝：被搬出的元素不再由本段 drop，调用方需保证 `T` 无需要
+    /// drop 的资源（或由 `dst` 负责）。
+    unsafe fn move_items_to_buff(&mut self, dst: &mut [MaybeUninit<T>]) -> usize {
+        let mut c = 0usize;
+        while self.least_count() > 0 && c < dst.len() {
+            let mut segm = self.as_segm_ref();
+            let dst_buff = &mut dst[c..];
+            c += unsafe { segm.move_items_to_buff(dst_buff) };
+        }
+        c
+    }
 }
 
 /// A buffer that its data is organized with one or more slices mut.
@@ -89,6 +127,42 @@ where
     ) -> impl Try<Output: TrBuffSegmMut<'f, T>>;
 
     fn as_segm_mut<'f>(&'f mut self) -> SegmMut<'f, T, Self::Reclaimer<'f>>;
+
+    /// Do a memory copy to the target `SegmMut<T>`.
+    ///
+    /// This function heavily relies on `as_segm_mut` and `as_segm_ref` to
+    /// do the actual memory copying.
+    fn move_items_from_segm<'f, TySource>(
+        &'f mut self,
+        source: &'f mut TySource,
+    ) -> usize
+    where
+        TySource: TrBuffSegmRef<'f, T>,
+    {
+        let mut c = 0usize;
+        while self.least_count() > 0 && source.least_count() > 0 {
+            let mut dst_segm = self.as_segm_mut();
+            let mut src_segm = source.as_segm_ref();
+            c += dst_segm.move_items_from_segm(&mut src_segm);
+        }
+        c
+    }
+
+    /// 把 `src` 的元素搬进本段（按两段顺序填充），并推进已消费量。
+    ///
+    /// ## Safety
+    ///
+    /// 搬移为位拷贝：`src` 中被搬走的元素在搬移后不再被 drop，调用方需保证
+    /// `T` 无需要 drop 的资源（或自行处理 `src` 剩余元素）。
+    unsafe fn move_items_from_buff(&mut self, src: &mut [MaybeUninit<T>]) -> usize {
+        let mut c = 0usize;
+        while self.least_count() > 0 && c < src.len() {
+            let mut segm = self.as_segm_mut();
+            let src_buff = &mut src[c..];
+            c += unsafe { segm.move_items_from_buff(src_buff) };
+        }
+        c
+    }
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----

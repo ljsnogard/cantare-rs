@@ -1,7 +1,7 @@
 use core::{
     error::Error,
     mem::{self, MaybeUninit},
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, Try},
     ptr,
 };
 
@@ -66,16 +66,19 @@ pub trait TrOutput<T = u8> {
 }
 
 pub trait TrSink<T = u8> {
-    fn write_async<'a, TyBuff>(&'a mut self, source: TyBuff) -> (usize, TyBuff)
+    fn write_async<'f, TyBuff>(
+        &'f mut self,
+        source: TyBuff,
+    ) -> impl TrMayCancel<'f, MayCancelOutput: Try<Output = (usize, TyBuff)>>
     where
         TyBuff: Deref<Target: 'static + TrBuffer>;
 }
 
 pub trait TrFlux<T = u8> {
-    fn read_async<'a, TyBuffMut>(
-        &'a mut self,
+    fn read_async<'f, TyBuffMut>(
+        &'f mut self,
         target: TyBuffMut,
-    ) -> (usize, TyBuffMut)
+    ) -> impl TrMayCancel<'f, MayCancelOutput: Try<Output = (usize, TyBuffMut)>>
     where
         TyBuffMut: DerefMut<Target: 'static + TrBufferMut>;
 }

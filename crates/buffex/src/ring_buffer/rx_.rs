@@ -13,6 +13,7 @@ use abs_buff::{
     x_deps::{anylr, abs_cancel},
     Demand, TrBuffPeek, TrBuffRead, TrBuffTryPeek, TrBuffTryRead,
 };
+use abs_cancel::TrMayCancel;
 
 use super::{
     error_::RxError,
@@ -159,10 +160,10 @@ where
     fn read_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl abs_cancel::TrMayCancel<
-        'f,
-        MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>,
-    > {
+    ) -> impl TrMayCancel<'f, MayCancelOutput =
+        SomeOf<Self::SegmRef<'f>, Self::Err>>
+    {
+        // TODO: this implement does not respect Demand::at_least
         let length = demand.max().copied().unwrap_or(usize::MAX);
         self.read_at_most_async(length)
     }
@@ -177,6 +178,7 @@ where
         &'f mut self,
         demand: &Demand<usize>,
     ) -> SomeOf<Self::SegmRef<'f>, Self::Err> {
+        // TODO: this implement does not respect Demand::at_least
         let length = demand.max().copied().unwrap_or(usize::MAX);
         match RingRx::try_read_at_most(self, length) {
             Ok(segm) => SomeOf::new_left(segm),
@@ -195,10 +197,9 @@ where
 
     fn peek_async<'f>(
         &'f mut self,
-    ) -> impl abs_cancel::TrMayCancel<
-        'f,
-        MayCancelOutput = SomeOf<Self::SegmPeek<'f>, Self::Err>,
-    > {
+    ) -> impl abs_cancel::TrMayCancel<'f, MayCancelOutput =
+        SomeOf<Self::SegmPeek<'f>, Self::Err>>
+    {
         PeekAsync::new(self)
     }
 }

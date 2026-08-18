@@ -459,17 +459,6 @@ where
         self.free_(rp, wp)
     }
 
-    #[inline]
-    fn data_(&self, rp: usize, wp: usize) -> usize {
-        (wp + self.capacity() - rp) % self.capacity()
-    }
-
-    /// Free slots; the single-gap scheme always keeps one slot unused.
-    #[inline]
-    fn free_(&self, rp: usize, wp: usize) -> usize {
-        self.capacity() - 1 - self.data_(rp, wp)
-    }
-
     // ------------------------------------------------------------------
     // state queries (public: read-only, cannot corrupt the ring)
     // ------------------------------------------------------------------
@@ -693,6 +682,17 @@ where
             pack(rp, nw) | (s & FLAG_MASK & !RECV_IN_FLIGHT)
         });
         self.core.signal_all();
+    }
+
+    #[inline]
+    fn data_(&self, rp: usize, wp: usize) -> usize {
+        (wp + self.capacity() - rp) % self.capacity()
+    }
+
+    /// Free slots; the single-gap scheme always keeps one slot unused.
+    #[inline]
+    fn free_(&self, rp: usize, wp: usize) -> usize {
+        self.capacity() - 1 - self.data_(rp, wp)
     }
 
     /// The readable region `[rp, rp+len)` as up to two slices.

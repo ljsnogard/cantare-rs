@@ -150,10 +150,10 @@ where
     fn write_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl abs_cancel::TrMayCancel<
-        'f,
-        MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>,
-    > {
+    ) -> impl abs_cancel::TrMayCancel<'f, MayCancelOutput =
+        SomeOf<Self::SegmMut<'f>, Self::Err>>
+    {
+        // TODO: this implement does not respect Demand::at_least
         let length = demand.max().copied().unwrap_or(usize::MAX);
         self.write_at_most_async(length)
     }
@@ -168,6 +168,7 @@ where
         &'f mut self,
         demand: &Demand<usize>,
     ) -> SomeOf<Self::SegmMut<'f>, Self::Err> {
+        // TODO: this implement does not respect Demand::at_least
         let length = demand.max().copied().unwrap_or(usize::MAX);
         match RingTx::try_write_at_most(self, length) {
             Ok(segm) => SomeOf::new_left(segm),
