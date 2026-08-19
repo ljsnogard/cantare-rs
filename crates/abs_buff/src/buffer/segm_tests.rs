@@ -31,11 +31,7 @@ where
     S: TrBuffSegmView<Item = T>,
     T: Copy + PartialEq + Debug,
 {
-    assert_eq!(
-        segm.least_count(),
-        expect.len(),
-        "剩余数量必须等于期望数量"
-    );
+    assert_eq!(segm.least_count(), expect.len(), "剩余数量必须等于期望数量");
     let mut off = 0usize;
     for piece in segm.iter_slices() {
         for (i, v) in piece.iter().enumerate() {
@@ -164,4 +160,214 @@ where
         "目标段必须被全部填充（其容量需恰好为 expect.len()）"
     );
     moved
+}
+
+#[cfg(test)]
+mod tests_ {
+    use core::{
+        error::Error,
+        fmt,
+        future::{Future, IntoFuture},
+        mem::MaybeUninit,
+        pin::Pin,
+        task::{Context, Poll, Waker},
+    };
+    use std::vec::Vec;
+
+    use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
+    use anylr::SomeOf;
+
+    use super::super::segm_::{SegmMut, SegmReclaim, SegmRef};
+    use crate::{
+        Demand,
+        io::{TrInput, TrOutput},
+    };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[allow(dead_code)]
+    enum TestErr {
+        Boom,
+    }
+
+    impl fmt::Display for TestErr {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                TestErr::Boom => write!(f, "boom"),
+            }
+        }
+    }
+
+    impl Error for TestErr {}
+
+    /// 一个立即就绪的 `TrMayCancel` future，用于测试 `TrInput` / `TrOutput`
+    /// 的简单实现。
+    struct ReadySegm<S, E>(Option<SomeOf<S, E>>);
+
+    impl<S, E> ReadySegm<S, E> {
+        fn new(value: SomeOf<S, E>) -> Self {
+            ReadySegm(Option::Some(value))
+        }
+    }
+
+    impl<S, E> Future for ReadySegm<S, E> {
+        type Output = SomeOf<S, E>;
+
+        fn poll(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Self::Output> {
+            let this = unsafe { self.get_unchecked_mut() };
+            Poll::Ready(this.0.take().expect("ready future polled once"))
+        }
+    }
+
+    impl<'f, S: 'f, E: 'f> TrMayCancel<'f> for ReadySegm<S, E> {
+        type MayCancelOutput = SomeOf<S, E>;
+
+        fn may_cancel_with<'g, C>(
+            self,
+            _cancel: &'g mut C,
+        ) -> impl IntoFuture<Output = Self::MayCancelOutput>
+        where
+            Self: 'g,
+            'g: 'f,
+            C: TrCancellationToken + Clone,
+        {
+            self
+        }
+    }
+
+    /// 轮询一个立即就绪的 future 到完成。
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        let mut fut = core::pin::pin!(fut);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("test future must be immediately ready"),
+        }
+    }
+
+    /// 一个简单的 `TrOutput<u8>`：每次把传入的源数据全部“写出”到内部 Vec。
+    struct TestOutput {
+        data: Vec<u8>,
+    }
+
+    impl TrOutput<u8> for TestOutput {
+        type Err = TestErr;
+
+        fn write_async<'a>(
+            &'a mut self,
+            source: &'a [MaybeUninit<u8>],
+        ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<usize, Self::Err>>
+        {
+            let n = source.len();
+            for m in source {
+                // SAFETY: 测试数据为 u8，无 drop 需求。
+                self.data.push(unsafe { m.assume_init_read() });
+            }
+            ReadySegm::new(SomeOf::new_left(n))
+        }
+    }
+
+    /// 一个简单的 `TrInput<u8>`：每次把内部数据读入调用方提供的目标缓冲。
+    struct TestInput {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl TrInput<u8> for TestInput {
+        type Err = TestErr;
+
+        fn read_async<'a>(
+            &'a mut self,
+            target: &'a mut [MaybeUninit<u8>],
+        ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<usize, Self::Err>>
+        {
+            let n = core::cmp::min(target.len(), self.data.len() - self.pos);
+            for (i, slot) in target[..n].iter_mut().enumerate() {
+                *slot = MaybeUninit::new(self.data[self.pos + i]);
+            }
+            self.pos += n;
+            ReadySegm::new(SomeOf::new_left(n))
+        }
+    }
+
+    /// 测试 `SegmRef::move_items_to_output_async`：从段中把数据移动到
+    /// `TrOutput`，并正确推进段内部的 `offset_`。
+    #[test]
+    fn segm_ref_output_async_moves_data_and_advances_offset() {
+        let mut data: Vec<u8> = (0..10).collect();
+        let mut consumed = 0usize;
+        let mut segm = SegmRef::new(
+            data.as_mut_slice(),
+            SegmReclaim::new(Pin::new(&mut consumed)),
+        );
+        let mut output = TestOutput { data: Vec::new() };
+
+        {
+            let res = block_on(async {
+                let mut child = segm.as_segm_ref();
+                child
+                    .move_items_to_output_async(
+                        &mut output,
+                        &Demand::less_than(6),
+                    )
+                    .may_cancel_with(NonCancellableToken::shared_mut())
+                    .await
+            });
+
+            let moved = res.pick_left().expect("output_async should succeed");
+            assert_eq!(moved, 6, "应按 demand 上界移动 6 个元素");
+        }
+
+        assert_eq!(segm.least_count(), 4, "父段应反映子段消费的 6 个元素");
+        assert_eq!(output.data, (0..6).collect::<Vec<_>>(), "输出内容应有序");
+
+        drop(segm);
+        assert_eq!(consumed, 6, "段 drop 时应把消费量提交给 reclaimer");
+    }
+
+    /// 测试 `SegmMut::move_items_from_input_async`：从 `TrInput` 读取数据到段中，
+    /// 并正确推进段内部的 `offset_`。
+    #[test]
+    fn segm_mut_input_async_reads_data_and_advances_offset() {
+        let mut storage = [MaybeUninit::<u8>::uninit(); 10];
+        let mut consumed = 0usize;
+        let mut segm = SegmMut::new(
+            &mut storage[..],
+            SegmReclaim::new(Pin::new(&mut consumed)),
+        );
+        let mut input = TestInput {
+            data: (0..10).collect(),
+            pos: 0,
+        };
+
+        {
+            let res = block_on(async {
+                let mut child = segm.as_segm_mut();
+                child
+                    .move_items_from_input_async(
+                        &mut input,
+                        &Demand::less_than(7),
+                    )
+                    .may_cancel_with(NonCancellableToken::shared_mut())
+                    .await
+            });
+
+            let moved = res.pick_left().expect("input_async should succeed");
+            assert_eq!(moved, 7, "应按 demand 上界读入 7 个元素");
+        }
+
+        assert_eq!(segm.least_count(), 3, "父段应反映子段读入的 7 个元素");
+
+        drop(segm);
+        assert_eq!(consumed, 7, "段 drop 时应把消费量提交给 reclaimer");
+
+        let got: Vec<u8> = storage[..7]
+            .iter()
+            .map(|m| unsafe { m.assume_init_read() })
+            .collect();
+        assert_eq!(got, (0..7).collect::<Vec<_>>(), "读入内容应有序");
+    }
 }

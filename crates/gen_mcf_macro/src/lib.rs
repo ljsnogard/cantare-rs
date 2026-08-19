@@ -1,31 +1,37 @@
-use syn::{
-    parse_macro_input,
-    parse_quote,
-    punctuated::Punctuated,
-    FnArg, GenericParam, GenericArgument, Ident, ItemFn,
-    Lifetime, PredicateLifetime, PredicateType,
-    PatType, Path, PathArguments,
-    Token, Type, TypeArray, TypeParamBound, TraitBound,
-    WhereClause, WherePredicate,
-};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
+use syn::{
+    FnArg, GenericArgument, GenericParam, Ident, ItemFn, Lifetime, PatType,
+    Path, PathArguments, PredicateLifetime, PredicateType, Token, TraitBound,
+    Type, TypeArray, TypeParamBound, WhereClause, WherePredicate,
+    parse_macro_input, parse_quote, punctuated::Punctuated,
+};
 
 #[proc_macro_attribute]
-pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn gen_may_cancel_future(
+    attr: TokenStream,
+    item: TokenStream,
+) -> TokenStream {
     let prefix_args = parse_macro_input!(attr with Punctuated::<Path, Token![,]>::parse_terminated);
     let input_fn = parse_macro_input!(item as ItemFn);
 
     // 要生成的各个 struct 的名称前缀，在调用宏时在代码中指定
     let prefix_ident = if prefix_args.len() == 1 {
-        prefix_args.first().unwrap().get_ident().cloned().expect("Expected identifier as path")
+        prefix_args
+            .first()
+            .unwrap()
+            .get_ident()
+            .cloned()
+            .expect("Expected identifier as path")
     } else {
         panic!("Expected exactly one identifier as prefix");
     };
 
     // 检查输入的函数是否有 async 修饰
     if input_fn.sig.asyncness.is_none() {
-        panic!("`#[gen_may_cancel_future]` can only be applied to async functions");
+        panic!(
+            "`#[gen_may_cancel_future]` can only be applied to async functions"
+        );
     }
 
     // 提取函数签名的各个部分
@@ -84,10 +90,10 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         let punctuated = where_clause
             .predicates
             .iter()
-            .filter(|pred|
+            .filter(|pred| {
                 !predicate_contains_type_param(pred, &cancel_type_param)
                     && !predicate_contains_lifetime(pred, &last_lt)
-            )
+            })
             .cloned()
             .collect::<Punctuated<_, Token![,]>>();
         if !punctuated.is_empty() {
@@ -170,34 +176,52 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
 
                     // Expect: &'f mut C
                     let syn::Type::Reference(cancel_type_ref) = &**ty else {
-                        panic!("Last argument check: not reference type, must be like `&'f mut C`")
+                        panic!(
+                            "Last argument check: not reference type, must be like `&'f mut C`"
+                        )
                     };
                     // 3. 检查是否带有 `mut` 关键字
                     if cancel_type_ref.mutability.is_none() {
-                        panic!("Last argument check: not mut ref type, must be like `&'f mut C`")
+                        panic!(
+                            "Last argument check: not mut ref type, must be like `&'f mut C`"
+                        )
                     };
                     let Option::Some(lt_arg) = &cancel_type_ref.lifetime else {
-                        panic!("Last argument check: lifetime not fount, must declare a lifetime like `&'f mut C`")
+                        panic!(
+                            "Last argument check: lifetime not fount, must declare a lifetime like `&'f mut C`"
+                        )
                     };
                     if lt_arg.ident != last_lt.ident {
-                        panic!("Last argument check: lifetime of cancellation token must be the last one");
+                        panic!(
+                            "Last argument check: lifetime of cancellation token must be the last one"
+                        );
                     }
-                    let Type::Path(generic_cancel_type_path) = cancel_type_ref.elem.as_ref() else {
-                        panic!("Last argument check: cancel token type must be simple type token");
+                    let Type::Path(generic_cancel_type_path) =
+                        cancel_type_ref.elem.as_ref()
+                    else {
+                        panic!(
+                            "Last argument check: cancel token type must be simple type token"
+                        );
                     };
                     if generic_cancel_type_path.path.segments.len() != 1 {
-                        panic!("Last argument check: cancel token type should be generic type param");
+                        panic!(
+                            "Last argument check: cancel token type should be generic type param"
+                        );
                     }
-                    let cancel_tok_type_ident = &generic_cancel_type_path.path.segments[0].ident;
+                    let cancel_tok_type_ident =
+                        &generic_cancel_type_path.path.segments[0].ident;
                     if !generics_all.contains(cancel_tok_type_ident) {
-                        panic!("Last argument check: cancel token type mismatch");
+                        panic!(
+                            "Last argument check: cancel token type mismatch"
+                        );
                     }
                     cancel_type = Option::Some(ty.clone());
                     // cancel_pat = Some(pat.clone());
                 } else {
                     let orig_ty = ty.clone();
                     // 转换外层引用生命周期
-                    let transformed_ty = transform_type_outer_lifetime(&orig_ty, &last_lt);
+                    let transformed_ty =
+                        transform_type_outer_lifetime(&orig_ty, &last_lt);
                     fields.push(transformed_ty.clone());
                     types.push(transformed_ty);
                     args.push(pat.clone());
@@ -207,7 +231,8 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         }
     }
 
-    let field_indices: Vec<syn::Index> = (0..args.len()).map(syn::Index::from).collect();
+    let field_indices: Vec<syn::Index> =
+        (0..args.len()).map(syn::Index::from).collect();
 
     let async_struct = format_ident!("{}Async", prefix_ident);
     let future_struct = format_ident!("{}Future", prefix_ident);
@@ -221,16 +246,24 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         _ => panic!("Expected function to return a value"),
     };
 
-    let unified_lt_vec = vec![last_lt.clone()];
-    let generic_params_single_lt_no_cancel = build_generic_params(&unified_lt_vec, &generics_no_cancel);
-    let generic_params_single_lt_all = build_generic_params(&unified_lt_vec, &generics_all);
+    // async_struct 只需要包含字段中实际出现的生命周期；future 需要包含全部
+    // 生命周期，因为 cancel token 字段会使用最后一个生命周期 `last_lt`。
+    let async_lifetimes = collect_used_lifetimes(&types, &lifetimes_all);
+    let generic_params_async_no_cancel =
+        build_generic_params(&async_lifetimes, &generics_no_cancel);
+    let generic_params_future_no_cancel =
+        build_generic_params(&async_lifetimes, &generics_no_cancel);
+    let generic_params_future_all =
+        build_generic_params(&async_lifetimes, &generics_all);
 
-    let cancel_type_lt_replaced = transform_type_outer_lifetime(cancel_type.as_ref().unwrap(), &last_lt);
+    let cancel_type_lt_replaced =
+        transform_type_outer_lifetime(cancel_type.as_ref().unwrap(), &last_lt);
 
-    // 返回类型中出现的、由用户声明的生命周期，统一替换为 `last_lt`，
-    // 使其能够在生成的各 impl 中表达（生成的类型只携带 `last_lt` 这个生命周期参数）。
-    // `'static`/`'_`/匿名生命周期保持不变。
-    let output_ty_transformed = transform_output_lifetimes(output_ty, &lifetimes_all, &last_lt);
+    // 返回类型仍按原有逻辑改写：在只携带部分生命周期的 async/future 泛型中，
+    // 返回类型里出现的用户生命周期统一指向最后一个生命周期。若以后需要完整保留
+    // 多个生命周期，可在此处改为直接 clone output_ty。
+    let output_ty_transformed =
+        transform_output_lifetimes(output_ty, &lifetimes_all, &last_lt);
 
     let tuple_idents: Vec<Ident> = field_indices
         .iter()
@@ -238,34 +271,34 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         .collect();
     // 只生成 (p0, p1, ...) 部分
     let tuple_pattern = quote! { ( #(#tuple_idents),* ) };
-    let async_struct_destruct = quote! { #async_struct::<#generic_params_single_lt_no_cancel>#tuple_pattern };
+    let async_struct_destruct = quote! { #async_struct::<#generic_params_async_no_cancel>#tuple_pattern };
 
     // `IntoFuture::IntoFuture` 的类型：`Future<'c, A, B, ..., NonCancellableToken>`。
     let into_future_ty = quote! {
-        #future_struct<#generic_params_single_lt_no_cancel, abs_cancel::NonCancellableToken>
+        #future_struct<#generic_params_future_no_cancel, abs_cancel::NonCancellableToken>
     };
 
     let expanded = quote! {
         // panic!("input_fn 是: {:#?}", input_fn);
         #input_fn
         // panic!("lt_no_last 结构是: {:#?}\ngenerics_no_cancel 结构是: {:#?}", lt_no_last, generics_no_cancel);
-        pub struct #async_struct<#generic_params_single_lt_no_cancel>(#(#fields),*)
+        pub struct #async_struct<#generic_params_async_no_cancel>(#(#fields),*)
         #where_clause_no_cancel_no_lt;
 
-        pub struct #future_struct<#generic_params_single_lt_all>
+        pub struct #future_struct<#generic_params_future_all>
         #where_clause_no_lt
         {
-            params_: ::core::mem::MaybeUninit<#async_struct<#generic_params_single_lt_no_cancel>>,
+            params_: ::core::mem::MaybeUninit<#async_struct<#generic_params_async_no_cancel>>,
             cancel_: #cancel_type_lt_replaced,
-            future_: Option<<#state_struct<#generic_params_single_lt_all> as ::core::ops::AsyncFnOnce<()>>::CallOnceFuture>,
+            future_: Option<<#state_struct<#generic_params_future_all> as ::core::ops::AsyncFnOnce<()>>::CallOnceFuture>,
         }
 
         // Declair #state_struct
-        struct #state_struct<#generic_params_single_lt_all>(::core::pin::Pin<&#last_lt mut #future_struct<#generic_params_single_lt_all>>)
+        struct #state_struct<#generic_params_future_all>(::core::pin::Pin<&#last_lt mut #future_struct<#generic_params_future_all>>)
         #where_clause_no_lt;
 
         // Implement `IntoFuture` for #async_struct
-        impl<#generic_params_single_lt_no_cancel> ::core::future::IntoFuture for #async_struct<#generic_params_single_lt_no_cancel>
+        impl<#generic_params_future_no_cancel> ::core::future::IntoFuture for #async_struct<#generic_params_async_no_cancel>
         #where_clause_no_cancel_no_lt
         {
             type IntoFuture = #into_future_ty;
@@ -281,7 +314,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         }
 
         // Implement `TrMayCancel<'a>` for #async_struct
-        impl<#generic_params_single_lt_no_cancel> abs_cancel::TrMayCancel<#last_lt> for #async_struct<#generic_params_single_lt_no_cancel>
+        impl<#generic_params_future_no_cancel> abs_cancel::TrMayCancel<#last_lt> for #async_struct<#generic_params_async_no_cancel>
         #where_clause_no_cancel_no_lt
         {
             type MayCancelOutput = #output_ty_transformed;
@@ -307,7 +340,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
         }
 
         // Implement `Future` for #future_struct
-        impl<#generic_params_single_lt_all> ::core::future::Future for #future_struct<#generic_params_single_lt_all>
+        impl<#generic_params_future_all> ::core::future::Future for #future_struct<#generic_params_future_all>
         #where_clause_no_lt
         {
             type Output = #output_ty_transformed;
@@ -341,7 +374,7 @@ pub fn gen_may_cancel_future(attr: TokenStream, item: TokenStream) -> TokenStrea
             }
         }
 
-        impl<#generic_params_single_lt_all> ::core::ops::AsyncFnOnce<()> for #state_struct<#generic_params_single_lt_all>
+        impl<#generic_params_future_all> ::core::ops::AsyncFnOnce<()> for #state_struct<#generic_params_future_all>
         #where_clause_no_lt
         {
             type Output = #output_ty_transformed;
@@ -363,9 +396,10 @@ fn ty_contains_lifetime(ty: &Type, target_lt: &Lifetime) -> bool {
     match ty {
         Type::Reference(ty_ref) => {
             if let Some(lt) = &ty_ref.lifetime
-                && lt.ident == target_lt.ident {
-                    return true;
-                }
+                && lt.ident == target_lt.ident
+            {
+                return true;
+            }
             ty_contains_lifetime(&ty_ref.elem, target_lt)
         }
         Type::Path(type_path) => {
@@ -374,13 +408,15 @@ fn ty_contains_lifetime(ty: &Type, target_lt: &Lifetime) -> bool {
                     for arg in &args.args {
                         match arg {
                             GenericArgument::Lifetime(lt)
-                                if lt.ident == target_lt.ident => {
-                                    return true;
-                                }
+                                if lt.ident == target_lt.ident =>
+                            {
+                                return true;
+                            }
                             GenericArgument::Type(ty)
-                                if ty_contains_lifetime(ty, target_lt) => {
-                                    return true;
-                                }
+                                if ty_contains_lifetime(ty, target_lt) =>
+                            {
+                                return true;
+                            }
                             _ => {}
                         }
                     }
@@ -393,10 +429,29 @@ fn ty_contains_lifetime(ty: &Type, target_lt: &Lifetime) -> bool {
     }
 }
 
+/// 从一组类型中收集实际使用到的生命周期，保持原声明顺序。
+fn collect_used_lifetimes(
+    types: &[Type],
+    all_lifetimes: &[Lifetime],
+) -> Vec<Lifetime> {
+    all_lifetimes
+        .iter()
+        .filter(|lt| types.iter().any(|ty| ty_contains_lifetime(ty, lt)))
+        .cloned()
+        .collect()
+}
+
 /// 判断一个 WherePredicate 是否包含指定的生命周期
-fn predicate_contains_lifetime(pred: &WherePredicate, target_lt: &Lifetime) -> bool {
+fn predicate_contains_lifetime(
+    pred: &WherePredicate,
+    target_lt: &Lifetime,
+) -> bool {
     match pred {
-        WherePredicate::Lifetime(PredicateLifetime { lifetime, bounds , ..}) => {
+        WherePredicate::Lifetime(PredicateLifetime {
+            lifetime,
+            bounds,
+            ..
+        }) => {
             if lifetime.ident == target_lt.ident {
                 return true;
             }
@@ -407,22 +462,29 @@ fn predicate_contains_lifetime(pred: &WherePredicate, target_lt: &Lifetime) -> b
             }
             false
         }
-        WherePredicate::Type(PredicateType { bounded_ty, bounds, .. }) => {
+        WherePredicate::Type(PredicateType {
+            bounded_ty, bounds, ..
+        }) => {
             if ty_contains_lifetime(bounded_ty, target_lt) {
                 return true;
             }
             for bound in bounds {
                 match bound {
                     TypeParamBound::Lifetime(lt)
-                        if lt.ident == target_lt.ident => {
-                            return true;
-                        }
+                        if lt.ident == target_lt.ident =>
+                    {
+                        return true;
+                    }
                     TypeParamBound::Trait(TraitBound { path, .. }) => {
                         // 检查 trait 路径中是否包含目标生命周期
                         for seg in &path.segments {
-                            if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                            if let PathArguments::AngleBracketed(args) =
+                                &seg.arguments
+                            {
                                 for arg in &args.args {
-                                    if let GenericArgument::Lifetime(lt) = arg && lt.ident == target_lt.ident {
+                                    if let GenericArgument::Lifetime(lt) = arg
+                                        && lt.ident == target_lt.ident
+                                    {
                                         return true;
                                     }
                                 }
@@ -444,9 +506,10 @@ fn ty_contains_type_param(ty: &Type, target_ident: &Ident) -> bool {
         Type::Path(type_path) => {
             // 检查路径的最后一个段是否是目标类型参数
             if let Some(seg) = type_path.path.segments.last()
-                && seg.ident == *target_ident {
-                    return true;
-                }
+                && seg.ident == *target_ident
+            {
+                return true;
+            }
             // 递归检查路径中的泛型参数
             for seg in &type_path.path.segments {
                 if let PathArguments::AngleBracketed(args) = &seg.arguments {
@@ -468,8 +531,12 @@ fn ty_contains_type_param(ty: &Type, target_ident: &Ident) -> bool {
             }
             false
         }
-        Type::Reference(ty_ref) => ty_contains_type_param(&ty_ref.elem, target_ident),
-        Type::Slice(ty_slice) => ty_contains_type_param(&ty_slice.elem, target_ident),
+        Type::Reference(ty_ref) => {
+            ty_contains_type_param(&ty_ref.elem, target_ident)
+        }
+        Type::Slice(ty_slice) => {
+            ty_contains_type_param(&ty_slice.elem, target_ident)
+        }
         Type::Tuple(tuple) => {
             for elem in &tuple.elems {
                 if ty_contains_type_param(elem, target_ident) {
@@ -484,9 +551,14 @@ fn ty_contains_type_param(ty: &Type, target_ident: &Ident) -> bool {
 }
 
 /// 检查谓词中是否包含指定的类型参数
-fn predicate_contains_type_param(pred: &WherePredicate, target_ident: &Ident) -> bool {
+fn predicate_contains_type_param(
+    pred: &WherePredicate,
+    target_ident: &Ident,
+) -> bool {
     match pred {
-        WherePredicate::Type(PredicateType { bounded_ty, bounds, .. }) => {
+        WherePredicate::Type(PredicateType {
+            bounded_ty, bounds, ..
+        }) => {
             if ty_contains_type_param(bounded_ty, target_ident) {
                 return true;
             }
@@ -498,12 +570,18 @@ fn predicate_contains_type_param(pred: &WherePredicate, target_ident: &Ident) ->
                             if seg.ident == *target_ident {
                                 return true;
                             }
-                            if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                            if let PathArguments::AngleBracketed(args) =
+                                &seg.arguments
+                            {
                                 for arg in &args.args {
                                     if let GenericArgument::Type(ty) = arg
-                                        && ty_contains_type_param(ty, target_ident) {
-                                            return true;
-                                        }
+                                        && ty_contains_type_param(
+                                            ty,
+                                            target_ident,
+                                        )
+                                    {
+                                        return true;
+                                    }
                                 }
                             }
                         }
@@ -514,7 +592,11 @@ fn predicate_contains_type_param(pred: &WherePredicate, target_ident: &Ident) ->
             }
             false
         }
-        WherePredicate::Lifetime(PredicateLifetime { lifetime, bounds, .. }) => {
+        WherePredicate::Lifetime(PredicateLifetime {
+            lifetime,
+            bounds,
+            ..
+        }) => {
             if lifetime.ident == *target_ident {
                 return true;
             }
@@ -530,7 +612,10 @@ fn predicate_contains_type_param(pred: &WherePredicate, target_ident: &Ident) ->
 }
 
 /// 构建泛型参数列表（生命周期和类型参数），自动添加逗号分隔符
-fn build_generic_params(lifetimes: &[Lifetime], type_params: &[Ident]) -> proc_macro2::TokenStream {
+fn build_generic_params(
+    lifetimes: &[Lifetime],
+    type_params: &[Ident],
+) -> proc_macro2::TokenStream {
     let mut ts = proc_macro2::TokenStream::new();
     let mut first = true;
     for lt in lifetimes {
@@ -558,13 +643,16 @@ fn transform_type_outer_lifetime(ty: &Type, new_lt: &Lifetime) -> Type {
             let mut new_ref = ty_ref.clone();
             new_ref.lifetime = Some(new_lt.clone());
             // 递归处理内部的元素类型（将内层引用生命周期变为匿名）
-            let inner_transformed = transform_type_outer_lifetime(&ty_ref.elem, new_lt);
+            let inner_transformed =
+                transform_type_outer_lifetime(&ty_ref.elem, new_lt);
             new_ref.elem = Box::new(inner_transformed);
             Type::Reference(new_ref)
         }
         // 其他复合类型（元组、数组、切片等）需要递归内部元素
         Type::Tuple(tuple) => {
-            let new_elems = tuple.elems.iter()
+            let new_elems = tuple
+                .elems
+                .iter()
                 .map(|elem| transform_type_outer_lifetime(elem, new_lt))
                 .collect();
             Type::Tuple(syn::TypeTuple {
@@ -613,12 +701,16 @@ fn transform_type_outer_lifetime(ty: &Type, new_lt: &Lifetime) -> Type {
                         let mut new_args = Punctuated::new();
                         for arg in &args.args {
                             let new_arg = match arg {
-                                GenericArgument::Lifetime(_) => {
-                                    // 将普通的生命周期参数替换为匿名生命周期
-                                    GenericArgument::Lifetime(new_lt.clone())
+                                GenericArgument::Lifetime(lt) => {
+                                    // 保留路径泛型参数中的生命周期原样输出，
+                                    // 不再强行统一成 new_lt。
+                                    GenericArgument::Lifetime(lt.clone())
                                 }
                                 GenericArgument::Type(ty) => {
-                                    let transformed_ty = transform_type_outer_lifetime(ty, new_lt);
+                                    let transformed_ty =
+                                        transform_type_outer_lifetime(
+                                            ty, new_lt,
+                                        );
                                     GenericArgument::Type(transformed_ty)
                                 }
                                 other => other.clone(),
@@ -664,7 +756,11 @@ fn transform_output_lifetimes(
     user_lifetimes: &[Lifetime],
     last_lt: &Lifetime,
 ) -> Type {
-    fn repl(ty: &Type, user_lifetimes: &[Lifetime], last_lt: &Lifetime) -> Type {
+    fn repl(
+        ty: &Type,
+        user_lifetimes: &[Lifetime],
+        last_lt: &Lifetime,
+    ) -> Type {
         let is_user_lt = |lt: &Lifetime| {
             lt.ident != last_lt.ident
                 && user_lifetimes.iter().any(|u| u.ident == lt.ident)
@@ -677,7 +773,8 @@ fn transform_output_lifetimes(
                 {
                     new_ref.lifetime = Option::Some(last_lt.clone());
                 }
-                new_ref.elem = Box::new(repl(&ty_ref.elem, user_lifetimes, last_lt));
+                new_ref.elem =
+                    Box::new(repl(&ty_ref.elem, user_lifetimes, last_lt));
                 Type::Reference(new_ref)
             }
             Type::Tuple(tuple) => {
@@ -724,15 +821,23 @@ fn transform_output_lifetimes(
             Type::Path(type_path) => {
                 let mut new_path = type_path.clone();
                 for seg in &mut new_path.path.segments {
-                    if let PathArguments::AngleBracketed(args) = &mut seg.arguments {
+                    if let PathArguments::AngleBracketed(args) =
+                        &mut seg.arguments
+                    {
                         let mut new_args = Punctuated::new();
                         for arg in &args.args {
                             let new_arg = match arg {
-                                GenericArgument::Lifetime(lt) if is_user_lt(lt) => {
+                                GenericArgument::Lifetime(lt)
+                                    if is_user_lt(lt) =>
+                                {
                                     GenericArgument::Lifetime(last_lt.clone())
                                 }
                                 GenericArgument::Type(ty) => {
-                                    GenericArgument::Type(repl(ty, user_lifetimes, last_lt))
+                                    GenericArgument::Type(repl(
+                                        ty,
+                                        user_lifetimes,
+                                        last_lt,
+                                    ))
                                 }
                                 other => other.clone(),
                             };
