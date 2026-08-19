@@ -35,9 +35,3 @@ pub mod x_deps {
     pub use funty;
     pub use gen_mcf_macro;
 }
-
-#[cfg(any(test, feature = "std_read"))]
-pub mod as_std_read;
-
-#[cfg(any(test, feature = "std_write"))]
-pub mod as_std_write;

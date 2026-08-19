@@ -11,6 +11,8 @@ members = [
     "crates/gen_mcf_test",
 
     "crates/abs_buff",
+    "crates/abs_buff_stdio_adapt",
+    "crates/abs_buff_tokio_adapt",
     "crates/buffex",
 
     "crates/cancel_src",

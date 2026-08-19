@@ -1,0 +1,9 @@
+[package]
+name = "abs_buff_stdio_adapt"
+version = "0.1.0"
+edition = "2024"
+description = "Adapter to make std::io::{Read, Write} fit for abs_buff TrBuffRead/TrBuffWrite."
+license = "MIT/Apache-2.0"
+
+[dependencies]
+abs_buff = { path = "../abs_buff" }
