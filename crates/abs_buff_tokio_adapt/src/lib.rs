@@ -10,3 +10,7 @@ mod write_as_output;
 
 pub use read_as_input::{ReadAsInput, InputReadAsync, InputReadFuture};
 pub use write_as_output::{WriteAsOutput, OutputWriteAsync, OutputWriteFuture};
+
+pub mod x_deps {
+    pub use abs_buff;
+}

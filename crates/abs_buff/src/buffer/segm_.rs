@@ -731,6 +731,9 @@ where
         };
         let x = output.write_async(source).may_cancel_with(cancel).await;
         if let Option::Some(cc) = x.as_ref().pick_left() {
+            if *cc == 0 {
+                return SomeOf::new_left(c);
+            }
             segm.offset_ += *cc;
             c += cc;
         };
@@ -785,6 +788,9 @@ where
         };
         let x = input.read_async(target).may_cancel_with(cancel).await;
         if let Option::Some(cc) = x.as_ref().pick_left() {
+            if *cc == 0 {
+                return SomeOf::new_left(c);
+            }
             segm.offset_ += *cc;
             c += cc;
         };
