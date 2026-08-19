@@ -8,7 +8,11 @@ use core::{
     ptr, slice,
 };
 
-use crate::Demand;
+use abs_cancel::{TrCancellationToken, TrMayCancel};
+use anylr::SomeOf;
+use gen_mcf_macro::gen_may_cancel_future;
+
+use crate::{Demand, io::{TrInput, TrOutput}};
 
 /// Represent a sequence of slices who are logically the same array but
 /// physically not.
@@ -303,6 +307,18 @@ where
         count
     }
 
+    pub fn output_async<'f, TyOutput>(
+        &'f mut self,
+        output: &'f mut TyOutput,
+        demand: &'f Demand<usize>,
+    ) -> SegmRefOutputAsync<'f, T, R, TyOutput>
+    where
+        'f: 'a,
+        TyOutput: TrOutput<T>,
+    {
+        SegmRefOutputAsync(self, output, demand)
+    }
+
     /// Do a memory copy to the target buffer. And the items that are being
     /// memory copied will be treated as moved and will no longer drop. The
     /// result of `least_count()` shall change after calling this function.
@@ -470,6 +486,18 @@ where
         TyRecl: TrReclaim,
     {
         source.move_items_to_segm(self)
+    }
+
+    pub fn move_items_from_input_async<'f, TyInput>(
+        &'f mut self,
+        input: &'f mut TyInput,
+        demand: &'f Demand<usize>,
+    ) -> SegmMutInputAsync<'f, T, R, TyInput>
+    where
+        'f: 'a,
+        TyInput: TrInput<T>,
+    {
+        SegmMutInputAsync(self, input, demand)
     }
 
     /// Do a memory copy to the target buffer. And the items that are being
@@ -659,6 +687,106 @@ where
     fn as_segm_mut<'f>(&'f mut self) -> SegmMut<'f, T, Self::Reclaimer<'f>> {
         SegmMut::as_segm_mut(self)
     }
+}
+
+#[gen_may_cancel_future(SegmRefOutput)]
+async fn output_async_<'f, TyData, TyRecl, TyOut, TyTok>(
+    segm: &'f mut SegmRef<'_, TyData, TyRecl>,
+    output: &'f mut TyOut,
+    demand: &'f Demand<usize>,
+    cancel: &'f mut TyTok,
+) -> SomeOf<usize, <TyOut as TrOutput<TyData>>::Err>
+where
+    TyRecl: TrReclaim,
+    TyOut: TrOutput<TyData>,
+    TyTok: TrCancellationToken + Clone,
+{
+    let buff = &segm.buffer_[segm.offset_..];
+    let size = buff.len();
+    let Option::Some(compromised) = demand.compromise(&Demand::less_than(size)) else {
+        return SomeOf::new_left(0usize);
+    };
+    let Option::Some(max) = compromised.max() else {
+        unreachable!()
+    };
+    let max = *max;
+    debug_assert!(max < buff.len());
+    let mut c = 0usize;
+    loop {
+        if c >= max {
+            return SomeOf::new_left(c);
+        };
+        let buff = &buff[c..];
+        let source = {
+            let p = buff.as_ptr() as *const _ as *const MaybeUninit<TyData>;
+            unsafe { slice::from_raw_parts(p, size) }
+        };
+        let x = output.write_async(source).may_cancel_with(cancel).await;
+        if let Option::Some(cc) = x.as_ref().pick_left() {
+            segm.offset_ += *cc;
+            c += cc;
+        };
+        if let Option::Some(err) = x.pick_right() {
+            return SomeOf::new_both(c, err);
+        };
+        if core::hint::black_box(false) {
+            // this is just to please the compiler, will never enter.
+            // However, if it did enter, we have to know.
+            assert!(c > 0usize);
+            break;
+        }
+    };
+    SomeOf::new_left(c)
+}
+
+#[gen_may_cancel_future(SegmMutInput)]
+async fn input_async_<'f, TyData, TyRecl, TyInput, TyTok>(
+    segm: &'f mut SegmMut<'_, TyData, TyRecl>,
+    input: &'f mut TyInput,
+    demand: &'f Demand<usize>,
+    cancel: &'f mut TyTok
+) -> SomeOf<usize, <TyInput as TrInput<TyData>>::Err>
+where
+    TyRecl: TrReclaim,
+    TyInput: TrInput<TyData>,
+    TyTok: TrCancellationToken + Clone,
+{
+    let buff = &mut segm.buffer_[segm.offset_..];
+    let size = buff.len();
+    let Option::Some(compromised) = demand.compromise(&Demand::less_than(size)) else {
+        return SomeOf::new_left(0usize);
+    };
+    let Option::Some(max) = compromised.max() else {
+        unreachable!()
+    };
+    let max = *max;
+    debug_assert!(max < buff.len());
+    let mut c = 0usize;
+    loop {
+        if c >= max {
+            return SomeOf::new_left(c);
+        };
+        let buff = &mut buff[c..];
+        let target = {
+            let p = buff.as_mut_ptr();
+            unsafe { slice::from_raw_parts_mut(p, size) }
+        };
+        let x = input.read_async(target).may_cancel_with(cancel).await;
+        if let Option::Some(cc) = x.as_ref().pick_left() {
+            segm.offset_ += *cc;
+            c += cc;
+        };
+        if let Option::Some(err) = x.pick_right() {
+            return SomeOf::new_both(c, err);
+        };
+        if core::hint::black_box(false) {
+            // this is just to please the compiler, will never enter.
+            // However, if it did enter, we have to know.
+            assert!(c > 0usize);
+            break;
+        }
+    };
+    SomeOf::new_left(c)
 }
 
 #[cfg(test)]
