@@ -2,13 +2,12 @@ extern crate std;
 
 use std::{io, string::ToString};
 
-use abs_cancel::{NonCancellableToken, TrCancellationToken};
-
 use abs_buff::{
     Demand, TrBuffTryWrite, TrBuffWrite,
     buffer::TrBuffSegmMut,
     x_deps::abs_cancel,
 };
+use abs_cancel::{NonCancellableToken, TrCancellationToken};
 
 /// An adapter that exposes a [`TrBuffTryWrite`] buffer as a non-blocking
 /// `std::io::Write`.

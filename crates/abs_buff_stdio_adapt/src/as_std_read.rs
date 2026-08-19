@@ -1,12 +1,11 @@
 use std::{io, mem::MaybeUninit, string::ToString};
 
-use abs_cancel::{NonCancellableToken, TrCancellationToken};
-
 use abs_buff::{
-    buffer::TrBuffSegmRef,
-    x_deps::abs_cancel,
     Demand, TrBuffRead, TrBuffTryRead,
+    buffer::TrBuffSegmRef,
+    x_deps::abs_cancel
 };
+use abs_cancel::{NonCancellableToken, TrCancellationToken};
 
 /// An adapter that exposes a [`TrBuffTryRead`] buffer as a non-blocking
 /// `std::io::Read`.

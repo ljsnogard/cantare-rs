@@ -178,7 +178,7 @@ where
 
     fn as_segm_ref<'f>(&'f mut self) -> SegmRef<'f, u8, SegmReclaim<'f>> {
         let data = &Borrow::<[u8]>::borrow(&*self.src)[self.offset..self.end];
-        SegmRef::new(data, SegmReclaim::new(&mut self.offset))
+        SegmRef::new(data, SegmReclaim::new(Pin::new(&mut self.offset)))
     }
 
     fn take_segm_ref<'f>(
@@ -194,7 +194,7 @@ where
         let max_len = *agreement.max()?;
         let data = &Borrow::<[u8]>::borrow(&*self.src)
             [self.offset..self.offset + max_len];
-        let reclaim = SegmReclaim::new(&mut self.offset);
+        let reclaim = SegmReclaim::new(Pin::new(&mut self.offset));
         Option::Some(SegmRef::new(data, reclaim))
     }
 }
@@ -311,7 +311,8 @@ where
                 bytes.len(),
             )
         };
-        SegmMut::new(data, SegmReclaim::new(&mut self.offset))
+        let p_offs = Pin::new(&mut self.offset);
+        SegmMut::new(data, SegmReclaim::new(p_offs))
     }
 
     fn take_segm_mut<'f>(
@@ -333,7 +334,7 @@ where
                 data.len(),
             )
         };
-        let reclaim = SegmReclaim::new(&mut self.offset);
+        let reclaim = SegmReclaim::new(Pin::new(&mut self.offset));
         Option::Some(SegmMut::new(data, reclaim))
     }
 }
