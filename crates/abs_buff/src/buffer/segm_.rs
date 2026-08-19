@@ -307,13 +307,12 @@ where
         count
     }
 
-    pub fn output_async<'f, TyOutput>(
+    pub fn move_items_to_output_async<'f, TyOutput>(
         &'f mut self,
         output: &'f mut TyOutput,
         demand: &'f Demand<usize>,
     ) -> SegmRefOutputAsync<'f, T, R, TyOutput>
     where
-        'f: 'a,
         TyOutput: TrOutput<T>,
     {
         SegmRefOutputAsync(self, output, demand)
@@ -494,7 +493,6 @@ where
         demand: &'f Demand<usize>,
     ) -> SegmMutInputAsync<'f, T, R, TyInput>
     where
-        'f: 'a,
         TyInput: TrInput<T>,
     {
         SegmMutInputAsync(self, input, demand)
@@ -690,13 +688,14 @@ where
 }
 
 #[gen_may_cancel_future(SegmRefOutput)]
-async fn output_async_<'f, TyData, TyRecl, TyOut, TyTok>(
-    segm: &'f mut SegmRef<'_, TyData, TyRecl>,
+async fn segm_ref_output_async_<'a, 'f, TyData, TyRecl, TyOut, TyTok>(
+    segm: &'f mut SegmRef<'a, TyData, TyRecl>,
     output: &'f mut TyOut,
     demand: &'f Demand<usize>,
     cancel: &'f mut TyTok,
 ) -> SomeOf<usize, <TyOut as TrOutput<TyData>>::Err>
 where
+    'a: 'f,
     TyRecl: TrReclaim,
     TyOut: TrOutput<TyData>,
     TyTok: TrCancellationToken + Clone,
@@ -740,13 +739,14 @@ where
 }
 
 #[gen_may_cancel_future(SegmMutInput)]
-async fn input_async_<'f, TyData, TyRecl, TyInput, TyTok>(
-    segm: &'f mut SegmMut<'_, TyData, TyRecl>,
+async fn segm_mut_input_async_<'a, 'f, TyData, TyRecl, TyInput, TyTok>(
+    segm: &'f mut SegmMut<'a, TyData, TyRecl>,
     input: &'f mut TyInput,
     demand: &'f Demand<usize>,
     cancel: &'f mut TyTok
 ) -> SomeOf<usize, <TyInput as TrInput<TyData>>::Err>
 where
+    'a: 'f,
     TyRecl: TrReclaim,
     TyInput: TrInput<TyData>,
     TyTok: TrCancellationToken + Clone,
