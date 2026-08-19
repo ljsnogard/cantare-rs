@@ -13,12 +13,20 @@ pub trait TrMayCancel<'a>
 where
     Self: 'a + IntoFuture,
 {
+    type MayCancelFuture<'f, C>: IntoFuture<Output = Self::MayCancelOutput>
+    where
+        Self: 'f,
+        C: TrCancellationToken + Clone,
+        C: 'a,
+        C: 'f,
+        'f: 'a;
+
     type MayCancelOutput;
 
     fn may_cancel_with<'f, C>(
         self,
         cancel: &'f mut C,
-    ) -> impl IntoFuture<Output = Self::MayCancelOutput>
+    ) -> Self::MayCancelFuture<'f, C>
     where
         Self: 'f,
         // 当 `MayCancelOutput` 携带生命周期（即返回类型借用了 `Self` 的数据）时，

@@ -85,12 +85,19 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
+    type MayCancelFuture<'f, C> = WriteFuture<'a, 'f, C, H, B, T>
+    where
+        Self: 'f,
+        C: TrCancellationToken + Clone,
+        C: 'a,
+        C: 'f,
+        'f: 'a;
     type MayCancelOutput = SomeOf<ReclSliceMut<'a, T>, TxError<usize>>;
 
     fn may_cancel_with<'f, C>(
         self,
         cancel: &'f mut C,
-    ) -> impl IntoFuture<Output = Self::MayCancelOutput>
+    ) -> Self::MayCancelFuture<'f, C>
     where
         Self: 'f,
         'f: 'a,
@@ -257,12 +264,19 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
+    type MayCancelFuture<'f, C> = ReadFuture<'a, 'f, C, H, B, T>
+    where
+        Self: 'f,
+        C: TrCancellationToken + Clone,
+        C: 'a,
+        C: 'f,
+        'f: 'a;
     type MayCancelOutput = SomeOf<ReclSliceRef<'a, T>, RxError<usize>>;
 
     fn may_cancel_with<'f, C>(
         self,
         cancel: &'f mut C,
-    ) -> impl IntoFuture<Output = Self::MayCancelOutput>
+    ) -> Self::MayCancelFuture<'f, C>
     where
         Self: 'f,
         'f: 'a,
@@ -416,12 +430,19 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
+    type MayCancelFuture<'f, C> = PeekFuture<'a, 'f, C, H, B, T>
+    where
+        Self: 'f,
+        C: TrCancellationToken + Clone,
+        C: 'a,
+        C: 'f,
+        'f: 'a;
     type MayCancelOutput = SomeOf<ReclPeekRef<'a, T>, RxError<usize>>;
 
     fn may_cancel_with<'f, C>(
         self,
         cancel: &'f mut C,
-    ) -> impl IntoFuture<Output = Self::MayCancelOutput>
+    ) -> Self::MayCancelFuture<'f, C>
     where
         Self: 'f,
         'f: 'a,

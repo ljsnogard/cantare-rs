@@ -134,7 +134,7 @@ mod tests_ {
     use core::{
         error::Error,
         fmt,
-        future::{Future, IntoFuture},
+        future::Future,
         mem::MaybeUninit,
         pin::Pin,
         task::{Context, Poll, Waker},
@@ -199,12 +199,20 @@ mod tests_ {
     }
 
     impl<'f, S: 'f, E: 'f> TrMayCancel<'f> for ReadySegm<S, E> {
+        type MayCancelFuture<'g, C>
+            = ReadySegm<S, E>
+        where
+            Self: 'g,
+            C: TrCancellationToken + Clone,
+            C: 'f,
+            C: 'g,
+            'g: 'f;
         type MayCancelOutput = SomeOf<S, E>;
 
         fn may_cancel_with<'g, C>(
             self,
             _cancel: &'g mut C,
-        ) -> impl IntoFuture<Output = Self::MayCancelOutput>
+        ) -> Self::MayCancelFuture<'g, C>
         where
             Self: 'g,
             'g: 'f,

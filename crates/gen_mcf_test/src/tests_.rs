@@ -78,11 +78,18 @@ mod tests_expanded_ {
         A: Send,
         B: Sync,
     {
+        type MayCancelFuture<'cancel_, C> = DoThingFuture<'c, A, B, C>
+        where
+            Self: 'cancel_,
+            C: abs_cancel::TrCancellationToken + Clone,
+            C: 'c,
+            C: 'cancel_,
+            'cancel_: 'c;
         type MayCancelOutput = usize;
-        fn may_cancel_with<'cancel_, C: abs_cancel::TrCancellationToken>(
+        fn may_cancel_with<'cancel_, C: abs_cancel::TrCancellationToken + Clone>(
             self,
             cancel: &'cancel_ mut C,
-        ) -> impl ::core::future::IntoFuture<Output = Self::MayCancelOutput>
+        ) -> Self::MayCancelFuture<'cancel_, C>
         where
             Self: 'cancel_,
             // 与 `abs_cancel::TrMayCancel::may_cancel_with` 的 `'f: 'a` 约束对应。

@@ -2,7 +2,7 @@ use core::{
     borrow::{Borrow, BorrowMut},
     error::Error,
     fmt,
-    future::{Future, IntoFuture},
+    future::Future,
     marker::PhantomPinned,
     mem::MaybeUninit,
     ops::Try,
@@ -59,12 +59,20 @@ impl<S, E> Future for ReadySegm<S, E> {
 }
 
 impl<'f, S: 'f, E: 'f> TrMayCancel<'f> for ReadySegm<S, E> {
+    type MayCancelFuture<'g, C>
+        = ReadySegm<S, E>
+    where
+        Self: 'g,
+        C: TrCancellationToken + Clone,
+        C: 'f,
+        C: 'g,
+        'g: 'f;
     type MayCancelOutput = SomeOf<S, E>;
 
     fn may_cancel_with<'g, C>(
         self,
         _cancel: &'g mut C,
-    ) -> impl IntoFuture<Output = Self::MayCancelOutput>
+    ) -> Self::MayCancelFuture<'g, C>
     where
         Self: 'g,
         'g: 'f,
@@ -238,7 +246,8 @@ impl<'a, T> TrBuffSegmRef<'a, u8> for BorrowedReadSegm<'a, T>
 where
     T: Borrow<[u8]>,
 {
-    type Reclaimer<'f> = SegmReclaim<'f>
+    type Reclaimer<'f>
+        = SegmReclaim<'f>
     where
         Self: 'f;
 
@@ -405,7 +414,8 @@ impl<T> TrBuffRead<u8> for T
 where
     T: Borrow<[u8]>,
 {
-    type SegmRef<'f> = BorrowedReadSegm<'f, T>
+    type SegmRef<'f>
+        = BorrowedReadSegm<'f, T>
     where
         Self: 'f;
     type Err = BorrowedSliceError;
@@ -418,7 +428,8 @@ where
     fn read_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>> {
+    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>>
+    {
         let len = Borrow::<[u8]>::borrow(self).len();
         let min_len = demand.min().copied().unwrap_or(0);
         if len == 0 || len < min_len {

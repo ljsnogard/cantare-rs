@@ -317,12 +317,20 @@ pub fn gen_may_cancel_future(
         impl<#generic_params_future_no_cancel> abs_cancel::TrMayCancel<#last_lt> for #async_struct<#generic_params_async_no_cancel>
         #where_clause_no_cancel_no_lt
         {
+            type MayCancelFuture<'cancel_, C> =
+                #future_struct<#generic_params_future_no_cancel, C>
+            where
+                Self: 'cancel_,
+                C: abs_cancel::TrCancellationToken + Clone,
+                C: #last_lt,
+                C: 'cancel_,
+                'cancel_: #last_lt;
             type MayCancelOutput = #output_ty_transformed;
 
             fn may_cancel_with<'cancel_, C>(
                 self,
                 cancel: &'cancel_ mut C,
-            ) -> impl ::core::future::IntoFuture<Output = Self::MayCancelOutput>
+            ) -> Self::MayCancelFuture<'cancel_, C>
             where
                 Self: 'cancel_,
                 // 与 `abs_cancel::TrMayCancel::may_cancel_with` 的 `'f: 'a` 约束对应：
