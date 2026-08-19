@@ -13,6 +13,10 @@ use crate::buffer::{TrBuffer, TrBufferMut};
 /// A device that will produce data. And the data shall be buffered when taking
 /// taking out of them from this device.
 pub trait TrInput<T = u8> {
+    type ReadAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<usize, Self::Err>>
+    where
+        Self: 'f, T: 'f;
+
     type Err: Error;
 
     /// Read data from this input device and into the specified target buffer.
@@ -28,22 +32,26 @@ pub trait TrInput<T = u8> {
     /// - For example, if `T: Clone` is satisfied, implementaion provider to move
     ///   a `t` of `T` into `target`, should do `target[0].write(t.clone())`; caller
     ///   should do `let t = target[0].assume_init()`;
-    fn read_async<'a>(
-        &'a mut self,
-        target: &'a mut [MaybeUninit<T>],
-    ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<usize, Self::Err>>;
+    fn read_async<'f>(
+        &'f mut self,
+        target: &'f mut [MaybeUninit<T>],
+    ) -> Self::ReadAsync<'f>;
 }
 
 /// A device that will consume data. And the data shall be offered with
 /// a buffer.
 pub trait TrOutput<T = u8> {
+    type WriteAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<usize, Self::Err>>
+    where
+        Self: 'f, T: 'f;
+
     type Err: Error;
 
     /// Move data from the specified source into this output device
-    fn write_async<'a>(
-        &'a mut self,
-        source: &'a [MaybeUninit<T>],
-    ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<usize, Self::Err>>;
+    fn write_async<'f>(
+        &'f mut self,
+        source: &'f [MaybeUninit<T>],
+    ) -> Self::WriteAsync<'f>;
 
     /// Clone data from the specified source buffer into this output device
     fn write_cloned_async<'a>(

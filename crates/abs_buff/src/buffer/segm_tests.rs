@@ -262,12 +262,14 @@ mod tests_ {
     }
 
     impl TrOutput<u8> for TestOutput {
+        type WriteAsync<'f> = ReadySegm<usize, TestErr> where Self: 'f;
+
         type Err = TestErr;
 
-        fn write_async<'a>(
-            &'a mut self,
-            source: &'a [MaybeUninit<u8>],
-        ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<usize, Self::Err>>
+        fn write_async<'f>(
+            &'f mut self,
+            source: &'f [MaybeUninit<u8>],
+        ) -> Self::WriteAsync<'f>
         {
             let n = source.len();
             for m in source {
@@ -285,12 +287,13 @@ mod tests_ {
     }
 
     impl TrInput<u8> for TestInput {
+        type ReadAsync<'f> = ReadySegm<usize, TestErr> where Self: 'f;
         type Err = TestErr;
 
-        fn read_async<'a>(
-            &'a mut self,
-            target: &'a mut [MaybeUninit<u8>],
-        ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<usize, Self::Err>>
+        fn read_async<'f>(
+            &'f mut self,
+            target: &'f mut [MaybeUninit<u8>],
+        ) -> Self::ReadAsync<'f>
         {
             let n = core::cmp::min(target.len(), self.data.len() - self.pos);
             for (i, slot) in target[..n].iter_mut().enumerate() {

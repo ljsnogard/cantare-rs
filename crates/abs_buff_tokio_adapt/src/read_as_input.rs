@@ -5,7 +5,7 @@ use abs_buff::{
     io::TrInput,
     x_deps::{abs_cancel, anylr},
 };
-use abs_cancel::{TrCancellationToken, TrMayCancel};
+use abs_cancel::TrCancellationToken;
 use anylr::SomeOf;
 
 pub struct ReadAsInput<'a, R>(&'a mut R)
@@ -32,13 +32,15 @@ impl<'a, R> TrInput<u8> for ReadAsInput<'a, R>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
+    type ReadAsync<'f> = InputReadAsync<'f, R> where Self: 'f, u8: 'f;
+
     type Err = std::io::Error;
 
     #[inline]
     fn read_async<'f>(
         &'f mut self,
         target: &'f mut [MaybeUninit<u8>],
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<usize, Self::Err>> {
+    ) -> Self::ReadAsync<'f> {
         ReadAsInput::read_async(self, target)
     }
 }

@@ -5,7 +5,7 @@ use abs_buff::{
     io::TrOutput,
     x_deps::{abs_cancel, anylr},
 };
-use abs_cancel::{TrCancellationToken, TrMayCancel};
+use abs_cancel::TrCancellationToken;
 use anylr::SomeOf;
 
 pub struct WriteAsOutput<'a, W>(&'a mut W)
@@ -32,13 +32,14 @@ impl<'a, W> TrOutput<u8> for WriteAsOutput<'a, W>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
+    type WriteAsync<'f> = OutputWriteAsync<'f, W> where Self: 'f, u8: 'f;
     type Err = std::io::Error;
 
     #[inline]
     fn write_async<'f>(
         &'f mut self,
         source: &'f [MaybeUninit<u8>],
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<usize, Self::Err>> {
+    ) -> Self::WriteAsync<'f> {
         WriteAsOutput::write_async(self, source)
     }
 }
