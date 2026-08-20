@@ -48,9 +48,9 @@ pub(super) fn pat_byte(i: usize) -> u8 {
 /// A 16-byte ring buffer.
 pub(super) const RING_CAP: usize = 16;
 
-pub(super) type SharedRing = Arc<RingBuffer<Box<[u8]>>>;
-pub(super) type SharedTx = RingTx<SharedRing, Box<[u8]>>;
-pub(super) type SharedRx = RingRx<SharedRing, Box<[u8]>>;
+pub(super) type SharedRing = Arc<RingBuffer<Box<[MaybeUninit<u8>]>>>;
+pub(super) type SharedTx = RingTx<SharedRing, Box<[MaybeUninit<u8>]>>;
+pub(super) type SharedRx = RingRx<SharedRing, Box<[MaybeUninit<u8>]>>;
 
 /// Create a full-duplex-in-time ring (16-byte buffer) with the halves.
 ///
@@ -61,7 +61,7 @@ pub(super) type SharedRx = RingRx<SharedRing, Box<[u8]>>;
 /// 计数 >= 2，任何第二次拆分都会被拒绝，SPSC 依然成立。
 pub(super) fn make_ring() -> (SharedRing, SharedTx, SharedRx) {
     let ring = Arc::new(
-        RingBuffer::<Box<[u8]>>::try_new(vec![0u8; RING_CAP].into_boxed_slice()).unwrap(),
+        RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(vec![MaybeUninit::uninit(); RING_CAP].into_boxed_slice()).unwrap(),
     );
     let (tx, rx) =
         RingBuffer::try_split_shared(
@@ -77,7 +77,7 @@ pub(super) fn make_ring() -> (SharedRing, SharedTx, SharedRx) {
 /// Create a shared ring without splitting (for the kernel-mode drivers).
 pub(super) fn make_ring_shared() -> SharedRing {
     Arc::new(
-        RingBuffer::<Box<[u8]>>::try_new(vec![0u8; RING_CAP].into_boxed_slice()).unwrap(),
+        RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(vec![MaybeUninit::uninit(); RING_CAP].into_boxed_slice()).unwrap(),
     )
 }
 

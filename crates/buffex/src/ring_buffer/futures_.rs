@@ -8,8 +8,7 @@
 use core::{
     borrow::Borrow,
     future::{Future, IntoFuture},
-    marker::PhantomPinned,
-    ops::DerefMut,
+    marker::{PhantomData, PhantomPinned},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -24,7 +23,7 @@ use super::{
     error_::{RxError, TxError},
     reclaim_::{ReclPeekRef, ReclSliceMut, ReclSliceRef},
     rx_::RingRx,
-    state_::{Park, ParkSide, RingBuffer},
+    state_::{Park, ParkSide, RingBuffer, RingStorage},
     tx_::RingTx,
 };
 
@@ -41,7 +40,7 @@ use super::{
 pub struct WriteAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     tx: &'a mut RingTx<H, B, T>,
     min_len: usize,
@@ -51,7 +50,7 @@ where
 impl<'a, H, B, T> WriteAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     pub(super) fn new(tx: &'a mut RingTx<H, B, T>, min_len: usize, max_len: usize) -> Self {
         WriteAsync {
@@ -65,7 +64,7 @@ where
 impl<'a, H, B, T> IntoFuture for WriteAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type IntoFuture = WriteFuture<'a, 'a, NonCancellableToken, H, B, T>;
     type Output = SomeOf<ReclSliceMut<'a, T>, TxError<usize>>;
@@ -83,7 +82,7 @@ where
 impl<'a, H, B, T> TrMayCancel<'a> for WriteAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type MayCancelFuture<'f, C> = WriteFuture<'a, 'f, C, H, B, T>
     where
@@ -111,7 +110,7 @@ where
 pub struct WriteFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     _pin: PhantomPinned,
     tx: &'ctx mut RingTx<H, B, T>,
@@ -126,7 +125,7 @@ where
 impl<'ctx, 'tok, C, H, B, T> WriteFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn new(
         tx: &'ctx mut RingTx<H, B, T>,
@@ -149,7 +148,7 @@ impl<'ctx, C, H, B, T> Future for WriteFuture<'ctx, '_, C, H, B, T>
 where
     C: TrCancellationToken,
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type Output = SomeOf<ReclSliceMut<'ctx, T>, TxError<usize>>;
 
@@ -197,7 +196,7 @@ where
 impl<'ctx, 'tok, C, H, B, T> Drop for WriteFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn drop(&mut self) {
         let ring = self.tx.ring();
@@ -220,7 +219,7 @@ where
 pub struct ReadAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     rx: &'a mut RingRx<H, B, T>,
     min_len: usize,
@@ -230,7 +229,7 @@ where
 impl<'a, H, B, T> ReadAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     pub(super) fn new(rx: &'a mut RingRx<H, B, T>, min_len: usize, max_len: usize) -> Self {
         ReadAsync {
@@ -244,7 +243,7 @@ where
 impl<'a, H, B, T> IntoFuture for ReadAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type IntoFuture = ReadFuture<'a, 'a, NonCancellableToken, H, B, T>;
     type Output = SomeOf<ReclSliceRef<'a, T>, RxError<usize>>;
@@ -262,7 +261,7 @@ where
 impl<'a, H, B, T> TrMayCancel<'a> for ReadAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type MayCancelFuture<'f, C> = ReadFuture<'a, 'f, C, H, B, T>
     where
@@ -290,7 +289,7 @@ where
 pub struct ReadFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     _pin: PhantomPinned,
     rx: &'ctx mut RingRx<H, B, T>,
@@ -305,7 +304,7 @@ where
 impl<'ctx, 'tok, C, H, B, T> ReadFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn new(
         rx: &'ctx mut RingRx<H, B, T>,
@@ -328,7 +327,7 @@ impl<'ctx, C, H, B, T> Future for ReadFuture<'ctx, '_, C, H, B, T>
 where
     C: TrCancellationToken,
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type Output = SomeOf<ReclSliceRef<'ctx, T>, RxError<usize>>;
 
@@ -391,7 +390,7 @@ where
 impl<'ctx, 'tok, C, H, B, T> Drop for ReadFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn drop(&mut self) {
         let ring = self.rx.ring();
@@ -407,7 +406,7 @@ where
 pub struct PeekAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     rx: &'a mut RingRx<H, B, T>,
 }
@@ -415,7 +414,7 @@ where
 impl<'a, H, B, T> PeekAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     pub(super) fn new(rx: &'a mut RingRx<H, B, T>) -> Self {
         PeekAsync { rx }
@@ -425,7 +424,7 @@ where
 impl<'a, H, B, T> IntoFuture for PeekAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type IntoFuture = PeekFuture<'a, 'a, NonCancellableToken, H, B, T>;
     type Output = SomeOf<ReclPeekRef<'a, T>, RxError<usize>>;
@@ -438,7 +437,7 @@ where
 impl<'a, H, B, T> TrMayCancel<'a> for PeekAsync<'a, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type MayCancelFuture<'f, C> = PeekFuture<'a, 'f, C, H, B, T>
     where
@@ -466,7 +465,7 @@ where
 pub struct PeekFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     _pin: PhantomPinned,
     rx: &'ctx mut RingRx<H, B, T>,
@@ -477,7 +476,7 @@ where
 impl<'ctx, 'tok, C, H, B, T> PeekFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn new(rx: &'ctx mut RingRx<H, B, T>, cancel: &'tok mut C) -> Self {
         PeekFuture {
@@ -493,7 +492,7 @@ impl<'ctx, C, H, B, T> Future for PeekFuture<'ctx, '_, C, H, B, T>
 where
     C: TrCancellationToken,
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type Output = SomeOf<ReclPeekRef<'ctx, T>, RxError<usize>>;
 
@@ -529,7 +528,7 @@ where
 impl<'ctx, 'tok, C, H, B, T> Drop for PeekFuture<'ctx, 'tok, C, H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn drop(&mut self) {
         let ring = self.rx.ring();
@@ -545,16 +544,17 @@ where
 /// A future that parks (registers a waker) until the given condition holds.
 pub struct ParkFuture<'a, B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     ring: &'a RingBuffer<B, T>,
     park: Park<B, T>,
     arg: usize,
+    _marker: PhantomData<fn() -> T>,
 }
 
 impl<'a, B, T> ParkFuture<'a, B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     pub(super) fn new(
         ring: &'a RingBuffer<B, T>,
@@ -566,13 +566,14 @@ where
             ring,
             park: Park::new(side, check),
             arg,
+            _marker: PhantomData,
         }
     }
 }
 
 impl<'a, B, T> Future for ParkFuture<'a, B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type Output = ();
 
@@ -588,7 +589,7 @@ where
 
 impl<'a, B, T> Drop for ParkFuture<'a, B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn drop(&mut self) {
         self.park.deregister(self.ring);
@@ -600,28 +601,30 @@ macro_rules! wait_future {
         #[doc = $doc]
         pub struct $name<'a, B, T>
         where
-            B: DerefMut<Target = [T]>,
+            B: RingStorage<T>,
         {
             ring: &'a RingBuffer<B, T>,
             park: Park<B, T>,
+            _marker: PhantomData<fn() -> T>,
         }
 
         impl<'a, B, T> $name<'a, B, T>
         where
-            B: DerefMut<Target = [T]>,
+            B: RingStorage<T>,
         {
             #[allow(dead_code)] // some waits are constructed from the ring only
             pub(super) fn new(ring: &'a RingBuffer<B, T>) -> Self {
                 $name {
                     ring,
                     park: Park::new($side, $check),
+                    _marker: PhantomData,
                 }
             }
         }
 
         impl<'a, B, T> IntoFuture for $name<'a, B, T>
         where
-            B: DerefMut<Target = [T]>,
+            B: RingStorage<T>,
         {
             type IntoFuture = $future<'a, B, T>;
             type Output = ();
@@ -630,6 +633,7 @@ macro_rules! wait_future {
                 $future {
                     ring: self.ring,
                     park: self.park,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -637,15 +641,16 @@ macro_rules! wait_future {
         /// The poll-based future of [`$name`].
         pub struct $future<'a, B, T>
         where
-            B: DerefMut<Target = [T]>,
+            B: RingStorage<T>,
         {
             ring: &'a RingBuffer<B, T>,
             park: Park<B, T>,
+            _marker: PhantomData<fn() -> T>,
         }
 
         impl<'a, B, T> Future for $future<'a, B, T>
         where
-            B: DerefMut<Target = [T]>,
+            B: RingStorage<T>,
         {
             type Output = ();
 
@@ -661,7 +666,7 @@ macro_rules! wait_future {
 
         impl<'a, B, T> Drop for $future<'a, B, T>
         where
-            B: DerefMut<Target = [T]>,
+            B: RingStorage<T>,
         {
             fn drop(&mut self) {
                 self.park.deregister(self.ring);

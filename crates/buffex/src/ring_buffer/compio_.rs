@@ -8,8 +8,8 @@
 //!   ring copies data into / out of it;
 //! * the *kernel-handoff* (vectored) mode: [`RingBuffer::take_send_iovecs`]
 //!   and [`RingBuffer::take_recv_iovecs`] hand the readable / writable region
-//!   of the ring to the caller as an iovec pair (one or two `&'static [u8]`
-//!   slices, depending on whether the region wraps). The pair can be passed
+//!   of the ring to the caller as an iovec pair (one or two slices,
+//!   depending on whether the region wraps). The pair can be passed
 //!   directly to compio's `write_vectored` / `read_vectored` (a single
 //!   `writev` / `readv` syscall); the region is returned with
 //!   [`RingBuffer::put_back_send`] / [`RingBuffer::put_back_recv`].
@@ -41,23 +41,28 @@ impl IoVectoredBuf for SendSlices {
 /// ring.put_back_recv(res.unwrap());
 /// ```
 #[allow(dead_code)] // used by consumers of the readv direction
-pub struct RecvSlices(pub &'static mut [u8], pub &'static mut [u8]);
+pub struct RecvSlices(
+    pub &'static mut [MaybeUninit<u8>],
+    pub &'static mut [MaybeUninit<u8>],
+);
 
 impl IoVectoredBuf for RecvSlices {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
-        [&self.0[..], &self.1[..]].into_iter()
+        // SAFETY: `MaybeUninit<u8>` has the same layout as `u8`.
+        let a = unsafe {
+            core::slice::from_raw_parts(self.0.as_ptr().cast::<u8>(), self.0.len())
+        };
+        let b = unsafe {
+            core::slice::from_raw_parts(self.1.as_ptr().cast::<u8>(), self.1.len())
+        };
+        [a, b].into_iter()
     }
 }
 
 impl IoVectoredBufMut for RecvSlices {
     fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
-        // SAFETY: `&mut [u8]` has the same layout as `&mut [MaybeUninit<u8>]`.
-        let a: &mut [MaybeUninit<u8>] = unsafe {
-            core::slice::from_raw_parts_mut(self.0.as_mut_ptr().cast(), self.0.len())
-        };
-        let b: &mut [MaybeUninit<u8>] = unsafe {
-            core::slice::from_raw_parts_mut(self.1.as_mut_ptr().cast(), self.1.len())
-        };
+        let a = &mut *self.0;
+        let b = &mut *self.1;
         [a, b].into_iter()
     }
 }
@@ -71,7 +76,7 @@ impl SetLen for RecvSlices {
 
 extern crate std;
 
-use std::{borrow::Borrow, io, ops::DerefMut, ptr};
+use std::{borrow::Borrow, io, ptr};
 
 use core::mem::MaybeUninit;
 
@@ -82,14 +87,16 @@ use super::{
     error_::TxError,
     futures_::ParkFuture,
     rx_::RingRx,
-    state_::{check_rx_readable, check_tx_writable, ParkSide, RingBuffer},
+    state_::{
+        check_rx_readable, check_tx_writable, ParkSide, RingBuffer, RingStorage,
+    },
     tx_::RingTx,
 };
 
 impl<H, B> AsyncRead for RingRx<H, B, u8>
 where
     H: Borrow<RingBuffer<B, u8>>,
-    B: DerefMut<Target = [u8]>,
+    B: RingStorage<u8>,
 {
     async fn read<X: IoBufMut>(&mut self, mut buf: X) -> BufResult<usize, X> {
         loop {
@@ -101,7 +108,7 @@ where
                     // try_read_at 可能返回跨末端环绕的区域；这里只取连续前缀，
                     // 剩余的环绕部分由下一次 read 继续读取。
                     let first = core::cmp::min(take, ring.capacity() - start);
-                    let src = &ring.buffer_ref()[start..start + first];
+                    let src = ring.buffer_ref(start, first);
                     let dst = buf.as_uninit();
                     // SAFETY: `first <= cap`, and both slices are valid for
                     // `first` bytes.
@@ -130,7 +137,7 @@ where
 impl<H, B> AsyncWrite for RingTx<H, B, u8>
 where
     H: Borrow<RingBuffer<B, u8>>,
-    B: DerefMut<Target = [u8]>,
+    B: RingStorage<u8>,
 {
     async fn write<X: IoBuf>(&mut self, buf: X) -> BufResult<usize, X> {
         let src: &[u8] = buf.as_init();

@@ -6,7 +6,6 @@ extern crate std;
 use std::{
     borrow::Borrow,
     io,
-    ops::DerefMut,
     pin::Pin,
     ptr,
     task::{Context, Poll},
@@ -17,14 +16,14 @@ use futures_io::{AsyncRead, AsyncWrite};
 use super::{
     error_::{RxError, TxError},
     rx_::RingRx,
-    state_::RingBuffer,
+    state_::{RingBuffer, RingStorage},
     tx_::RingTx,
 };
 
 impl<H, B> AsyncRead for RingRx<H, B, u8>
 where
     H: Borrow<RingBuffer<B, u8>>,
-    B: DerefMut<Target = [u8]>,
+    B: RingStorage<u8>,
 {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -39,7 +38,7 @@ where
                     // try_read_at 可能返回跨末端环绕的区域；适配层只取连续前缀，
                     // 剩余的环绕部分由下一次 poll 继续读取。
                     let first = core::cmp::min(take, ring.capacity() - start);
-                    let src = &ring.buffer_ref()[start..start + first];
+                    let src = ring.buffer_ref(start, first);
                     // SAFETY: `first <= buf.len()`.
                     unsafe {
                         ptr::copy_nonoverlapping(src.as_ptr(), buf.as_mut_ptr(), first);
@@ -64,7 +63,7 @@ where
 impl<H, B> AsyncWrite for RingTx<H, B, u8>
 where
     H: Borrow<RingBuffer<B, u8>>,
-    B: DerefMut<Target = [u8]>,
+    B: RingStorage<u8>,
 {
     fn poll_write(
         self: Pin<&mut Self>,

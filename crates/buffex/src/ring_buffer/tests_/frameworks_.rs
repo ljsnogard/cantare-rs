@@ -21,6 +21,7 @@ const TOTAL: usize = 200;
 #[cfg(feature = "compio")]
 mod compio_ {
     use super::*;
+    use std::mem::MaybeUninit;
     use std::pin::Pin;
 
     fn spawn_blocking_io(f: Box<dyn FnOnce() + Send>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
@@ -88,20 +89,21 @@ mod compio_ {
             // A bigger ring so the wrapped iovec pair is exercised.
             const BIG: usize = 64;
             let ring = std::sync::Arc::new(
-                crate::ring_buffer::RingBuffer::<Box<[u8]>>::try_new(
-                    vec![0u8; BIG].into_boxed_slice(),
+                crate::ring_buffer::RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(
+                    vec![MaybeUninit::uninit(); BIG].into_boxed_slice(),
                 )
                 .unwrap(),
             );
             // 设计思路：`try_split_shared` 要求唯一持有者拆分（引用计数 == 1），
             // 所以把新建的 Arc 直接移入；下面驱动循环所需的 Arc 在拆分后从
             // 写半区 clone 得到（计数 >= 2，不会产生第二对生产者/消费者）。
-            let (mut tx, _) = crate::ring_buffer::RingBuffer::try_split_shared(
+            let (mut tx, unused_rx) = crate::ring_buffer::RingBuffer::try_split_shared(
                 ring,
                 std::sync::Arc::strong_count,
                 std::sync::Arc::weak_count,
             )
             .expect("新建 ring 的引用计数为 1，拆分必须成功");
+            drop(unused_rx.with_auto_close(false));
             let ring = tx.shared().clone();
 
             let data: Vec<u8> = (0..(BIG * 3)).map(seq_byte).collect();

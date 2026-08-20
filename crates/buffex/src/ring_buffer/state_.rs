@@ -4,7 +4,7 @@
 //! # Design
 //!
 //! `RingBuffer` exclusively owns **one** heap-allocated `[T]` buffer. The
-//! concrete storage type is generic (`B: DerefMut<Target = [T]>`), so any
+//! concrete storage type is generic (`B: RingStorage<T>`), so any
 //! heap pointer such as `Box<[T]>` works.
 //!
 //! All shared state lives in [`RingCore`]:
@@ -50,6 +50,7 @@
 use core::{
     borrow::Borrow,
     fmt,
+    marker::PhantomData,
     mem::MaybeUninit,
     ops::DerefMut,
     ptr,
@@ -66,6 +67,113 @@ use super::{
     rx_::RingRx,
     tx_::RingTx,
 };
+
+/// Abstraction over the ring's storage buffer.
+///
+/// The ring treats its internal storage as `[MaybeUninit<T>]`.  A buffer that
+/// already derefs to `[MaybeUninit<T>]` implements this trait directly; a
+/// buffer that derefs to `[T]` is also accepted when `T: Copy` (the
+/// `MaybeUninit<T>` view is then an alias of the same bytes).
+pub trait RingStorage<T> {
+    /// Number of slots in the storage buffer.
+    fn len(&self) -> usize;
+
+    /// View the whole buffer as `[MaybeUninit<T>]`.
+    fn as_uninit_slice(&self) -> &[MaybeUninit<T>];
+
+    /// Mutable view of the whole buffer as `[MaybeUninit<T>]`.
+    fn as_uninit_slice_mut(&mut self) -> &mut [MaybeUninit<T>];
+
+    /// View an initialized range as `[T]`.
+    ///
+    /// # Safety
+    ///
+    /// `start..start + len` must be inside the buffer, and those slots must
+    /// currently be initialized.
+    unsafe fn as_init_slice(&self, start: usize, len: usize) -> &[T];
+}
+
+impl<T, B> RingStorage<T> for B
+where
+    B: DerefMut<Target = [MaybeUninit<T>]>,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        (**self).len()
+    }
+
+    #[inline]
+    fn as_uninit_slice(&self) -> &[MaybeUninit<T>] {
+        self
+    }
+
+    #[inline]
+    fn as_uninit_slice_mut(&mut self) -> &mut [MaybeUninit<T>] {
+        self
+    }
+
+    #[inline]
+    unsafe fn as_init_slice(&self, start: usize, len: usize) -> &[T] {
+        unsafe {
+            core::slice::from_raw_parts(
+                self.as_ptr().add(start).cast::<T>(),
+                len,
+            )
+        }
+    }
+}
+
+/// Adapter that lets a `[T]` buffer be used as `[MaybeUninit<T>]` storage.
+///
+/// This is how `RingBuffer` accepts a plain `DerefMut<Target = [T]>` buffer
+/// when `T: Copy`: the bytes are the same, and viewing them as
+/// `MaybeUninit<T>` is sound for `Copy` types.
+pub struct CopyBuf<B, T> {
+    inner: B,
+    _marker: core::marker::PhantomData<T>,
+}
+
+impl<T: Copy, B> CopyBuf<B, T>
+where
+    B: DerefMut<Target = [T]>,
+{
+    pub(super) fn new(inner: B) -> Self {
+        CopyBuf {
+            inner,
+            _marker: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: Copy, B> core::ops::Deref for CopyBuf<B, T>
+where
+    B: DerefMut<Target = [T]>,
+{
+    type Target = [MaybeUninit<T>];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            core::slice::from_raw_parts(
+                self.inner.as_ptr().cast::<MaybeUninit<T>>(),
+                self.inner.len(),
+            )
+        }
+    }
+}
+
+impl<T: Copy, B> core::ops::DerefMut for CopyBuf<B, T>
+where
+    B: DerefMut<Target = [T]>,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.inner.as_mut_ptr().cast::<MaybeUninit<T>>(),
+                self.inner.len(),
+            )
+        }
+    }
+}
 
 /// Number of high bits reserved for the state flags.
 const FLAG_BITS: u32 = 4;
@@ -186,7 +294,7 @@ pub(super) enum ParkSide {
 impl ParkSide {
     fn register<B, T>(self, ring: &RingBuffer<B, T>, w: &Waiter)
     where
-        B: DerefMut<Target = [T]>,
+        B: RingStorage<T>,
     {
         match self {
             ParkSide::TxUser => ring.register_tx_user(w),
@@ -198,7 +306,7 @@ impl ParkSide {
 
     fn deregister<B, T>(self, ring: &RingBuffer<B, T>, w: &Waiter)
     where
-        B: DerefMut<Target = [T]>,
+        B: RingStorage<T>,
     {
         match self {
             ParkSide::TxUser => ring.deregister_tx_user(w),
@@ -218,17 +326,18 @@ pub(super) type ParkCheck<B, T> = fn(&RingBuffer<B, T>, usize) -> bool;
 /// state change; the future re-checks the condition on wake-up.
 pub(super) struct Park<B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     waiter: Waiter,
     registered: bool,
     side: ParkSide,
     check: ParkCheck<B, T>,
+    _marker: PhantomData<fn() -> T>,
 }
 
 impl<B, T> Park<B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     pub const fn new(side: ParkSide, check: ParkCheck<B, T>) -> Self {
         Park {
@@ -236,6 +345,7 @@ where
             registered: false,
             side,
             check,
+            _marker: PhantomData,
         }
     }
 
@@ -396,30 +506,20 @@ impl RingCore {
 /// [module docs](self) for the design.
 pub struct RingBuffer<B, T = u8>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     /// The one heap buffer.
     buffer: B,
     /// The packed positions + flags and the four waker slots.
     core: RingCore,
+    /// Marker tying the element type to the storage abstraction.
+    _marker: PhantomData<fn() -> T>,
 }
 
 impl<B, T> RingBuffer<B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
-    // ==================================================================
-    // All `RingBuffer` methods live in this single impl block, grouped by
-    // role so the whole API can be reviewed at once. Visibility tiers:
-    //
-    // * `pub`         — the minimal safe API surface for end users;
-    // * `pub(crate)`  — state-machine primitives used by the halves, the
-    //                   async adapters and the kernel handoff; kept out of
-    //                   the public API because misusing them (e.g. advancing
-    //                   positions out of bounds) would corrupt the ring;
-    // * `pub(super)`  — helpers shared within `ring_buffer` only.
-    // ==================================================================
-
     // ------------------------------------------------------------------
     // construction & sizing (public)
     // ------------------------------------------------------------------
@@ -437,6 +537,27 @@ where
         Result::Ok(RingBuffer {
             buffer,
             core: RingCore::new(),
+            _marker: PhantomData,
+        })
+    }
+
+    /// Create a ring buffer from an owned `[T]` buffer when `T: Copy`.
+    ///
+    /// The buffer is adapted to the internal `[MaybeUninit<T>]` representation
+    /// without copying.
+    pub fn try_new_copy<B0>(buffer: B0) -> Result<RingBuffer<CopyBuf<B0, T>, T>, usize>
+    where
+        T: Copy,
+        B0: DerefMut<Target = [T]>,
+    {
+        let cap = buffer.len();
+        if !(2..=MAX_CAPACITY).contains(&cap) {
+            return Result::Err(cap);
+        }
+        Result::Ok(RingBuffer {
+            buffer: CopyBuf::new(buffer),
+            core: RingCore::new(),
+            _marker: PhantomData,
         })
     }
 
@@ -648,7 +769,10 @@ where
     /// (`TxError::Stuffed`). After the kernel completes, call
     /// [`RingBuffer::put_back_recv`] with the number of bytes actually read,
     /// which advances the writer position.
-    pub(crate) fn take_recv_iovecs(&self) -> Option<(&'static mut [T], &'static mut [T])> {
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn take_recv_iovecs(
+        &self,
+    ) -> Option<(&'static mut [MaybeUninit<T>], &'static mut [MaybeUninit<T>])> {
         let mut state = self.core.load_state_();
         loop {
             let (rp, wp) = unpack(state);
@@ -698,7 +822,7 @@ where
 
     /// The readable region `[rp, rp+len)` as up to two slices.
     fn readable_slices_(&self, rp: usize, len: usize) -> (&'static [T], &'static [T]) {
-        let base = self.buffer.as_ptr();
+        let base = self.buffer.as_uninit_slice().as_ptr().cast::<T>();
         let first = core::cmp::min(len, self.capacity() - rp);
         let a = unsafe { core::slice::from_raw_parts(base.add(rp), first) };
         let b = if first < len {
@@ -710,8 +834,12 @@ where
     }
 
     /// The writable region `[wp, wp+len)` as up to two slices.
-    fn writable_slices_(&self, wp: usize, len: usize) -> (&'static mut [T], &'static mut [T]) {
-        let base = self.buffer.as_ptr().cast_mut();
+    fn writable_slices_(
+        &self,
+        wp: usize,
+        len: usize,
+    ) -> (&'static mut [MaybeUninit<T>], &'static mut [MaybeUninit<T>]) {
+        let base = self.buffer.as_uninit_slice().as_ptr().cast_mut();
         let first = core::cmp::min(len, self.capacity() - wp);
         let a = unsafe { core::slice::from_raw_parts_mut(base.add(wp), first) };
         let b = if first < len {
@@ -722,10 +850,10 @@ where
         (a, b)
     }
 
-    /// A read view over the whole buffer (used by the framework adapters).
+    /// A read view over an initialized range (used by the framework adapters).
     #[inline]
-    pub(super) fn buffer_ref(&self) -> &[T] {
-        unsafe { core::slice::from_raw_parts(self.buffer.as_ptr(), self.capacity()) }
+    pub(super) fn buffer_ref(&self, start: usize, len: usize) -> &[T] {
+        unsafe { self.buffer.as_init_slice(start, len) }
     }
 
     /// A write view over the whole buffer (used by the framework adapters).
@@ -740,7 +868,7 @@ where
     pub(super) fn buffer_uninit(&self) -> &mut [MaybeUninit<T>] {
         unsafe {
             core::slice::from_raw_parts_mut(
-                self.buffer.as_ptr().cast_mut().cast::<MaybeUninit<T>>(),
+                self.buffer.as_uninit_slice().as_ptr().cast_mut(),
                 self.capacity(),
             )
         }
@@ -825,15 +953,15 @@ where
         // SAFETY: the caller obtained `start`/`take` from `try_read_at`, so
         // the region is within the buffer; the aliasing obligation is
         // documented above.
-        let base = self.buffer.as_ptr().cast_mut();
+        let base = self.buffer.as_uninit_slice().as_ptr().cast::<T>();
         let cap = self.capacity();
         let first = core::cmp::min(take, cap - start);
         let pieces = if first < take {
-            let a = unsafe { core::slice::from_raw_parts_mut(base.add(start), first) };
-            let b = unsafe { core::slice::from_raw_parts_mut(base, take - first) };
+            let a = unsafe { core::slice::from_raw_parts(base.add(start), first) };
+            let b = unsafe { core::slice::from_raw_parts(base, take - first) };
             SegmSlicesRef::Two(a, b)
         } else {
-            let a = unsafe { core::slice::from_raw_parts_mut(base.add(start), take) };
+            let a = unsafe { core::slice::from_raw_parts(base.add(start), take) };
             SegmSlicesRef::One(a)
         };
         ReclSliceRef::new(
@@ -845,15 +973,15 @@ where
     /// Borrow a peek segment (drop does not move the reader) over the region
     /// `[start, start + take)`, which may wrap around the buffer end.
     pub(super) fn peek_segm<'a>(&'a self, start: usize, take: usize) -> ReclPeekRef<'a, T> {
-        let base = self.buffer.as_ptr().cast_mut();
+        let base = self.buffer.as_uninit_slice().as_ptr().cast::<T>();
         let cap = self.capacity();
         let first = core::cmp::min(take, cap - start);
         let pieces = if first < take {
-            let a = unsafe { core::slice::from_raw_parts_mut(base.add(start), first) };
-            let b = unsafe { core::slice::from_raw_parts_mut(base, take - first) };
+            let a = unsafe { core::slice::from_raw_parts(base.add(start), first) };
+            let b = unsafe { core::slice::from_raw_parts(base, take - first) };
             SegmSlicesRef::Two(a, b)
         } else {
-            let a = unsafe { core::slice::from_raw_parts_mut(base.add(start), take) };
+            let a = unsafe { core::slice::from_raw_parts(base.add(start), take) };
             SegmSlicesRef::One(a)
         };
         ReclSliceRef::new(pieces, ReadReclaim::Peek)
@@ -907,6 +1035,13 @@ where
         }
     }
 
+    /// Split the ring into a write half and a read half, borrowing the ring
+    /// for `'a`.
+    pub fn split(&mut self) -> (RingTx<&Self, B, T>, RingRx<&Self, B, T>) {
+        let ring: &Self = self;
+        (RingTx::new(ring), RingRx::new(ring))
+    }
+
     /// Split off only the write half from a shared ring. Guarded like
     /// [`RingBuffer::try_split_shared`] so that at most one producer exists.
     #[allow(dead_code)] // unused in-crate so far; kept as internal API
@@ -939,14 +1074,6 @@ where
         } else {
             Result::Err(ring_buff)
         }
-    }
-
-    /// Split the ring into a write half and a read half, borrowing the ring
-    /// for `'a`.
-    #[cfg_attr(not(test), allow(dead_code))] // used by the test suite
-    pub(crate) fn split(&mut self) -> (RingTx<&Self, B, T>, RingRx<&Self, B, T>) {
-        let ring: &Self = self;
-        (RingTx::new(ring), RingRx::new(ring))
     }
 
     /// Split off only the write half.
@@ -1035,7 +1162,7 @@ where
 /// receiving into the ring).
 pub(super) fn check_tx_writable<B, T>(ring: &RingBuffer<B, T>, arg: usize) -> bool
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     ring.try_write_at(arg.max(1)).is_ok()
 }
@@ -1044,7 +1171,7 @@ where
 /// sending from the ring), or the rx end is closed.
 pub(super) fn check_rx_readable<B, T>(ring: &RingBuffer<B, T>, arg: usize) -> bool
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     ring.try_read_at(arg).is_ok() || ring.is_rx_closed()
 }
@@ -1052,7 +1179,7 @@ where
 /// Same as [`check_rx_readable`] for peeking.
 pub(super) fn check_rx_peekable<B, T>(ring: &RingBuffer<B, T>, _: usize) -> bool
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     ring.try_peek_at().is_ok() || ring.is_rx_closed()
 }
@@ -1062,7 +1189,7 @@ where
 /// 语义：空间不足下限时，等待中的写者不会被放行（保持 Pending）。
 pub(super) fn check_tx_writable_at_least<B, T>(ring: &RingBuffer<B, T>, arg: usize) -> bool
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     ring.has_free_at_least(arg.max(1))
 }
@@ -1071,7 +1198,7 @@ where
 /// `Demand::min`，无下限时传 0），或 rx 已关闭（EOF），才允许读者继续。
 pub(super) fn check_rx_readable_at_least<B, T>(ring: &RingBuffer<B, T>, arg: usize) -> bool
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     ring.has_data_at_least(arg.max(1)) || ring.is_rx_closed()
 }
@@ -1080,7 +1207,7 @@ where
 /// or the tx end is closed.
 pub(super) fn check_tx_flushed<B, T>(ring: &RingBuffer<B, T>, _: usize) -> bool
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     ring.has_tx_data() || ring.is_tx_closed()
 }
@@ -1089,7 +1216,7 @@ where
 /// the rx end is closed.
 pub(super) fn check_rx_idle<B, T>(ring: &RingBuffer<B, T>, _: usize) -> bool
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     ring.has_recv_space() || ring.is_rx_closed()
 }
@@ -1099,7 +1226,7 @@ where
 // the user thread and the runtime thread.
 unsafe impl<B, T> Send for RingBuffer<B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
     B: Send,
     T: Send,
 {
@@ -1107,7 +1234,7 @@ where
 
 unsafe impl<B, T> Sync for RingBuffer<B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
     B: Sync,
     T: Send + Sync,
 {
@@ -1115,7 +1242,7 @@ where
 
 impl<B, T> fmt::Debug for RingBuffer<B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     /// Print the positions and state flags (diagnostics only; the buffer
     /// contents are not printed).
@@ -1136,7 +1263,7 @@ where
 
 impl<B, T> Drop for RingBuffer<B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn drop(&mut self) {
         // A region reserved by the runtime is referenced by `&'static`

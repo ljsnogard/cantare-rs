@@ -20,6 +20,7 @@ extern crate std;
 use std::{
     boxed::Box,
     io,
+    mem::MaybeUninit,
     sync::{Arc, Mutex},
     vec,
 };
@@ -40,8 +41,8 @@ use crate::ring_buffer::{
     RecvSlices, RingBuffer, RingRx, RingTx, RxError, SendSlices, TxError,
 };
 
-pub type SharedWriteRing = RingTx<Arc<RingBuffer<Box<[u8]>>>, Box<[u8]>>;
-pub type SharedReadRing = RingRx<Arc<RingBuffer<Box<[u8]>>>, Box<[u8]>>;
+pub type SharedWriteRing = RingTx<Arc<RingBuffer<Box<[MaybeUninit<u8>]>>>, Box<[MaybeUninit<u8>]>>;
+pub type SharedReadRing = RingRx<Arc<RingBuffer<Box<[MaybeUninit<u8>]>>>, Box<[MaybeUninit<u8>]>>;
 
 /// A compio unix stream adapted to the abs_buff buffered-IO traits.
 pub struct BufferedUnixStream {
@@ -68,17 +69,23 @@ impl BufferedUnixStream {
         let stream = Arc::new(stream);
 
         let write_ring = Arc::new(
-            RingBuffer::<Box<[u8]>>::try_new(vec![0u8; cap].into_boxed_slice())
-                .expect("write ring"),
+            RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(
+                vec![MaybeUninit::uninit(); cap].into_boxed_slice(),
+            )
+            .expect("write ring"),
         );
         let read_ring = Arc::new(
-            RingBuffer::<Box<[u8]>>::try_new(vec![0u8; cap].into_boxed_slice())
-                .expect("read ring"),
+            RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(
+                vec![MaybeUninit::uninit(); cap].into_boxed_slice(),
+            )
+            .expect("read ring"),
         );
-        let (tx, _) = RingBuffer::try_split_shared(write_ring, Arc::strong_count, Arc::weak_count)
+        let (tx, unused_rx) = RingBuffer::try_split_shared(write_ring, Arc::strong_count, Arc::weak_count)
             .expect("write ring must be sole-owned at split");
-        let (_, rx) = RingBuffer::try_split_shared(read_ring, Arc::strong_count, Arc::weak_count)
+        drop(unused_rx.with_auto_close(false));
+        let (unused_tx, rx) = RingBuffer::try_split_shared(read_ring, Arc::strong_count, Arc::weak_count)
             .expect("read ring must be sole-owned at split");
+        drop(unused_tx.with_auto_close(false));
         // 拆分要求调用方持有唯一引用（引用计数 == 1）：拆分内部会把 Arc clone 进
         // 两个半区，若调用前已有其它 clone，就可能拆出第二对生产者/消费者，
         // 破坏 SPSC。两个 ring 都是这里新建的，计数为 1，拆分必然成功。
@@ -230,7 +237,7 @@ impl TrBuffTryRead<u8> for BufferedUnixStream {
 /// `writev`, until the tx end is closed.
 async fn flush_task(
     stream: Arc<UnixStream>,
-    ring: Arc<RingBuffer<Box<[u8]>>>,
+    ring: Arc<RingBuffer<Box<[MaybeUninit<u8>]>>>,
     error: Arc<Mutex<Option<io::Error>>>,
 ) {
     loop {
@@ -258,7 +265,7 @@ async fn flush_task(
 /// rx end is closed (or EOF).
 async fn fill_task(
     stream: Arc<UnixStream>,
-    ring: Arc<RingBuffer<Box<[u8]>>>,
+    ring: Arc<RingBuffer<Box<[MaybeUninit<u8>]>>>,
     error: Arc<Mutex<Option<io::Error>>>,
 ) {
     loop {

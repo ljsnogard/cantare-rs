@@ -92,8 +92,8 @@ impl<'a, T> SegmSlicesMut<'a, T> {
 
 /// 读段 / 窥视段持有的物理空间：一段连续，或两段连续。
 pub(super) enum SegmSlicesRef<'a, T> {
-    One(&'a mut [T]),
-    Two(&'a mut [T], &'a mut [T]),
+    One(&'a [T]),
+    Two(&'a [T], &'a [T]),
 }
 
 impl<'a, T> SegmSlicesRef<'a, T> {
@@ -119,15 +119,15 @@ impl<'a, T> SegmSlicesRef<'a, T> {
     //     }
     // }
 
-    fn current_mut(&mut self, offset: usize) -> &mut [T] {
+    fn current(&self, offset: usize) -> &[T] {
         match self {
-            SegmSlicesRef::One(a) => &mut a[offset..],
+            SegmSlicesRef::One(a) => &a[offset..],
             SegmSlicesRef::Two(a, b) => {
                 let la = a.len();
                 if offset < la {
-                    &mut a[offset..]
+                    &a[offset..]
                 } else {
-                    &mut b[offset - la..]
+                    &b[offset - la..]
                 }
             }
         }
@@ -409,16 +409,16 @@ impl<'a, T> ReclSliceRef<'a, T> {
         let available = Demand::less_than(c);
         let agreement = demand.compromise(&available)?;
         let max_len = agreement.max()?;
-        let cur = self.pieces.current_mut(self.offset);
+        let cur = self.pieces.current(self.offset);
         let take = core::cmp::min(*max_len, cur.len());
-        let slice = &mut cur[..take];
+        let slice = &cur[..take];
         let reclaim = ChildReclaim::new(Pin::new(&mut self.offset));
         Option::Some(SegmRef::new(slice, reclaim))
     }
 
     /// 当前物理段的剩余部分作为一个 abs_buff 子段（同写段的设计）。
     pub fn as_segm_ref<'f>(&'f mut self) -> SegmRef<'f, T, ChildReclaim<'f>> {
-        let slice = self.pieces.current_mut(self.offset);
+        let slice = self.pieces.current(self.offset);
         let reclaim = ChildReclaim::new(Pin::new(&mut self.offset));
         SegmRef::new(slice, reclaim)
     }

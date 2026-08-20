@@ -94,10 +94,10 @@ pub(super) fn recv_driver_core(ring: SharedRing) {
     loop {
         if let Some((a, b)) = ring.take_recv_iovecs() {
             for (i, slot) in a.iter_mut().enumerate() {
-                *slot = pat_byte(filled + i);
+                slot.write(pat_byte(filled + i));
             }
             for (i, slot) in b.iter_mut().enumerate() {
-                *slot = pat_byte(filled + a.len() + i);
+                slot.write(pat_byte(filled + a.len() + i));
             }
             let n = a.len() + b.len();
             ring.put_back_recv(n);
@@ -135,10 +135,10 @@ pub(super) async fn recv_driver_core_async(ring: SharedRing) {
     loop {
         if let Some((a, b)) = ring.take_recv_iovecs() {
             for (i, slot) in a.iter_mut().enumerate() {
-                *slot = pat_byte(filled + i);
+                slot.write(pat_byte(filled + i));
             }
             for (i, slot) in b.iter_mut().enumerate() {
-                *slot = pat_byte(filled + a.len() + i);
+                slot.write(pat_byte(filled + a.len() + i));
             }
             let n = a.len() + b.len();
             ring.put_back_recv(n);
@@ -186,8 +186,9 @@ pub(super) async fn run_kernel_scenario(
     // 所以先把新建的 Arc 移入拆分；驱动任务所需的 Arc 在拆分之后从写半区
     // clone 得到（计数 >= 2，第二次拆分会被拒绝，SPSC 不破坏）。
     let ring_out = make_ring_shared();
-    let (tx_out, _) = super::RingBuffer::try_split_shared(ring_out, Arc::strong_count, Arc::weak_count)
+    let (tx_out, unused_rx) = super::RingBuffer::try_split_shared(ring_out, Arc::strong_count, Arc::weak_count)
         .expect("ring_out 拆分必须成功");
+    drop(unused_rx.with_auto_close(false));
     let driver_out_ring = tx_out.shared().clone();
     let driver_out = spawn_blocking(Box::new(move || send_driver_core(driver_out_ring, TOTAL)));
     let producer = spawn(Box::pin(producer_core(tx_out, TOTAL)));
@@ -196,8 +197,9 @@ pub(super) async fn run_kernel_scenario(
     // ring_in 的 tx 半区是“用户写端”的占位（真正的写入方是内核驱动），保持其
     // 存活，避免读者把尚未填充的空 ring 误判为 EOF。
     let ring_in = make_ring_shared();
-    let (_tx_in, rx_in) = super::RingBuffer::try_split_shared(ring_in, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
+    let (unused_tx, rx_in) = super::RingBuffer::try_split_shared(ring_in, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
         .expect("ring_in 拆分必须成功");
+    drop(unused_tx.with_auto_close(false));
     let driver_in_ring = rx_in.shared().clone();
     let driver_in = spawn_blocking(Box::new(move || recv_driver_core(driver_in_ring)));
     let consumer = spawn(Box::pin(consumer_core(rx_in, TOTAL, pat_byte)));
@@ -276,15 +278,17 @@ pub(super) fn run_scenarios_mini(exec: &mut super::mini_exec::MiniExec) {
     // 所需 Arc 在拆分后从半区 clone 得到，避免产生第二对生产者/消费者。
     {
         let ring_out = make_ring_shared();
-        let (tx_out, _) = super::RingBuffer::try_split_shared(ring_out, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
+        let (tx_out, unused_rx) = super::RingBuffer::try_split_shared(ring_out, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
             .expect("ring_out 拆分必须成功");
+        drop(unused_rx.with_auto_close(false));
         let driver_out_ring = tx_out.shared().clone();
         exec.spawn(send_driver_core_async(driver_out_ring, TOTAL));
         exec.spawn(producer_core(tx_out, TOTAL));
 
         let ring_in = make_ring_shared();
-        let (_, rx_in) = super::RingBuffer::try_split_shared(ring_in, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
+        let (unused_tx, rx_in) = super::RingBuffer::try_split_shared(ring_in, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
             .expect("ring_in 拆分必须成功");
+        drop(unused_tx.with_auto_close(false));
         let driver_in_ring = rx_in.shared().clone();
         exec.spawn(recv_driver_core_async(driver_in_ring));
         exec.spawn(consumer_core(rx_in, TOTAL, pat_byte));

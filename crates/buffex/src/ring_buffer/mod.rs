@@ -4,8 +4,9 @@
 //! # Design
 //!
 //! `RingBuffer` exclusively owns **one** heap-allocated `[T]` buffer. The
-//! storage type is generic and only requires `DerefMut<Target = [T]>`, so any
-//! heap pointer such as `Box<[T]>` works:
+//! storage type is generic through `RingStorage<T>` and is treated as
+//! `[MaybeUninit<T>]`; any heap pointer such as `Box<[MaybeUninit<T>]>`
+//! works, and `Box<[T]>` can be used via `try_new_copy` when `T: Copy`:
 //!
 //! ```ignore
 //! let ring = RingBuffer::<Box<[u8]>>::try_new(Box::from([0u8; 4096])).unwrap();

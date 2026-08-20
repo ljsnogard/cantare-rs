@@ -4,7 +4,6 @@ use core::{
     borrow::Borrow,
     cell::UnsafeCell,
     marker::PhantomPinned,
-    ops::DerefMut,
 };
 
 use abs_buff::{x_deps::anylr::SomeOf, Demand, TrBuffTryWrite, TrBuffWrite};
@@ -13,7 +12,7 @@ use super::{
     error_::TxError,
     futures_::WriteAsync,
     reclaim_::ReclSliceMut,
-    state_::{RingBuffer, Waiter},
+    state_::{RingBuffer, RingStorage, Waiter},
 };
 
 /// To move data into the ring buffer (the producer / user side).
@@ -23,7 +22,7 @@ use super::{
 pub struct RingTx<H, B, T = u8>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     _pin: PhantomPinned,
     ring: H,
@@ -31,12 +30,14 @@ where
     pub(super) waiter: UnsafeCell<Waiter>,
     /// Marker tying the element / buffer types.
     _marker: core::marker::PhantomData<(B, T)>,
+    /// Whether dropping this half should also close its own tx end.
+    auto_close: bool,
 }
 
 impl<H, B, T> RingTx<H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     pub(super) fn new(ring: H) -> Self {
         RingTx {
@@ -44,7 +45,17 @@ where
             ring,
             waiter: UnsafeCell::new(Waiter::new()),
             _marker: core::marker::PhantomData,
+            auto_close: true,
         }
+    }
+
+    /// Set whether dropping this half should automatically close its own tx end.
+    ///
+    /// The default is `true`. Call this with `false` when the half is owned by
+    /// a background/driver task and must not implicitly close the ring on drop.
+    pub fn with_auto_close(mut self, auto_close: bool) -> Self {
+        self.auto_close = auto_close;
+        self
     }
 
     #[inline]
@@ -107,6 +118,15 @@ where
         self.ring().close_tx();
     }
 
+    /// Close the opposite rx end.
+    ///
+    /// This lets a driver task that owns the write half signal EOF/closure to
+    /// the user-facing read half without reaching into the shared
+    /// [`RingBuffer`] directly.
+    pub fn close_rx(&mut self) {
+        self.ring().close_rx();
+    }
+
     pub fn is_closed(&self) -> bool {
         self.ring().is_tx_closed()
     }
@@ -130,16 +150,15 @@ where
 impl<H, B, T> Drop for RingTx<H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn drop(&mut self) {
         let ring = self.ring();
         let waiter = unsafe { &*self.waiter.get() };
         ring.deregister_tx_user(waiter);
-        // 注意：drop 不置 TX_CLOSED。`TX_CLOSED` 是“写端显式关闭”的信号
-        // （`RingTx::close`），读者把它当作 EOF。若 drop 也置位，那么像
-        // `BufferedUnixStream` / kernel-handoff 这类“用户写端只是占位、真正的
-        // 写入方是后台任务”的场景，会在数据到来之前就把空 ring 误判为 EOF。
+        if self.auto_close {
+            ring.close_tx();
+        }
     }
 }
 
@@ -150,7 +169,7 @@ where
 impl<H, B, T> TrBuffWrite<T> for RingTx<H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type WriteAsync<'f> = WriteAsync<'f, H, B, T> where Self: 'f;
     type SegmMut<'a> = ReclSliceMut<'a, T> where Self: 'a;
@@ -173,7 +192,7 @@ where
 impl<H, B, T> TrBuffTryWrite<T> for RingTx<H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn try_write<'f>(
         &'f mut self,

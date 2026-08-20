@@ -1,10 +1,8 @@
-use core::ops::DerefMut;
-
 use abs_buff::{TrBuffTryPeek, TrBuffTryRead, TrBuffTryWrite};
 
 use super::{
     rx_::RingRx,
-    state_::RingBuffer,
+    state_::{RingBuffer, RingStorage},
     tx_::RingTx,
 };
 
@@ -37,7 +35,7 @@ pub trait TrRingBuffer<T = u8> {
 
 impl<B, T> TrRingBuffer<T> for RingBuffer<B, T>
 where
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type Tx<'a> = RingTx<&'a Self, B, T> where Self: 'a;
     type Rx<'a> = RingRx<&'a Self, B, T> where Self: 'a;

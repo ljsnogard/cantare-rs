@@ -4,7 +4,6 @@ use core::{
     borrow::Borrow,
     cell::UnsafeCell,
     marker::PhantomPinned,
-    ops::DerefMut,
 };
 
 use abs_buff::{
@@ -16,7 +15,7 @@ use super::{
     error_::RxError,
     futures_::{PeekAsync, ReadAsync},
     reclaim_::{ReclPeekRef, ReclSliceRef},
-    state_::{RingBuffer, Waiter},
+    state_::{RingBuffer, RingStorage, Waiter},
 };
 
 /// To move data out of the ring buffer (the consumer / user side).
@@ -26,7 +25,7 @@ use super::{
 pub struct RingRx<H, B, T = u8>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     _pin: PhantomPinned,
     ring: H,
@@ -34,12 +33,14 @@ where
     pub(super) waiter: UnsafeCell<Waiter>,
     /// Marker tying the element / buffer types.
     _marker: core::marker::PhantomData<(B, T)>,
+    /// Whether dropping this half should also close its own rx end.
+    auto_close: bool,
 }
 
 impl<H, B, T> RingRx<H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     pub(super) fn new(ring: H) -> Self {
         RingRx {
@@ -47,7 +48,17 @@ where
             ring,
             waiter: UnsafeCell::new(Waiter::new()),
             _marker: core::marker::PhantomData,
+            auto_close: true,
         }
+    }
+
+    /// Set whether dropping this half should automatically close its own rx end.
+    ///
+    /// The default is `true`. Call this with `false` when the half is owned by
+    /// a background/driver task and must not implicitly close the ring on drop.
+    pub fn with_auto_close(mut self, auto_close: bool) -> Self {
+        self.auto_close = auto_close;
+        self
     }
 
     #[inline]
@@ -121,6 +132,15 @@ where
         self.ring().close_rx();
     }
 
+    /// Close the opposite tx end.
+    ///
+    /// This lets a driver task that owns the read half signal closure to the
+    /// user-facing write half without reaching into the shared
+    /// [`RingBuffer`] directly.
+    pub fn close_tx(&mut self) {
+        self.ring().close_tx();
+    }
+
     pub fn is_closed(&self) -> bool {
         self.ring().is_rx_closed()
     }
@@ -139,13 +159,15 @@ where
 impl<H, B, T> Drop for RingRx<H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn drop(&mut self) {
         let ring = self.ring();
         let waiter = unsafe { &*self.waiter.get() };
         ring.deregister_rx_user(waiter);
-        ring.close_rx();
+        if self.auto_close {
+            ring.close_rx();
+        }
     }
 }
 
@@ -156,7 +178,7 @@ where
 impl<H, B, T> TrBuffRead<T> for RingRx<H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type ReadAsync<'f> = ReadAsync<'f, H, B, T> where Self: 'f;
     type SegmRef<'a> = ReclSliceRef<'a, T> where Self: 'a;
@@ -179,7 +201,7 @@ where
 impl<H, B, T> TrBuffTryRead<T> for RingRx<H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn try_read<'f>(
         &'f mut self,
@@ -211,7 +233,7 @@ where
 impl<H, B, T> TrBuffPeek<T> for RingRx<H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     type PeekAsync<'f> = PeekAsync<'f, H, B, T> where Self: 'f;
     type SegmPeek<'a> = ReclPeekRef<'a, T> where Self: 'a;
@@ -227,7 +249,7 @@ where
 impl<H, B, T> TrBuffTryPeek<T> for RingRx<H, B, T>
 where
     H: Borrow<RingBuffer<B, T>>,
-    B: DerefMut<Target = [T]>,
+    B: RingStorage<T>,
 {
     fn try_peek<'f>(&'f mut self) -> SomeOf<Self::SegmPeek<'f>, Self::Err> {
         match RingRx::try_peek(self) {

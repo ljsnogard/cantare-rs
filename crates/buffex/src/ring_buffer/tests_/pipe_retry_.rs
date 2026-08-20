@@ -3,6 +3,7 @@
 //! must leave the reader position exactly after the data that was actually
 //! written, so retrying transfers the rest — no duplication, no loss.
 
+use std::mem::MaybeUninit;
 use std::{
     boxed::Box,
     future::Future,
@@ -23,9 +24,9 @@ use crate::ring_buffer::{RingBuffer, RingRx, RingTx};
 
 use super::{mini_exec::MiniExec, fill_segm, take_segm};
 
-type SharedRing = Arc<RingBuffer<Box<[u8]>>>;
-type SharedTx = RingTx<SharedRing, Box<[u8]>>;
-type SharedRx = RingRx<SharedRing, Box<[u8]>>;
+type SharedRing = Arc<RingBuffer<Box<[MaybeUninit<u8>]>>>;
+type SharedTx = RingTx<SharedRing, Box<[MaybeUninit<u8>]>>;
+type SharedRx = RingRx<SharedRing, Box<[MaybeUninit<u8>]>>;
 
 /// A cancellation token whose flag is set in advance.
 #[derive(Clone)]
@@ -62,7 +63,7 @@ impl TrCancellationToken for FlagToken {
 /// `Arc` 在拆分后从写半区 clone 得到（计数 >= 2，第二次拆分会被拒绝）。
 fn make_ring(cap: usize) -> (SharedRing, SharedTx, SharedRx) {
     let ring =
-        Arc::new(RingBuffer::<Box<[u8]>>::try_new(vec![0u8; cap].into_boxed_slice()).unwrap());
+        Arc::new(RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(vec![MaybeUninit::uninit(); cap].into_boxed_slice()).unwrap());
     let (tx, rx) = RingBuffer::
         try_split_shared(ring, Arc::strong_count, Arc::weak_count)
         .expect("新建 ring 的引用计数为 1，拆分必须成功");

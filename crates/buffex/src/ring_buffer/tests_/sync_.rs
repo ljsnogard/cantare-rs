@@ -11,6 +11,8 @@ use std::{
 
 use abs_buff::Demand;
 
+use std::mem::MaybeUninit;
+
 use crate::ring_buffer::{RxError, TrRingBuffer, TxError};
 
 use super::{fill_segm, make_ring, make_ring_shared, pat_byte, seq_byte, take_segm, RING_CAP};
@@ -372,7 +374,7 @@ fn read_async_less_than_still_partial() {
 fn write_one_shot_satisfies_wrapped_free_space() {
     // 容量 10 的 ring，以唯一持有者身份拆分；
     let ring = Arc::new(
-        crate::ring_buffer::RingBuffer::<Box<[u8]>>::try_new(vec![0u8; 10].into_boxed_slice())
+        crate::ring_buffer::RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(vec![MaybeUninit::uninit(); 10].into_boxed_slice())
             .unwrap(),
     );
     let (mut tx, mut rx) = crate::ring_buffer::RingBuffer::try_split_shared(
@@ -473,8 +475,8 @@ fn error_semantics() {
 fn tr_ring_buffer_trait() {
     use abs_buff::{TrBuffTryPeek, TrBuffTryRead, TrBuffTryWrite};
 
-    let mut ring = crate::ring_buffer::RingBuffer::<Box<[u8]>>::try_new(
-        vec![0u8; RING_CAP].into_boxed_slice(),
+    let mut ring = crate::ring_buffer::RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(
+        vec![MaybeUninit::uninit(); RING_CAP].into_boxed_slice(),
     )
     .unwrap();
 
@@ -574,10 +576,10 @@ fn iovec_take_put() {
     let n = a.len() + b.len();
     assert_eq!(n, RING_CAP - 1);
     for (i, slot) in a.iter_mut().enumerate() {
-        *slot = pat_byte(i);
+        slot.write(pat_byte(i));
     }
     for (i, slot) in b.iter_mut().enumerate() {
-        *slot = pat_byte(a.len() + i);
+        slot.write(pat_byte(a.len() + i));
     }
     ring.put_back_recv(n);
     assert_eq!(ring.data_size(), n);
@@ -607,9 +609,9 @@ fn kernel_reservation_blocks_user() {
     // the runtime reserves the writable region for a kernel read; the user
     // writer is blocked meanwhile
     let (a, _b) = ring.take_recv_iovecs().unwrap();
-    a[0] = 42;
-    a[1] = 43;
-    a[2] = 44;
+    a[0].write(42);
+    a[1].write(43);
+    a[2].write(44);
     assert!(matches!(tx.try_write_at_most(1), Err(TxError::Stuffed(_))));
     ring.put_back_recv(3);
 
@@ -623,8 +625,8 @@ fn kernel_reservation_blocks_user() {
 /// A write-only ring: the tx half alone (used by the kernel-mode drivers).
 #[test]
 fn split_borrowed_halves() {
-    let mut ring = crate::ring_buffer::RingBuffer::<Box<[u8]>>::try_new(
-        vec![0u8; RING_CAP].into_boxed_slice(),
+    let mut ring = crate::ring_buffer::RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(
+        vec![MaybeUninit::uninit(); RING_CAP].into_boxed_slice(),
     )
     .unwrap();
     let (mut tx, mut rx) = ring.split();
@@ -641,7 +643,7 @@ fn split_borrowed_halves() {
 #[test]
 fn ring_is_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<Arc<crate::ring_buffer::RingBuffer<Box<[u8]>>>>();
+    assert_send_sync::<Arc<crate::ring_buffer::RingBuffer<Box<[MaybeUninit<u8>]>>>>();
 }
 
 /// Multithreaded SPSC pipe: one writer thread, one reader thread, no runtime.
@@ -734,7 +736,7 @@ impl<'a> RingRxShim<'a> {
 fn split_shared_succeeds_for_sole_owner() {
     // 新建 Arc 时计数为 1，满足"唯一持有者"前提；
     let ring = Arc::new(
-        crate::ring_buffer::RingBuffer::<Box<[u8]>>::try_new(vec![0u8; RING_CAP].into_boxed_slice())
+        crate::ring_buffer::RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(vec![MaybeUninit::uninit(); RING_CAP].into_boxed_slice())
             .unwrap(),
     );
     let (mut tx, mut rx) = crate::ring_buffer::RingBuffer::try_split_shared(
@@ -758,7 +760,7 @@ fn split_shared_succeeds_for_sole_owner() {
 #[test]
 fn split_shared_rejects_non_sole_owner() {
     let ring = Arc::new(
-        crate::ring_buffer::RingBuffer::<Box<[u8]>>::try_new(vec![0u8; RING_CAP].into_boxed_slice())
+        crate::ring_buffer::RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(vec![MaybeUninit::uninit(); RING_CAP].into_boxed_slice())
             .unwrap(),
     );
     // 模拟"还有别处握着 Arc"：clone 一个副本，计数变为 2；
@@ -780,7 +782,7 @@ fn split_shared_rejects_non_sole_owner() {
 #[test]
 fn split_shared_rejects_second_pair_until_halves_dropped() {
     let ring = Arc::new(
-        crate::ring_buffer::RingBuffer::<Box<[u8]>>::try_new(vec![0u8; RING_CAP].into_boxed_slice())
+        crate::ring_buffer::RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(vec![MaybeUninit::uninit(); RING_CAP].into_boxed_slice())
             .unwrap(),
     );
     let (tx, rx) = crate::ring_buffer::RingBuffer::try_split_shared(ring, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
@@ -929,4 +931,119 @@ fn recl_segm_move_items_trait_defaults() {
         }
         assert_eq!(got, expect, "目标环内容必须按序到达");
     }
+}
+
+#[test]
+fn move_data_between_u8_slice_and_maybe_uninit_slice_rings() {
+    use abs_buff::{TrBuffTryRead, TrBuffTryWrite};
+    use crate::ring_buffer::RingBuffer;
+
+    let mut src_mem = [0u8; 16];
+    for (i, b) in src_mem.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    let expected = src_mem[..8].to_vec();
+
+    // `RingBuffer<&mut [u8], u8>` is accepted through `try_new_copy`, which
+    // adapts the `[u8]` buffer into the internal `[MaybeUninit<u8>]` view.
+    let src_ring = RingBuffer::<
+        crate::ring_buffer::state_::CopyBuf<&mut [u8], u8>,
+        u8,
+    >::try_new_copy(&mut src_mem[..])
+    .unwrap();
+    let (mut src_tx, mut src_rx) =
+        RingBuffer::try_split_shared(&src_ring, |_| 1usize, |_| 0usize).unwrap();
+
+    // Fill the source ring.
+    let mut off = 0usize;
+    while off < expected.len() {
+        let write_res =
+            TrBuffTryWrite::try_write(&mut src_tx, &Demand::less_than(expected.len() - off));
+        let write_err = write_res
+            .as_ref()
+            .pick_right()
+            .map(|err| std::format!("{err:?}"));
+        let Some(mut segm) = write_res.pick_left() else {
+            panic!("source write failed: {:?}", write_err);
+        };
+        let n = segm.least_count();
+        let mut staging: Vec<MaybeUninit<u8>> = expected[off..off + n]
+            .iter()
+            .map(|&b| MaybeUninit::new(b))
+            .collect();
+        // SAFETY: moving plain `u8` bytes into the ring segment is a bitwise copy.
+        unsafe {
+            segm.move_items_from_buff(&mut staging);
+        }
+        off += n;
+        drop(segm);
+    }
+    src_tx.close();
+
+    // `RingBuffer<&mut [MaybeUninit<u8>], u8>` is the direct uninit-storage form.
+    let mut dst_mem = [MaybeUninit::<u8>::uninit(); 16];
+    let dst_ring = RingBuffer::try_new(&mut dst_mem[..]).unwrap();
+    let (mut dst_tx, mut dst_rx) =
+        RingBuffer::try_split_shared(&dst_ring, |_| 1usize, |_| 0usize).unwrap();
+
+    // Move every byte from the `[u8]`-backed ring into the `[MaybeUninit<u8>]`-backed ring.
+    let mut copied = 0usize;
+    while copied < expected.len() {
+        let Some(mut rseg) =
+            TrBuffTryRead::try_read(&mut src_rx, &Demand::less_than(expected.len() - copied))
+                .pick_left()
+        else {
+            panic!("source read failed");
+        };
+        let n = rseg.least_count();
+        let mut staging: Vec<MaybeUninit<u8>> = Vec::with_capacity(n);
+        staging.resize_with(n, MaybeUninit::uninit);
+        // SAFETY: the source ring contains initialized `u8` bytes.
+        unsafe {
+            rseg.move_items_to_buff(&mut staging);
+        }
+        let bytes: Vec<u8> = staging
+            .into_iter()
+            .map(|m| unsafe { m.assume_init_read() })
+            .collect();
+
+        let Some(mut wseg) =
+            TrBuffTryWrite::try_write(&mut dst_tx, &Demand::less_than(n)).pick_left()
+        else {
+            panic!("destination write failed");
+        };
+        let wn = wseg.least_count();
+        assert!(wn >= n, "destination segment too small");
+        let mut wstaging: Vec<MaybeUninit<u8>> =
+            bytes.iter().map(|&b| MaybeUninit::new(b)).collect();
+        // SAFETY: moving plain `u8` bytes into the destination ring is a bitwise copy.
+        unsafe {
+            wseg.move_items_from_buff(&mut wstaging);
+        }
+        copied += n;
+        drop(rseg);
+        drop(wseg);
+    }
+    dst_tx.close();
+
+    // Read back from the destination ring and verify the data arrived intact.
+    let mut got = Vec::new();
+    while got.len() < expected.len() {
+        let Some(mut segm) =
+            TrBuffTryRead::try_read(&mut dst_rx, &Demand::less_than(expected.len() - got.len()))
+                .pick_left()
+        else {
+            panic!("destination read failed");
+        };
+        let n = segm.least_count();
+        let mut staging: Vec<MaybeUninit<u8>> = Vec::with_capacity(n);
+        staging.resize_with(n, MaybeUninit::uninit);
+        // SAFETY: the destination ring contains initialized `u8` bytes.
+        unsafe {
+            segm.move_items_to_buff(&mut staging);
+        }
+        got.extend(staging.into_iter().map(|m| unsafe { m.assume_init_read() }));
+        drop(segm);
+    }
+    assert_eq!(got, expected);
 }

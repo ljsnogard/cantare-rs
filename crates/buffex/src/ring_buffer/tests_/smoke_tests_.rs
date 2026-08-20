@@ -14,13 +14,13 @@ use crate::ring_buffer::{
     ReclSliceMut, ReclSliceRef, RingBuffer, RingRx, RingTx, RxError, TxError,
 };
 
-type Tx = RingTx<Arc<RingBuffer<Box<[u8]>>>, Box<[u8]>, u8>;
-type Rx = RingRx<Arc<RingBuffer<Box<[u8]>>>, Box<[u8]>, u8>;
+type Tx = RingTx<Arc<RingBuffer<Box<[MaybeUninit<u8>]>>>, Box<[MaybeUninit<u8>]>, u8>;
+type Rx = RingRx<Arc<RingBuffer<Box<[MaybeUninit<u8>]>>>, Box<[MaybeUninit<u8>]>, u8>;
 
 /// Create a ring through the public construction/split API.
 fn make_ring(cap: usize) -> (Tx, Rx) {
     let ring = Arc::new(
-        RingBuffer::<Box<[u8]>>::try_new(vec![0u8; cap].into_boxed_slice())
+        RingBuffer::<Box<[MaybeUninit<u8>]>>::try_new(vec![MaybeUninit::uninit(); cap].into_boxed_slice())
             .expect("valid ring capacity"),
     );
     RingBuffer::try_split_shared(ring, Arc::strong_count, Arc::weak_count)

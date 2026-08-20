@@ -1,0 +1,18 @@
+[package]
+edition = "2024"
+name = "buffex_iroh"
+version = "0.1.0"
+
+description = "Send or receive data through a ring buffer attached to the iroh stream."
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+buffex = { path = "../buffex" }
+abs_buff = { path = "../abs_buff" }
+anylr = { git = "https://gitee.com/lino_snsalias/anylr.rs.git", branch = "dev/0.2.0" }
+
+anyhow = "1"
+thiserror = "2"
+iroh = "1.0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
