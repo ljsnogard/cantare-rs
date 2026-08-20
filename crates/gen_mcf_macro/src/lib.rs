@@ -237,6 +237,7 @@ pub fn gen_may_cancel_future(
     let async_struct = format_ident!("{}Async", prefix_ident);
     let future_struct = format_ident!("{}Future", prefix_ident);
     let state_struct = format_ident!("{}FutureState", prefix_ident);
+    let factory_trait = format_ident!("__{}FutureFactory", prefix_ident);
 
     // Final generic types
     // let gen_params = quote! { #(#generics_all),* };
@@ -290,12 +291,19 @@ pub fn gen_may_cancel_future(
         {
             params_: ::core::mem::MaybeUninit<#async_struct<#generic_params_async_no_cancel>>,
             cancel_: #cancel_type_lt_replaced,
-            future_: Option<<#state_struct<#generic_params_future_all> as ::core::ops::AsyncFnOnce<()>>::CallOnceFuture>,
+            future_: Option<<#state_struct<#generic_params_future_all> as #factory_trait>::MadeFuture>,
         }
 
         // Declair #state_struct
         struct #state_struct<#generic_params_future_all>(::core::pin::Pin<&#last_lt mut #future_struct<#generic_params_future_all>>)
         #where_clause_no_lt;
+
+        trait #factory_trait {
+            type Output;
+            type MadeFuture: ::core::future::Future<Output = Self::Output>;
+
+            fn make_future(self) -> Self::MadeFuture;
+        }
 
         // Implement `IntoFuture` for #async_struct
         impl<#generic_params_future_no_cancel> ::core::future::IntoFuture for #async_struct<#generic_params_async_no_cancel>
@@ -374,7 +382,7 @@ pub fn gen_may_cancel_future(
                         let state = #state_struct(unsafe {
                             ::core::pin::Pin::new_unchecked(this.as_mut())
                         });
-                        let fut = AsyncFnOnce::async_call_once(state, ());
+                        let fut = state.make_future();
                         let fut_field_mut = unsafe { fut_field_ptr.as_mut() };
                         *fut_field_mut = Option::Some(fut);
                     }
@@ -382,13 +390,13 @@ pub fn gen_may_cancel_future(
             }
         }
 
-        impl<#generic_params_future_all> ::core::ops::AsyncFnOnce<()> for #state_struct<#generic_params_future_all>
+        impl<#generic_params_future_all> #factory_trait for #state_struct<#generic_params_future_all>
         #where_clause_no_lt
         {
             type Output = #output_ty_transformed;
-            type CallOnceFuture = impl ::core::future::Future<Output = Self::Output>;
+            type MadeFuture = impl ::core::future::Future<Output = Self::Output>;
 
-            extern "rust-call" fn async_call_once(self, _: ()) -> Self::CallOnceFuture {
+            fn make_future(self) -> Self::MadeFuture {
                 let f = unsafe { self.0.get_unchecked_mut() };
                 let #async_struct_destruct = unsafe { f.params_.assume_init_read() };
                 self::#fn_ident(#(#tuple_idents),*, f.cancel_)
