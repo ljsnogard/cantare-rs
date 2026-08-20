@@ -291,19 +291,14 @@ pub fn gen_may_cancel_future(
         {
             params_: ::core::mem::MaybeUninit<#async_struct<#generic_params_async_no_cancel>>,
             cancel_: #cancel_type_lt_replaced,
-            future_: Option<<#state_struct<#generic_params_future_all> as #factory_trait>::MadeFuture>,
+            future_: Option<
+                <#state_struct<#generic_params_future_all> as #factory_trait<#generic_params_future_all>>::MadeFuture
+            >,
         }
 
         // Declair #state_struct
         struct #state_struct<#generic_params_future_all>(::core::pin::Pin<&#last_lt mut #future_struct<#generic_params_future_all>>)
         #where_clause_no_lt;
-
-        trait #factory_trait {
-            type Output;
-            type MadeFuture: ::core::future::Future<Output = Self::Output>;
-
-            fn make_future(self) -> Self::MadeFuture;
-        }
 
         // Implement `IntoFuture` for #async_struct
         impl<#generic_params_future_no_cancel> ::core::future::IntoFuture for #async_struct<#generic_params_async_no_cancel>
@@ -390,11 +385,16 @@ pub fn gen_may_cancel_future(
             }
         }
 
-        impl<#generic_params_future_all> #factory_trait for #state_struct<#generic_params_future_all>
+        trait #factory_trait<#generic_params_future_all> {
+            type MadeFuture: ::core::future::Future;
+
+            fn make_future(self) -> Self::MadeFuture;
+        }
+
+        impl<#generic_params_future_all> #factory_trait<#generic_params_future_all> for #state_struct<#generic_params_future_all>
         #where_clause_no_lt
         {
-            type Output = #output_ty_transformed;
-            type MadeFuture = impl ::core::future::Future<Output = Self::Output>;
+            type MadeFuture = impl ::core::future::Future<Output = #output_ty_transformed>;
 
             fn make_future(self) -> Self::MadeFuture {
                 let f = unsafe { self.0.get_unchecked_mut() };
