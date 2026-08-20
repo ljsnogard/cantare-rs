@@ -32,14 +32,9 @@ use compio::{
 };
 
 use abs_buff::{
-    x_deps::{abs_cancel, anylr},
-    Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
+    x_deps::anylr::SomeOf, Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite,
+    TrBuffWrite,
 };
-
-use abs_cancel::TrMayCancel;
-use anylr::SomeOf;
-
-
 
 use crate::ring_buffer::{
     RecvSlices, RingBuffer, RingRx, RingTx, RxError, SendSlices, TxError,
@@ -166,6 +161,10 @@ impl Drop for BufferedUnixStream {
 // ---------------------------------------------------------------------------
 
 impl TrBuffWrite<u8> for BufferedUnixStream {
+    type WriteAsync<'f>
+        = <SharedWriteRing as TrBuffWrite<u8>>::WriteAsync<'f>
+    where
+        Self: 'f;
     type SegmMut<'a> = <SharedWriteRing as TrBuffWrite<u8>>::SegmMut<'a>
     where
         Self: 'a;
@@ -178,10 +177,7 @@ impl TrBuffWrite<u8> for BufferedUnixStream {
     fn write_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl TrMayCancel<
-        'f,
-        MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>,
-    > {
+    ) -> Self::WriteAsync<'f> {
         <SharedWriteRing as TrBuffWrite<u8>>::write_async(&mut self.tx, demand)
     }
 }
@@ -196,6 +192,10 @@ impl TrBuffTryWrite<u8> for BufferedUnixStream {
 }
 
 impl TrBuffRead<u8> for BufferedUnixStream {
+    type ReadAsync<'f>
+        = <SharedReadRing as TrBuffRead<u8>>::ReadAsync<'f>
+    where
+        Self: 'f;
     type SegmRef<'a> = <SharedReadRing as TrBuffRead<u8>>::SegmRef<'a>
     where
         Self: 'a;
@@ -208,10 +208,7 @@ impl TrBuffRead<u8> for BufferedUnixStream {
     fn read_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl TrMayCancel<
-        'f,
-        MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>,
-    > {
+    ) -> Self::ReadAsync<'f> {
         <SharedReadRing as TrBuffRead<u8>>::read_async(&mut self.rx, demand)
     }
 }

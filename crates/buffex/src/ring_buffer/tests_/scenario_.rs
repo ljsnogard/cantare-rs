@@ -51,7 +51,7 @@ pub(super) async fn consumer_core(
         let take = core::cmp::min(11, expected - off);
         let x = rx.read_at_most_async(take).await;
         let Some(segm) = x.pick_left() else {
-            panic!("[consumer] read_async failed");
+            panic!("[consumer] read_async failed at off={off}, expected={expected}, closed={}, size={}", rx.ring().is_tx_closed(), rx.ring().data_size());
         };
         let len = segm.least_count();
         let mut segm = segm;
@@ -193,8 +193,10 @@ pub(super) async fn run_kernel_scenario(
     let producer = spawn(Box::pin(producer_core(tx_out, TOTAL)));
 
     // ring_in: kernel readv -> user reads
+    // ring_in 的 tx 半区是“用户写端”的占位（真正的写入方是内核驱动），保持其
+    // 存活，避免读者把尚未填充的空 ring 误判为 EOF。
     let ring_in = make_ring_shared();
-    let (_, rx_in) = super::RingBuffer::try_split_shared(ring_in, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
+    let (_tx_in, rx_in) = super::RingBuffer::try_split_shared(ring_in, std::sync::Arc::strong_count, std::sync::Arc::weak_count)
         .expect("ring_in 拆分必须成功");
     let driver_in_ring = rx_in.shared().clone();
     let driver_in = spawn_blocking(Box::new(move || recv_driver_core(driver_in_ring)));

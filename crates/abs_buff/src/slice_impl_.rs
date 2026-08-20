@@ -5,7 +5,6 @@ use core::{
     future::Future,
     marker::PhantomPinned,
     mem::MaybeUninit,
-    ops::Try,
     pin::Pin,
     slice,
     task::{Context, Poll},
@@ -220,6 +219,7 @@ impl<T> TrBuffSegmView for BorrowedReadSegm<'_, T>
 where
     T: Borrow<[u8]>,
 {
+    type SlicesIter<'f> = Option<&'f [u8]> where Self: 'f;
     type Item = u8;
 
     #[inline]
@@ -232,7 +232,7 @@ where
         self.remaining().len()
     }
 
-    fn iter_slices(&self) -> impl IntoIterator<Item = &[u8]> {
+    fn iter_slices(&self) -> Self::SlicesIter<'_> {
         let data = self.remaining();
         if data.is_empty() {
             Option::None
@@ -246,16 +246,16 @@ impl<'a, T> TrBuffSegmRef<'a, u8> for BorrowedReadSegm<'a, T>
 where
     T: Borrow<[u8]>,
 {
-    type Reclaimer<'f>
-        = SegmReclaim<'f>
-    where
-        Self: 'f;
+    type Reclaimer<'f> = SegmReclaim<'f> where Self: 'f;
+
+    type TakeSegmRef<'f> = Option<SegmRef<'f, u8, SegmReclaim<'f>>>
+        where Self: 'f;
 
     #[inline]
     fn take_segm_ref<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl Try<Output: TrBuffSegmRef<'f, u8>> {
+    ) -> Self::TakeSegmRef<'f> {
         BorrowedReadSegm::take_segm_ref(self, demand)
     }
 
@@ -361,6 +361,7 @@ impl<T> TrBuffSegmView for BorrowedWriteSegm<'_, T>
 where
     T: BorrowMut<[u8]>,
 {
+    type SlicesIter<'f> = Option<&'f [MaybeUninit<u8>]> where Self: 'f;
     type Item = MaybeUninit<u8>;
 
     #[inline]
@@ -373,7 +374,7 @@ where
         self.remaining().len()
     }
 
-    fn iter_slices(&self) -> impl IntoIterator<Item = &[MaybeUninit<u8>]> {
+    fn iter_slices(&self) -> Self::SlicesIter<'_> {
         let data = self.remaining();
         if data.is_empty() {
             Option::None
@@ -392,11 +393,16 @@ where
     where
         Self: 'f;
 
+    type TakeSegmMut<'f>
+        = Option<SegmMut<'f, u8, SegmReclaim<'f>>>
+    where
+        Self: 'f;
+
     #[inline]
     fn take_segm_mut<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl Try<Output: TrBuffSegmMut<'f, u8>> {
+    ) -> Self::TakeSegmMut<'f> {
         BorrowedWriteSegm::take_segm_mut(self, demand)
     }
 
@@ -414,6 +420,10 @@ impl<T> TrBuffRead<u8> for T
 where
     T: Borrow<[u8]>,
 {
+    type ReadAsync<'f>
+        = impl TrMayCancel<'f, MayCancelOutput = SomeOf<BorrowedReadSegm<'f, T>, BorrowedSliceError>>
+    where
+        Self: 'f;
     type SegmRef<'f>
         = BorrowedReadSegm<'f, T>
     where
@@ -428,7 +438,7 @@ where
     fn read_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>>
+    ) -> Self::ReadAsync<'f>
     {
         let len = Borrow::<[u8]>::borrow(self).len();
         let min_len = demand.min().copied().unwrap_or(0);
@@ -467,6 +477,10 @@ impl<T> TrBuffWrite<u8> for T
 where
     T: BorrowMut<[u8]>,
 {
+    type WriteAsync<'f>
+        = impl TrMayCancel<'f, MayCancelOutput = SomeOf<BorrowedWriteSegm<'f, T>, BorrowedSliceError>>
+    where
+        Self: 'f;
     type SegmMut<'f>
         = BorrowedWriteSegm<'f, T>
     where
@@ -481,7 +495,7 @@ where
     fn write_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>>
+    ) -> Self::WriteAsync<'f>
     {
         let len = Borrow::<[u8]>::borrow(self).len();
         let min_len = demand.min().copied().unwrap_or(0);

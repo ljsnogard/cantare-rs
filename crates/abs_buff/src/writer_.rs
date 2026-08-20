@@ -10,9 +10,10 @@ use crate::{Demand, buffer::TrBuffSegmMut};
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffWrite<T = u8> {
-    type SegmMut<'f>: TrBuffSegmMut<'f, T>
-    where
-        Self: 'f;
+    type WriteAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>>
+        where Self: 'f;
+
+    type SegmMut<'f>: TrBuffSegmMut<'f, T> where Self: 'f;
     type Err: Error;
 
     /// Indicates whethe the buff will no longer accept data writing.
@@ -26,7 +27,7 @@ pub trait TrBuffWrite<T = u8> {
     fn write_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>>;
+    ) -> Self::WriteAsync<'f>;
 }
 
 pub trait TrBuffTryWrite<T = u8>: TrBuffWrite<T> {

@@ -252,8 +252,11 @@ mod tests_ {
     }
 
     impl<T> TrBuffRead<T> for TestRx<T> {
-        type SegmRef<'f>
-            = SegmRef<'f, T, SegmReclaim<'f>>
+        type ReadAsync<'f>
+            = ReadySegm<SegmRef<'f, T, SegmReclaim<'f>>, TestErr>
+        where
+            Self: 'f;
+        type SegmRef<'f> = SegmRef<'f, T, SegmReclaim<'f>>
         where
             Self: 'f;
         type Err = TestErr;
@@ -265,10 +268,7 @@ mod tests_ {
         fn read_async<'f>(
             &'f mut self,
             demand: &Demand<usize>,
-        ) -> impl TrMayCancel<
-            'f,
-            MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>,
-        > {
+        ) -> Self::ReadAsync<'f> {
             let mut take = demand.max().copied().unwrap_or(usize::MAX);
             if self.chunk > 0 {
                 take = core::cmp::min(take, self.chunk);
@@ -308,6 +308,10 @@ mod tests_ {
     }
 
     impl<T> TrBuffWrite<T> for TestTx<T> {
+        type WriteAsync<'f>
+            = ReadySegm<SegmMut<'f, T, SegmReclaim<'f>>, TestErr>
+        where
+            Self: 'f;
         type SegmMut<'f>
             = SegmMut<'f, T, SegmReclaim<'f>>
         where
@@ -321,10 +325,7 @@ mod tests_ {
         fn write_async<'f>(
             &'f mut self,
             demand: &Demand<usize>,
-        ) -> impl TrMayCancel<
-            'f,
-            MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>,
-        > {
+        ) -> Self::WriteAsync<'f> {
             let free = self.buff.len() - self.pos;
             if free == 0 {
                 return ReadySegm::new(SomeOf::new_right(TestErr::Blocked));

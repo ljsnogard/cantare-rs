@@ -7,12 +7,7 @@ use core::{
     ops::DerefMut,
 };
 
-use anylr::SomeOf;
-
-use abs_buff::{
-    x_deps::{anylr, abs_cancel},
-    Demand, TrBuffTryWrite, TrBuffWrite,
-};
+use abs_buff::{x_deps::anylr::SomeOf, Demand, TrBuffTryWrite, TrBuffWrite};
 
 use super::{
     error_::TxError,
@@ -141,7 +136,10 @@ where
         let ring = self.ring();
         let waiter = unsafe { &*self.waiter.get() };
         ring.deregister_tx_user(waiter);
-        ring.close_tx();
+        // 注意：drop 不置 TX_CLOSED。`TX_CLOSED` 是“写端显式关闭”的信号
+        // （`RingTx::close`），读者把它当作 EOF。若 drop 也置位，那么像
+        // `BufferedUnixStream` / kernel-handoff 这类“用户写端只是占位、真正的
+        // 写入方是后台任务”的场景，会在数据到来之前就把空 ring 误判为 EOF。
     }
 }
 
@@ -154,6 +152,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
+    type WriteAsync<'f> = WriteAsync<'f, H, B, T> where Self: 'f;
     type SegmMut<'a> = ReclSliceMut<'a, T> where Self: 'a;
     type Err = TxError<usize>;
 
@@ -166,9 +165,7 @@ where
     fn write_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl abs_cancel::TrMayCancel<'f, MayCancelOutput =
-        SomeOf<Self::SegmMut<'f>, Self::Err>>
-    {
+    ) -> Self::WriteAsync<'f> {
         RingTx::write_async(self, demand)
     }
 }

@@ -10,9 +10,11 @@ use crate::{Demand, buffer::TrBuffSegmRef};
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffRead<T = u8> {
-    type SegmRef<'f>: TrBuffSegmRef<'f, T>
-    where
-        Self: 'f;
+    type ReadAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>>
+        where Self: 'f;
+
+    type SegmRef<'f>: TrBuffSegmRef<'f, T> where Self: 'f;
+
     type Err: Error;
 
     /// Indicates whether this buff will no longer emits any data.
@@ -26,7 +28,7 @@ pub trait TrBuffRead<T = u8> {
     fn read_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>>;
+    ) -> Self::ReadAsync<'f>;
 }
 
 pub trait TrBuffTryRead<T = u8>: TrBuffRead<T> {

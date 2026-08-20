@@ -7,13 +7,10 @@ use core::{
     ops::DerefMut,
 };
 
-use anylr::SomeOf;
-
 use abs_buff::{
-    x_deps::{anylr, abs_cancel},
-    Demand, TrBuffPeek, TrBuffRead, TrBuffTryPeek, TrBuffTryRead,
+    x_deps::anylr::SomeOf, Demand, TrBuffPeek, TrBuffRead, TrBuffTryPeek,
+    TrBuffTryRead,
 };
-use abs_cancel::TrMayCancel;
 
 use super::{
     error_::RxError,
@@ -161,6 +158,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
+    type ReadAsync<'f> = ReadAsync<'f, H, B, T> where Self: 'f;
     type SegmRef<'a> = ReclSliceRef<'a, T> where Self: 'a;
     type Err = RxError<usize>;
 
@@ -173,9 +171,7 @@ where
     fn read_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl TrMayCancel<'f, MayCancelOutput =
-        SomeOf<Self::SegmRef<'f>, Self::Err>>
-    {
+    ) -> Self::ReadAsync<'f> {
         RingRx::read_async(self, demand)
     }
 }
@@ -217,14 +213,13 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
+    type PeekAsync<'f> = PeekAsync<'f, H, B, T> where Self: 'f;
     type SegmPeek<'a> = ReclPeekRef<'a, T> where Self: 'a;
     type Err = RxError<usize>;
 
     fn peek_async<'f>(
         &'f mut self,
-    ) -> impl abs_cancel::TrMayCancel<'f, MayCancelOutput =
-        SomeOf<Self::SegmPeek<'f>, Self::Err>>
-    {
+    ) -> Self::PeekAsync<'f> {
         PeekAsync::new(self)
     }
 }

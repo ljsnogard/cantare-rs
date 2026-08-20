@@ -12,7 +12,7 @@
 //! 当前物理段的一个子段，父段的 offset 在子段 drop 时累计，段整体 drop 时
 //! 按已消费量提交给 ring（逐段回收粒度）。
 
-use core::{mem::MaybeUninit, ops::Try, pin::Pin};
+use core::{mem::MaybeUninit, pin::Pin};
 
 use abs_buff::{
     Demand, buffer::{SegmMut, SegmReclaim, SegmRef, TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrReclaim}
@@ -24,6 +24,10 @@ use super::state_::RingCore;
 // ---------------------------------------------------------------------------
 // 物理空间的两段式表示
 // ---------------------------------------------------------------------------
+
+fn non_empty_slice<T>(s: &&[T]) -> bool {
+    !s.is_empty()
+}
 
 /// 写段持有的物理空间：一段连续，或两段连续（跨越缓冲区末端）。
 pub(super) enum SegmSlicesMut<'a, T> {
@@ -293,6 +297,14 @@ impl<'a, T> Drop for ReclSliceMut<'a, T> {
 }
 
 impl<'a, T> TrBuffSegmView for ReclSliceMut<'a, T> {
+    type SlicesIter<'f>
+        = core::iter::Filter<
+            core::array::IntoIter<&'f [MaybeUninit<T>], 2>,
+            fn(&&'f [MaybeUninit<T>]) -> bool,
+        >
+    where
+        Self: 'f,
+        T: 'f;
     type Item = MaybeUninit<T>;
 
     #[inline]
@@ -306,16 +318,23 @@ impl<'a, T> TrBuffSegmView for ReclSliceMut<'a, T> {
     }
 
     /// 剩余可写空间按物理段切出（最多两段，逻辑上是一段）；空段被过滤。
-    fn iter_slices(&self) -> impl IntoIterator<Item = &[Self::Item]> {
+    fn iter_slices(&self) -> Self::SlicesIter<'_> {
+        let filter: fn(&&[MaybeUninit<T>]) -> bool = non_empty_slice;
         self.pieces
             .remaining_ref(self.offset)
             .into_iter()
-            .filter(|s| !s.is_empty())
+            .filter(filter)
     }
 }
 
 impl<'a, T> TrBuffSegmMut<'a, T> for ReclSliceMut<'a, T> {
     type Reclaimer<'f> = ChildReclaim<'f> where Self: 'f;
+
+    type TakeSegmMut<'f>
+        = Option<SegmMut<'f, T, ChildReclaim<'f>>>
+    where
+        Self: 'f,
+        T: 'f;
 
     #[inline]
     fn as_segm_mut<'f>(&'f mut self) -> SegmMut<'f, T, Self::Reclaimer<'f>> {
@@ -326,7 +345,7 @@ impl<'a, T> TrBuffSegmMut<'a, T> for ReclSliceMut<'a, T> {
     fn take_segm_mut<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl Try<Output: TrBuffSegmMut<'f, T>> {
+    ) -> Self::TakeSegmMut<'f> {
         ReclSliceMut::take_segm_mut(self, demand)
     }
 }
@@ -429,6 +448,14 @@ impl<'a, T> Drop for ReclSliceRef<'a, T> {
 }
 
 impl<'a, T> TrBuffSegmView for ReclSliceRef<'a, T> {
+    type SlicesIter<'f>
+        = core::iter::Filter<
+            core::array::IntoIter<&'f [T], 2>,
+            fn(&&'f [T]) -> bool,
+        >
+    where
+        Self: 'f,
+        T: 'f;
     type Item = T;
 
     #[inline]
@@ -442,16 +469,23 @@ impl<'a, T> TrBuffSegmView for ReclSliceRef<'a, T> {
     }
 
     /// 剩余可读空间按物理段切出（最多两段，逻辑上是一段）；空段被过滤。
-    fn iter_slices(&self) -> impl IntoIterator<Item = &[Self::Item]> {
+    fn iter_slices(&self) -> Self::SlicesIter<'_> {
+        let filter: fn(&&[T]) -> bool = non_empty_slice;
         self.pieces
             .remaining_ref(self.offset)
             .into_iter()
-            .filter(|s| !s.is_empty())
+            .filter(filter)
     }
 }
 
 impl<'a, T> TrBuffSegmRef<'a, T> for ReclSliceRef<'a, T> {
     type Reclaimer<'f> = ChildReclaim<'f> where Self: 'f;
+
+    type TakeSegmRef<'f>
+        = Option<SegmRef<'f, T, ChildReclaim<'f>>>
+    where
+        Self: 'f,
+        T: 'f;
 
     #[inline]
     fn as_segm_ref<'f>(&'f mut self) -> SegmRef<'f, T, Self::Reclaimer<'f>> {
@@ -462,7 +496,7 @@ impl<'a, T> TrBuffSegmRef<'a, T> for ReclSliceRef<'a, T> {
     fn take_segm_ref<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl Try<Output: TrBuffSegmRef<'f, T>> {
+    ) -> Self::TakeSegmRef<'f> {
         ReclSliceRef::take_segm_ref(self, demand)
     }
 }

@@ -341,9 +341,10 @@ where
                 Ok((start, take)) => {
                     if take < this.min_len {
                         // 数据不足 demand 下限：
-                        // - 若 rx 已关闭（EOF），不会再有多余数据，返回现有部分；
+                        // - 若 tx 已关闭（写端 EOF）或 rx 已关闭，不会再有多余数据，
+                        //   返回现有部分；
                         // - 否则继续等待（等写者补充数据后由 waker 重新唤醒检查）。
-                        if ring.is_rx_closed() {
+                        if ring.is_tx_closed() || ring.is_rx_closed() {
                             this.park.deregister(ring);
                             return Poll::Ready(SomeOf::new_left(ring.read_segm(start, take)));
                         }
@@ -363,6 +364,15 @@ where
                     if this.cancel.is_cancelled() {
                         this.park.deregister(ring);
                         return Poll::Ready(SomeOf::new_right(RxError::Drained(0)));
+                    }
+                    // 写端（tx）已关闭且数据已读空：对读者而言这就是 EOF。
+                    // 必须在这里返回（而不是继续 park），否则一个停在空 ring 上
+                    // 的读者永远不会被写端关闭唤醒（channel 的 send pump 就因此
+                    // 挂死）。`try_read_at` 本身保持返回 `Drained` 不变，避免影响
+                    // 直接调用它的路径（kernel/unix_stream 的 iovec 直读）。
+                    if ring.is_tx_closed() || ring.is_rx_closed() {
+                        this.park.deregister(ring);
+                        return Poll::Ready(SomeOf::new_right(RxError::Closing));
                     }
                     if this.park.poll(cx, ring, this.min_len).is_pending() {
                         return Poll::Pending;

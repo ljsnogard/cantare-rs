@@ -10,9 +10,11 @@ use crate::buffer::TrBuffSegmRef;
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffPeek<T = u8> {
-    type SegmPeek<'f>: TrBuffSegmRef<'f, T>
-    where
-        Self: 'f;
+    type PeekAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmPeek<'f>, Self::Err>>
+        where Self: 'f;
+
+    type SegmPeek<'f>: TrBuffSegmRef<'f, T> where Self: 'f;
+
     type Err: Error;
 
     /// Lend some slices for peeking. The number and the length of the slices
@@ -22,7 +24,7 @@ pub trait TrBuffPeek<T = u8> {
     /// That means the call may result in more than one buffer available.
     fn peek_async<'f>(
         &'f mut self,
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmPeek<'f>, Self::Err>>;
+    ) -> Self::PeekAsync<'f>;
 }
 
 pub trait TrBuffTryPeek<T = u8>: TrBuffPeek<T> {

@@ -24,23 +24,27 @@ pub trait TrTelegraph {
     type Dock: TrDock;
     type Err: Error;
 
+    type SendAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<usize, Self::Err>>
+        where Self: 'f;
+
+    type RecvAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<usize, Self::Err>>
+        where Self: 'f;
+
     fn local_dock(&self) -> Self::Dock;
 
     fn send_async<'f, R>(
         &'f mut self,
         remote_dock: Self::Dock,
         packet: &mut R,
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<usize, Self::Err>>
-    where
-        R: TrBuffRead<Self::Data>;
+    ) -> Self::SendAsync<'f>
+        where R: TrBuffRead<Self::Data>;
 
     fn recv_async<'f, W>(
         &'f mut self,
         remote_dock: Self::Dock,
         buffer: &mut W,
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<usize, Self::Err>>
-    where
-        W: TrBuffWrite<Self::Data>;
+    ) -> Self::RecvAsync<'f>
+        where W: TrBuffWrite<Self::Data>;
 }
 
 pub trait TrChannel {
@@ -58,21 +62,25 @@ pub trait TrChannelHandle {
     type Dock: TrDock;
     type Err;
 
+    type AcceptAsync<'f>: TrMayCancel<'f, MayCancelOutput = Result<Self::Channel, Self::Err>>
+        where Self: 'f;
+
+    type RejectAsync<'f>: TrMayCancel<'f, MayCancelOutput = Result<usize, Self::Err>>
+        where Self: 'f;
+
     /// 向请求端发送同意建立 channel 的消息及欢迎信息
-    fn accept_async<'a, W>(
-        &'a mut self,
+    fn accept_async<'f, W>(
+        &'f mut self,
         welcome: &mut W,
-    ) -> impl TrMayCancel<'a, MayCancelOutput = Result<Self::Channel, Self::Err>>
-    where
-        W: TrBuffWrite;
+    ) -> Self::AcceptAsync<'f>
+        where W: TrBuffWrite;
 
     /// 向请求端发送拒绝建立 channel 的消息及理由
-    fn reject_async<'a, R>(
-        &'a mut self,
+    fn reject_async<'f, R>(
+        &'f mut self,
         reason: &mut R,
-    ) -> impl TrMayCancel<'a, MayCancelOutput = Result<usize, Self::Err>>
-    where
-        R: TrBuffRead;
+    ) -> Self::RejectAsync<'f>
+        where R: TrBuffRead;
 }
 
 pub trait TrChannelListener {

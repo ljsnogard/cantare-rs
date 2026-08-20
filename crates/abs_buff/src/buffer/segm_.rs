@@ -17,6 +17,7 @@ use crate::{Demand, io::{TrInput, TrOutput}};
 /// Represent a sequence of slices who are logically the same array but
 /// physically not.
 pub trait TrBuffSegmView {
+    type SlicesIter<'f>: IntoIterator<Item = &'f [Self::Item]> where Self: 'f;
     type Item: Sized;
 
     /// Returns true if no available items to consume, false otherwise.
@@ -29,7 +30,7 @@ pub trait TrBuffSegmView {
     fn least_count(&self) -> usize;
 
     /// Iterate the unconsumed parts of the segment slice by slice.
-    fn iter_slices(&self) -> impl IntoIterator<Item = &[Self::Item]>;
+    fn iter_slices(&self) -> Self::SlicesIter<'_>;
 }
 
 /// An instance to instantly tell the consumer usage of a buffer.
@@ -67,10 +68,14 @@ where
     ///
     /// The amount of the reducing will be the size of taken slice no matter if
     /// the items in it are actually moved or not. No drop. So this may leak.
+    type TakeSegmRef<'f>: Try<Output: TrBuffSegmRef<'f, T>>
+    where
+        Self: 'f;
+
     fn take_segm_ref<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl Try<Output: TrBuffSegmRef<'f, T>>;
+    ) -> Self::TakeSegmRef<'f>;
 
     /// To end the evaluation of recursive downcast from TrBuffSegmRef.
     /// A `SegmRef<T>` can move items to a `SegmMut<T>`.
@@ -136,10 +141,14 @@ where
     ///
     /// The amount of the reducing will be the size of taken slice no matter if
     /// the items in it are actually moved or not. No drop. So this may leak.
+    type TakeSegmMut<'f>: Try<Output: TrBuffSegmMut<'f, T>>
+    where
+        Self: 'f;
+
     fn take_segm_mut<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl Try<Output: TrBuffSegmMut<'f, T>>;
+    ) -> Self::TakeSegmMut<'f>;
 
     fn as_segm_mut<'f>(&'f mut self) -> SegmMut<'f, T, Self::Reclaimer<'f>>;
 
@@ -603,6 +612,7 @@ impl<'a, T, R> TrBuffSegmView for SegmRef<'a, T, R>
 where
     R: TrReclaim,
 {
+    type SlicesIter<'f> = Option<&'f [T]> where Self: 'f, T: 'f;
     type Item = T;
 
     #[inline]
@@ -616,7 +626,7 @@ where
     }
 
     #[inline]
-    fn iter_slices(&self) -> impl IntoIterator<Item = &[Self::Item]> {
+    fn iter_slices(&self) -> Self::SlicesIter<'_> {
         SegmRef::iter_slices(self)
     }
 }
@@ -630,11 +640,17 @@ where
     where
         Self: 'f;
 
+    type TakeSegmRef<'f>
+        = Option<SegmRef<'f, T, SegmReclaim<'f>>>
+    where
+        Self: 'f,
+        T: 'f;
+
     #[inline]
     fn take_segm_ref<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl Try<Output: TrBuffSegmRef<'f, T>> {
+    ) -> Self::TakeSegmRef<'f> {
         SegmRef::take_segm_ref(self, demand)
     }
 
@@ -652,6 +668,7 @@ impl<'a, T, R> TrBuffSegmView for SegmMut<'a, T, R>
 where
     R: TrReclaim,
 {
+    type SlicesIter<'f> = Option<&'f [MaybeUninit<T>]> where Self: 'f, T: 'f;
     type Item = MaybeUninit<T>;
 
     #[inline]
@@ -665,7 +682,7 @@ where
     }
 
     #[inline]
-    fn iter_slices(&self) -> impl IntoIterator<Item = &[Self::Item]> {
+    fn iter_slices(&self) -> Self::SlicesIter<'_> {
         SegmMut::iter_slices(self)
     }
 }
@@ -679,11 +696,17 @@ where
     where
         Self: 'f;
 
+    type TakeSegmMut<'f>
+        = Option<SegmMut<'f, T, SegmReclaim<'f>>>
+    where
+        Self: 'f,
+        T: 'f;
+
     #[inline]
     fn take_segm_mut<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl Try<Output: TrBuffSegmMut<'f, T>> {
+    ) -> Self::TakeSegmMut<'f> {
         SegmMut::take_segm_mut(self, demand)
     }
 

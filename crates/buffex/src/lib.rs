@@ -1,11 +1,5 @@
 #![no_std]
-
-// The ring-buffer segment types implement `TrBuffSegmRef` / `TrBuffSegmMut`,
-// whose signatures return `impl Try<...>`; the tests additionally use
-// `core::ops::Try` (e.g. the cancellation token in `tests_/pipe_retry_`).
-// Both need the `try_trait_v2` feature, so the flag applies to the whole
-// crate, tests included.
-#![feature(try_trait_v2)]
+#![cfg_attr(test, feature(try_trait_v2))]
 
 // We always pull in `std` during tests, because it's just easier
 // to write tests when you can assume you're on a capable platform

@@ -57,7 +57,7 @@ pub trait TrOutput<T = u8> {
     fn write_cloned_async<'a>(
         &'a mut self,
         source: &'a [T],
-    ) -> impl TrMayCancel<'a, MayCancelOutput = SomeOf<usize, Self::Err>>
+    ) -> Self::WriteAsync<'a>
     where
         T: Clone,
     {
@@ -74,19 +74,35 @@ pub trait TrOutput<T = u8> {
 }
 
 pub trait TrSink<T = u8> {
+    type WriteAsync<'f, TyBuff>: TrMayCancel<
+        'f,
+        MayCancelOutput: Try<Output = (usize, TyBuff)>,
+    >
+    where
+        Self: 'f,
+        TyBuff: Deref<Target: 'static + TrBuffer>;
+
     fn write_async<'f, TyBuff>(
         &'f mut self,
         source: TyBuff,
-    ) -> impl TrMayCancel<'f, MayCancelOutput: Try<Output = (usize, TyBuff)>>
+    ) -> Self::WriteAsync<'f, TyBuff>
     where
         TyBuff: Deref<Target: 'static + TrBuffer>;
 }
 
 pub trait TrFlux<T = u8> {
+    type ReadAsync<'f, TyBuffMut>: TrMayCancel<
+        'f,
+        MayCancelOutput: Try<Output = (usize, TyBuffMut)>,
+    >
+    where
+        Self: 'f,
+        TyBuffMut: DerefMut<Target: 'static + TrBufferMut>;
+
     fn read_async<'f, TyBuffMut>(
         &'f mut self,
         target: TyBuffMut,
-    ) -> impl TrMayCancel<'f, MayCancelOutput: Try<Output = (usize, TyBuffMut)>>
+    ) -> Self::ReadAsync<'f, TyBuffMut>
     where
         TyBuffMut: DerefMut<Target: 'static + TrBufferMut>;
 }

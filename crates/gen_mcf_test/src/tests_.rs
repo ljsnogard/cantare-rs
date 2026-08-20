@@ -1,12 +1,14 @@
 #[allow(dead_code)]
 mod tests_expanded_ {
     use abs_cancel::TrCancellationToken;
+    use gen_mcf_macro::gen_may_cancel_future;
 
     /// # Usage Rules:
     /// 0. Must be an `async fn`;
     /// 1. At least one lifetime and the last one must be for the cancellation token;
     /// 2. The last argument and generic parameter type must be the cancellation token type and constrained with: `TrCancellationToken`;
     /// 3. Use a where clause to constrain the cancel token type;
+    #[gen_may_cancel_future(DoThing)]
     pub async fn do_thing_async<'a, 'b, 'x, 'c, A, B, C>(
         a: &'a mut A,
         b: &'b mut B,
@@ -24,134 +26,6 @@ mod tests_expanded_ {
     {
         let _ = (a, b, l, x, cancel);
         42
-    }
-    pub struct DoThingAsync<'c, A, B>(
-        &'c mut A,
-        &'c mut B,
-        usize,
-        core::slice::Iter<'c, A>,
-    )
-    where
-        A: Send,
-        B: Sync;
-    pub struct DoThingFuture<'c, A, B, C>
-    where
-        A: Send,
-        B: Sync,
-        C: TrCancellationToken,
-    {
-        params_: ::core::mem::MaybeUninit<DoThingAsync<'c, A, B>>,
-        cancel_: &'c mut C,
-        future_: Option<
-            <DoThingFutureState<
-                'c,
-                A,
-                B,
-                C,
-            > as ::core::ops::AsyncFnOnce<()>>::CallOnceFuture,
-        >,
-    }
-    struct DoThingFutureState<'c, A, B, C>(
-        ::core::pin::Pin<&'c mut DoThingFuture<'c, A, B, C>>,
-    )
-    where
-        A: Send,
-        B: Sync,
-        C: TrCancellationToken;
-    impl<'c, A, B> ::core::future::IntoFuture for DoThingAsync<'c, A, B>
-    where
-        A: Send,
-        B: Sync,
-    {
-        type IntoFuture = DoThingFuture<'c, A, B, abs_cancel::NonCancellableToken>;
-        type Output = usize;
-        fn into_future(self) -> Self::IntoFuture {
-            DoThingFuture {
-                params_: ::core::mem::MaybeUninit::new(self),
-                cancel_: abs_cancel::NonCancellableToken::shared_mut(),
-                future_: Option::None,
-            }
-        }
-    }
-    impl<'c, A, B> abs_cancel::TrMayCancel<'c> for DoThingAsync<'c, A, B>
-    where
-        A: Send,
-        B: Sync,
-    {
-        type MayCancelFuture<'cancel_, C> = DoThingFuture<'c, A, B, C>
-        where
-            Self: 'cancel_,
-            C: abs_cancel::TrCancellationToken + Clone,
-            C: 'c,
-            C: 'cancel_,
-            'cancel_: 'c;
-        type MayCancelOutput = usize;
-        fn may_cancel_with<'cancel_, C: abs_cancel::TrCancellationToken + Clone>(
-            self,
-            cancel: &'cancel_ mut C,
-        ) -> Self::MayCancelFuture<'cancel_, C>
-        where
-            Self: 'cancel_,
-            // 与 `abs_cancel::TrMayCancel::may_cancel_with` 的 `'f: 'a` 约束对应。
-            'cancel_: 'c,
-        {
-            DoThingFuture {
-                params_: ::core::mem::MaybeUninit::new(self),
-                cancel_: cancel,
-                future_: Option::None,
-            }
-        }
-    }
-    impl<'c, A, B, C> ::core::future::Future for DoThingFuture<'c, A, B, C>
-    where
-        A: Send,
-        B: Sync,
-        C: TrCancellationToken,
-    {
-        type Output = usize;
-        fn poll(
-            self: ::core::pin::Pin<&mut Self>,
-            cx: &mut ::core::task::Context<'_>,
-        ) -> ::core::task::Poll<Self::Output> {
-            let mut this = unsafe {
-                let p = self.get_unchecked_mut();
-                ::core::ptr::NonNull::new_unchecked(p)
-            };
-            loop {
-                let mut fut_field_ptr = unsafe {
-                    let ptr = &mut this.as_mut().future_;
-                    ::core::ptr::NonNull::new_unchecked(ptr)
-                };
-                let opt_fut = unsafe { fut_field_ptr.as_mut() };
-                if let Option::Some(fut) = opt_fut {
-                    let fut_pin = unsafe { ::core::pin::Pin::new_unchecked(fut) };
-                    break fut_pin.poll(cx);
-                } else {
-                    let state = DoThingFutureState(unsafe {
-                        ::core::pin::Pin::new_unchecked(this.as_mut())
-                    });
-                    let fut = AsyncFnOnce::async_call_once(state, ());
-                    let fut_field_mut = unsafe { fut_field_ptr.as_mut() };
-                    *fut_field_mut = Option::Some(fut);
-                }
-            }
-        }
-    }
-    impl<'c, A, B, C> ::core::ops::AsyncFnOnce<()> for DoThingFutureState<'c, A, B, C>
-    where
-        A: Send,
-        B: Sync,
-        C: TrCancellationToken,
-    {
-        type Output = usize;
-        type CallOnceFuture = impl ::core::future::Future<Output = Self::Output>;
-        extern "rust-call" fn async_call_once(self, _: ()) -> Self::CallOnceFuture {
-            let f = unsafe { self.0.get_unchecked_mut() };
-            let DoThingAsync::<'c, A, B>(p0, p1, p2, p3) = unsafe {
-                f.params_.assume_init_read()
-            };
-            self::do_thing_async(p0, p1, p2, p3, f.cancel_)
-        }
     }
 }
 
