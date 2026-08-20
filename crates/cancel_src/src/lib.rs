@@ -497,6 +497,8 @@ impl fmt::Debug for CancellationToken {
 
 #[cfg(not(feature = "allocator_api"))]
 impl TrCancellationToken for CancellationToken {
+    type Cancellation = Receiver<()>;
+
     #[inline]
     fn is_cancelled(&self) -> bool {
         CancellationToken::is_cancelled(self)
@@ -514,7 +516,7 @@ impl TrCancellationToken for CancellationToken {
     }
 
     #[inline]
-    fn cancellation(&mut self) -> impl IntoFuture {
+    fn cancellation(&mut self) -> Self::Cancellation {
         CancellationToken::cancellation(self)
     }
 }

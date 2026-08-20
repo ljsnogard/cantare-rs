@@ -38,6 +38,8 @@ impl FlagToken {
 }
 
 impl TrCancellationToken for FlagToken {
+    type Cancellation = core::future::Pending<()>;
+
     fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed)
     }
@@ -47,7 +49,7 @@ impl TrCancellationToken for FlagToken {
     fn try_spawn_child_token(&mut self) -> impl core::ops::Try<Output: TrCancellationToken> {
         Option::Some(self.clone())
     }
-    fn cancellation(&mut self) -> impl core::future::IntoFuture {
+    fn cancellation(&mut self) -> Self::Cancellation {
         core::future::pending::<()>()
     }
 }
