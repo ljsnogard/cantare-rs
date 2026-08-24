@@ -7,6 +7,7 @@
 extern crate std;
 
 pub mod ring_buffer;
+pub mod circular_buff;
 
 pub mod x_deps {
     pub use abs_buff;
