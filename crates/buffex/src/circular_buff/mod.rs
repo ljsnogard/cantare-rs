@@ -54,27 +54,34 @@
 //! ## 设计要点一：hook 对调用者透明
 //!
 //! 核心内部使用哪个 hook（被动=唤醒，主动=搬运）是构建期由 [`builder`]
-//! 决定并隐藏的，**不通过 `CircularBuff` 的泛型参数
-//! 暴露**，调用者也不参与构造。对四种模式组合，`CircularBuff` 都是同一个类型
-//! `CircularBuff<'a, T>`（`T` 默认 `u8`），只有 `'a` 一个生命周期参数。
+//! 决定并隐藏的，**不通过 `CircularBuff` 的泛型参数暴露**，调用者也不参与构造。
+//! `CircularBuff<'a, P, C, B, T>` 的类型参数是**端类型**（`P` / `C`，决定
+//! 可访问性）与**存储**（`B`），它们不是 hook——hook 完全在内部。
 //!
 //! ## 设计要点二：主动端不对外暴露（占位类型）
 //!
 //! 模式对调用者唯一可见的影响是**可访问性**：使用了主动模式的那一端由设备驱动，
 //! 不可能再让外部调用者访问——例如主动消费端不会再提供任何有实际效果的
-//! `TrBuffTryRead` 实现。因此 `CircularBuff` 的对外接口（类似
+//! `TrBuffTryRead` 实现。因此主动端的**端类型**是占位类型
+//! （[`DeviceProducer`] / [`DeviceConsumer`]，见 [`TrProducer`] / [`TrConsumer`]
+//! 的文档：`try_as_buff` 永远返回错误），而不是一个可用的半部。这对应了
+//! `RingBuffer` 中「半部不存在」（
 //! [`RingBuffer::try_split_io`](crate::ring_buffer::TrRingBuffer::try_split_io)
-//! 的拆分）对主动端返回**占位类型**（[`TxPlaceholder`] / [`RxPlaceholder`]），
-//! 而不是一个可用的半部：接口形状保持统一（永远返回两端），但主动端拿到的是
-//! 「无实际效果」的占位。这对应了 `RingBuffer` 中「半部不存在」
-//! （`try_split_io` 返回 `None`）的情形，只是用占位类型而非 `Option` 来表达。
+//! 返回 `None`）的情形，只是用占位类型而非 `Option` 来表达。
+//!
+//! 占位类型在泛型参数中**携带设备的实际类型**（`DeviceProducer<TyInput, T>` /
+//! `DeviceConsumer<TyOutput, T>`），核心通过
+//! [`TrDeviceProducer`]::`InputDevice` / [`TrDeviceConsumer`]::`OutputDevice`
+//! 的关联类型取回设备类型——因此**无需任何类型擦除**（`TrInput` 带泛型关联
+//! 类型、不能直接 `dyn`）即可在内部持有设备。
 //!
 //! ## 设计要点三：存储统一为 `[MaybeUninit<T>]`
 //!
 //! 与 `RingBuffer` 的设计理念不同，这里**不引入** `RingStorage` 之类的存储抽象
-//! 来兼容支持其他可能的缓冲区存储类型。环形缓冲器内部一律把缓冲区视为
-//! `[MaybeUninit<T>]`（`T` 默认 `u8`），内存由调用者在构建时以
-//! `&'a mut [MaybeUninit<T>]` 提供（`no_std`、无 alloc，借用而非拥有）。
+//! 层。`B` 只要求 `BorrowMut<[MaybeUninit<T>]>`（能提供 `&mut [MaybeUninit<T>]`
+//! 视图），内部一律以 `[MaybeUninit<T>]` 视图操作缓冲区（`T` 默认 `u8`），内存
+//! 由调用者在构建时以 `&'a mut [MaybeUninit<T>]` 提供（`no_std`、无 alloc，
+//! 借用而非拥有）。
 //!
 //! # 主动模式的同步驱动（不 spawn，无运行时依赖）
 //!
@@ -127,43 +134,50 @@
 //!
 //! // 主动生产 × 被动消费：从 TrInput 自动灌入，用户自行读取
 //! let buff = CircularBuffBuilder::with_capacity(4096)
-//!     .producer_active(&mut input)
+//!     .pipe_from_input(&mut input)   // 生产端：TrInput 管道进缓冲（对外不可访问）
 //!     .consumer_passive()
 //!     .build(&mut storage)?;
-//! // 读取端可用（TrBuffTryRead）；生产端对外是 TxPlaceholder（无实际效果）。
 //!
 //! // 被动生产 × 主动消费：用户自行写入，写后自动搬运到 TrOutput
 //! let buff = CircularBuffBuilder::with_capacity(4096)
 //!     .producer_passive()
-//!     .consumer_active(&mut output)
+//!     .pipe_into_output(&mut output) // 消费端：缓冲管道进 TrOutput（对外不可访问）
 //!     .build(&mut storage)?;
 //!
 //! // 主动 × 主动：TrInput → 缓冲 → TrOutput 自动流水线（两端都不可直接访问）
 //! let buff = CircularBuffBuilder::with_capacity(4096)
-//!     .producer_active(&mut input)
-//!     .consumer_active(&mut output)
+//!     .pipe_from_input(&mut input)
+//!     .pipe_into_output(&mut output)
 //!     .build(&mut storage)?;
 //! ```
 //!
 //! 构建器用类型状态（type-state）编码强制「两端模式必须在构建期决定」：
 //! `CircularBuffBuilder` → `ProducerSetBuilder` → `ReadyBuilder`，漏设一端无法
-//! 编译。构建完成后，模式与设备被**擦除**进 `CircularBuff` 的内部状态
-//! （hook），`CircularBuff` 本身的类型对四种组合是统一的。
+//! 编译。构建完成后，端类型（`P` / `C`）被确定（被动=可访问半部，主动=占位
+//! 类型），hook 在内部挂载。
+//!
+//! 注意：以上示例展示了 API 形状；端类型（[`DeviceProducer`] /
+//! [`DeviceConsumer`] / [`PassiveProducer`] / [`PassiveConsumer`]）对
+//! [`TrProducer`] / [`TrConsumer`] 的实现随核心一起落地，在此之前 `.build()`
+//! 的返回类型约束无法被满足（示例因此保持 `ignore`）。
 //!
 //! # 核心实现（进行中）
 //!
-//! 环形核心状态机、hook 槽位的挂载与触发、主动 pump 的同步驱动目前只有类型
-//! 骨架（见 [`CircularBuff`] 与 [`TxPlaceholder`] / [`RxPlaceholder`]），
-//! `builder` 的 `build` 中留了 `todo!()`。待定的具体细节：
+//! 环形核心状态机、hook 槽位的挂载与触发、主动 pump 的同步驱动、以及端类型的
+//! trait 实现目前只有类型骨架（见 [`CircularBuff`] 与 [`DeviceProducer`] /
+//! [`DeviceConsumer`] / [`PassiveProducer`] / [`PassiveConsumer`]），`builder`
+//! 的 `build` 中留了 `todo!()`。待定的具体细节：
 //!
 //! * 容量校验（`2..=MAX_CAPACITY`，与 `ring_buffer` 的上限对齐）；
-//! * 主动端设备的**类型擦除**机制（`TrInput` / `TrOutput` 带泛型关联类型，不能
-//!   直接做 `dyn`；候选：手动 vtable 结构体（设备裸指针 + 单态化的泵函数指针）、
-//!   或单线程专用的 `UnsafeCell` 持有，以及相应的 `Send` / `Sync` 取舍）；
+//! * 端类型对 `TrProducer` / `TrConsumer` / `TrDeviceProducer` /
+//!   `TrDeviceConsumer` 的实现（`try_as_buff` 的占位语义已写进 [`TrProducer`] /
+//!   [`TrConsumer`] 的文档：主动端永远返回错误），以及被动端的真实半部类型
+//!   （借用环形核心、实现 `TrBuffTryWrite` / `TrBuffTryRead`）与错误类型；
+//! * 核心如何经 `P::InputDevice` / `C::OutputDevice`（关联类型）持有并驱动设备，
+//!   以及 `T ≠ u8` 与主动模式（设备为 u8）的组合如何处理；
 //! * 被动模式的等待接口形态（future + parker，复用 `ring_buffer` 的
 //!   `DemandSlot` 思路还是独立的槽位）；
-//! * 对外拆分接口的形状（返回可用半部 / 占位类型，以及占位类型是否实现
-//!   `TrBuffTryWrite` / `TrBuffTryRead` 的永远失败 stub）；
+//! * 对外拆分接口的形状（返回可用半部 / 占位类型）；
 //! * pump 的标志位与 `drive()` 循环的具体布局；
 //! * 关闭 / 错误传播（EOF、设备错误如何跨过 hook 通知对端）。
 //!
@@ -179,5 +193,8 @@ mod circ_buff_;
 
 pub mod builder;
 
+pub use abs_::{TrConsumer, TrDeviceConsumer, TrDeviceProducer, TrObserver, TrProducer};
 pub use builder::{CircularBuffBuilder, ProducerSetBuilder, ReadyBuilder};
-pub use circ_buff_::{CircularBuff, DeviceConsumer, DeviceProducer};
+pub use circ_buff_::{
+    CircularBuff, DeviceConsumer, DeviceProducer, PassiveConsumer, PassiveProducer,
+};
