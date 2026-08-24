@@ -1,0 +1,242 @@
+//! `CircularBuff` 的测试模块。
+//!
+//! * [`sync_`]——被动 × 被动：读写往返、`Demand` 语义、跨末端环绕、异步等待；
+//! * [`pump_`]——主动模式：输入泵、输出泵、全主动流水线；
+//! * [`hook_`]——关闭 / EOF 事件与被动唤醒。
+//!
+//! 本文件提供测试共用的辅助：测试设备（[`TestInput`] / [`TestOutput`]）、
+//! 段操作（[`fill_segm`] / [`take_segm`]）、存储构造与最小执行器。
+
+mod hook_;
+mod pump_;
+mod sync_;
+
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll, Waker, Wake},
+    vec::Vec,
+};
+
+use core::{fmt, mem::MaybeUninit, pin::Pin};
+
+use abs_buff::{
+    io::{TrInput, TrOutput},
+    x_deps::{
+        abs_cancel::{TrCancellationToken, TrMayCancel},
+        anylr::SomeOf,
+    },
+};
+
+use super::segm_::{RdSegm, WrSegm};
+
+// ---------------------------------------------------------------------------
+// 测试设备（TrInput / TrOutput）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Boom 仅作为错误类型存在，测试设备从不真的失败
+pub(super) enum TestErr {
+    Boom,
+}
+
+impl fmt::Display for TestErr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TestErr::Boom => write!(f, "boom"),
+        }
+    }
+}
+
+impl core::error::Error for TestErr {}
+
+/// 一个立即就绪的 `TrMayCancel` future（测试设备的异步操作返回它）。
+pub(super) struct ReadySegm<S, E>(Option<SomeOf<S, E>>);
+
+impl<S, E> ReadySegm<S, E> {
+    fn new(value: SomeOf<S, E>) -> Self {
+        ReadySegm(Option::Some(value))
+    }
+}
+
+impl<S, E> core::future::Future for ReadySegm<S, E> {
+    type Output = SomeOf<S, E>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        Poll::Ready(this.0.take().expect("ready future polled once"))
+    }
+}
+
+impl<'f, S: 'f, E: 'f> TrMayCancel<'f> for ReadySegm<S, E> {
+    type MayCancelFuture<'g, C> = ReadySegm<S, E>
+    where
+        Self: 'g,
+        C: TrCancellationToken + Clone,
+        C: 'f,
+        C: 'g,
+        'g: 'f;
+    type MayCancelOutput = SomeOf<S, E>;
+
+    fn may_cancel_with<'g, C>(
+        self,
+        _cancel: &'g mut C,
+    ) -> Self::MayCancelFuture<'g, C>
+    where
+        Self: 'g,
+        'g: 'f,
+        C: TrCancellationToken + Clone,
+    {
+        self
+    }
+}
+
+/// 测试输入设备：内部数据与读取位置放在 `Arc` 里，**设备被缓冲借用期间**，
+/// 测试仍能通过自己持有的 `Arc` 观察进度（`&mut input` 的借用不允许直接
+/// 读取字段）。
+pub(super) struct TestInput {
+    pub data: Arc<Mutex<Vec<u8>>>,
+    pub pos: Arc<AtomicUsize>,
+}
+
+impl TestInput {
+    pub fn new(data: Vec<u8>) -> Self {
+        TestInput {
+            data: Arc::new(Mutex::new(data)),
+            pos: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl TrInput<u8> for TestInput {
+    type ReadAsync<'f> = ReadySegm<usize, TestErr> where Self: 'f;
+    type Err = TestErr;
+
+    fn read_async<'f>(
+        &'f mut self,
+        target: &'f mut [MaybeUninit<u8>],
+    ) -> Self::ReadAsync<'f> {
+        let data = self.data.lock().unwrap();
+        let pos = self.pos.load(Ordering::Relaxed);
+        let n = core::cmp::min(target.len(), data.len() - pos);
+        for (i, slot) in target[..n].iter_mut().enumerate() {
+            *slot = MaybeUninit::new(data[pos + i]);
+        }
+        self.pos.store(pos + n, Ordering::Relaxed);
+        ReadySegm::new(SomeOf::new_left(n))
+    }
+}
+
+/// 测试输出设备：收下的数据放在 `Arc` 里，测试可随时观察。
+pub(super) struct TestOutput {
+    pub data: Arc<Mutex<Vec<u8>>>,
+}
+
+impl TestOutput {
+    pub fn new() -> Self {
+        TestOutput {
+            data: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl TrOutput<u8> for TestOutput {
+    type WriteAsync<'f> = ReadySegm<usize, TestErr> where Self: 'f;
+    type Err = TestErr;
+
+    fn write_async<'f>(
+        &'f mut self,
+        source: &'f [MaybeUninit<u8>],
+    ) -> Self::WriteAsync<'f> {
+        let n = source.len();
+        let mut data = self.data.lock().unwrap();
+        for m in source {
+            // SAFETY: 测试数据为 u8，无 drop 需求。
+            data.push(unsafe { m.assume_init_read() });
+        }
+        ReadySegm::new(SomeOf::new_left(n))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 段操作辅助
+// ---------------------------------------------------------------------------
+
+/// 把 `data` 全部写入写段（经 `move_items_from_buff`，u8 位拷贝）。
+pub(super) fn fill_segm(segm: &mut WrSegm<'_, u8>, data: &[u8]) {
+    assert!(
+        data.len() <= segm.least_count(),
+        "fill: len({}) > segm({})",
+        data.len(),
+        segm.least_count()
+    );
+    let mut staging: Vec<MaybeUninit<u8>> = data.iter().map(|&b| MaybeUninit::new(b)).collect();
+    // SAFETY: 测试数据为 u8，位拷贝搬入段中，staging 无剩余需 drop 的内容。
+    let moved = unsafe { abs_buff::buffer::TrBuffSegmMut::move_items_from_buff(segm, &mut staging) };
+    assert_eq!(moved, data.len());
+}
+
+/// 从读段取出 `len` 个单元（经 `move_items_to_buff`）；段 drop 时读位置
+/// 推进 `len`。
+pub(super) fn take_segm(segm: &mut RdSegm<'_, u8>, len: usize) -> Vec<u8> {
+    assert!(
+        len <= segm.least_count(),
+        "take: len({}) > segm({})",
+        len,
+        segm.least_count()
+    );
+    let mut dst: Vec<MaybeUninit<u8>> = Vec::with_capacity(len);
+    dst.resize(len, MaybeUninit::uninit());
+    // SAFETY: 测试数据为 u8，位拷贝搬出安全。
+    let moved = unsafe { abs_buff::buffer::TrBuffSegmRef::move_items_to_buff(segm, &mut dst) };
+    assert_eq!(moved, len);
+    dst.into_iter()
+        .map(|m| unsafe { m.assume_init() })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// 存储与构建辅助
+// ---------------------------------------------------------------------------
+
+/// 创建 `N` 个未初始化槽位的 `[MaybeUninit<u8>; N]`（测试用存储）。
+pub(super) fn storage<const N: usize>() -> [MaybeUninit<u8>; N] {
+    [MaybeUninit::uninit(); N]
+}
+
+// ---------------------------------------------------------------------------
+// 最小执行器（异步等待测试用）
+// ---------------------------------------------------------------------------
+
+/// 测试 waker：唤醒时置位一个 `AtomicBool`。
+pub(super) struct TestWaker(Arc<AtomicBool>);
+
+impl TestWaker {
+    /// 创建 waker 与其唤醒标志（测试轮询后检查标志以确认被唤醒）。
+    pub(super) fn new() -> (Waker, Arc<AtomicBool>) {
+        let flag = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TestWaker(flag.clone())));
+        (waker, flag)
+    }
+}
+
+impl Wake for TestWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// 轮询一次 future：返回其 `Poll` 结果（配合 [`TestWaker`] 检查唤醒）。
+pub(super) fn poll_once<F: core::future::Future>(
+    fut: Pin<&mut F>,
+    waker: &Waker,
+) -> Poll<F::Output> {
+    let mut cx = Context::from_waker(waker);
+    fut.poll(&mut cx)
+}

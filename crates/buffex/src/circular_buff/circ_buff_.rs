@@ -1,177 +1,363 @@
-//! `CircularBuff` 的核心类型骨架。
+//! `CircularBuff` 的类型与**公开 API**（集中在本文件）。
 //!
 //! 完整的设计与使用思路见 [`crate::circular_buff`] 的模块文档。
 //!
-//! 当前这里只承载**类型签名**，核心状态机、hook 槽位、主动 pump、以及端
-//! （`TrProducer` / `TrConsumer`）的实现均未落地：
+//! 结构说明：
 //!
-//! * 环形核心状态机（rp / wp / 容量、原子推进、关闭标志）——未实现；
-//! * hook 槽位的挂载与触发逻辑——未实现；
-//! * 主动模式下的同步搬运（pump，poll-to-completion）——未实现；
-//! * 四个端类型（[`DeviceProducer`] / [`DeviceConsumer`] / [`PassiveProducer`] /
-//!   [`PassiveConsumer`]）对 [`TrProducer`] / [`TrConsumer`] 的实现——未实现，
-//!   随核心一起落地。
-//!
-//! 这些都属于 [`crate::circular_buff::builder`] 的 `build` 路径负责的部分，
-//! 目前以 `todo!()` 占位。
+//! * `CircularBuff<'a, P, C, B, T>`——环形缓冲器本体。`P` / `C` 是**端类型**
+//!   （角色标记：被动=可访问，主动=占位），`B` 是存储拥有者，`T` 是元素类型；
+//! * 四个端类型（[`PassiveProducer`] / [`PassiveConsumer`] /
+//!   [`DeviceProducer`] / [`DeviceConsumer`]）——构建期由 builder 选定的角色
+//!   标记，实现 `TrProducer` / `TrConsumer` 以满足 `CircularBuff` 的类型约束；
+//!   **真实的访问入口是 `CircularBuff` 本身**（`try_as_buff` / `try_split_io`），
+//!   主动端返回错误 / `None`（不对外暴露）。
 
-use core::{
-    borrow::BorrowMut,
-    marker::PhantomData,
-    mem::MaybeUninit,
-};
+use core::{borrow::BorrowMut, marker::PhantomData, mem::MaybeUninit};
 
 use abs_buff::io::{TrInput, TrOutput};
 
-use super::abs_::{TrConsumer, TrProducer};
+use super::{
+    abs_::{TrConsumer, TrDeviceConsumer, TrDeviceProducer, TrObserver, TrProducer},
+    core_::RingCore,
+    error_::EndError,
+    half_::{ConsumerHalf, ProducerHalf},
+};
 
-/// 构建期对**生产端**「模式 + 设备」的配置（仅构建流程内部使用）。
+// ---------------------------------------------------------------------------
+// 端类型（角色标记）
+// ---------------------------------------------------------------------------
+
+/// 被动生产端的端类型（角色标记，零大小）。
 ///
-/// # 设计要点：hook 对调用者透明
-///
-/// 调用者只通过
-/// [`CircularBuffBuilder::producer_passive`](crate::circular_buff::builder::CircularBuffBuilder::producer_passive)
-/// / [`pipe_from_input`](crate::circular_buff::builder::CircularBuffBuilder::pipe_from_input)
-/// 选择模式并提供设备。本类型只在构建流程内部传递，`build` 时被挂载进
-/// [`CircularBuff`] 的内部状态——**hook 不会出现在 `CircularBuff` 的泛型参数里**，
-/// 调用者既看不到、也不参与构造 hook。
-// 骨架阶段：`build` 尚未实现，变体字段暂时只被搬运、不被读取；
-// 核心落地后（build 真正读取配置并挂载设备）即可移除。
-#[allow(dead_code)]
-pub(super) enum ProducerConfig<'a, I> {
-    /// 被动生产：调用者通过 `TrBuffTryWrite` 自行决定何时写入。
-    Passive,
-    /// 主动生产：构造后立即（并在每次消费端读取、释放可写空间后）
-    /// 从该输入设备抽取数据填充缓冲。
-    Active(&'a mut I),
+/// 该标记只表达「生产端为被动模式」这一类型信息。真实的写半部经
+/// [`CircularBuff::try_as_buff`]（`TrProducer`）或 [`CircularBuff::try_split_io`]
+/// 获得；标记自身的 `TrProducer` 实现不提供半部（见其文档）。
+pub struct PassiveProducer<T = u8> {
+    _marker: PhantomData<fn() -> T>,
 }
 
-/// 构建期对**消费端**「模式 + 设备」的配置（仅构建流程内部使用）。
-///
-/// 同 [`ProducerConfig`]：hook 对调用者透明，只在构建流程内部传递。
-// 骨架阶段：见 [`ProducerConfig`] 的说明。
-#[allow(dead_code)]
-pub(super) enum ConsumerConfig<'a, O> {
-    /// 被动消费：调用者通过 `TrBuffTryRead` 自行决定何时读取。
-    Passive,
-    /// 主动消费：一旦有数据写入缓冲区，立即搬运到该输出设备。
-    Active(&'a mut O),
+/// 被动消费端的端类型（角色标记，零大小）。见 [`PassiveProducer`]。
+pub struct PassiveConsumer<T = u8> {
+    _marker: PhantomData<fn() -> T>,
 }
 
-/// 主动生产端对外不可访问时的**占位类型**（写半部）。
+/// 主动生产端的**占位类型**（角色标记，零大小）：携带输入设备的实际类型
+/// `TyInput`。
 ///
 /// # 设计要点：主动端不对外暴露
 ///
-/// 使用了主动模式的那一端由设备驱动，不可能再让外部调用者访问：主动生产端
-/// 不会再提供任何有实际效果的 `TrBuffTryWrite` 实现。因此 `CircularBuff` 的
-/// 对外接口（类似
-/// [`RingBuffer::try_split_io`](crate::ring_buffer::TrRingBuffer::try_split_io)
-/// 的拆分）对主动端返回本占位类型，而不是一个可用的写半部——接口形状保持统一
-/// （永远返回两端），但主动端拿到的是「无实际效果」的占位。这也对应了
-/// `RingBuffer` 中「写半部不存在」（`try_split_io` 返回 `None`）的情形，只是用
-/// 占位类型而非 `Option` 来表达。
-///
-/// # 设备类型的携带
-///
-/// 泛型参数 `TyInput` 携带输入设备的**实际类型**（`TrInput`，默认 `u8`），
-/// `T` 是缓冲区元素类型。核心通过
-/// [`TrDeviceProducer`](crate::circular_buff::TrDeviceProducer) 的关联类型
-/// `InputDevice` 从 `P` 中取回设备类型，从而**无需任何类型擦除**（`TrInput`
-/// 带泛型关联类型、不能直接 `dyn`）即可在内部持有设备。
-///
-/// `DeviceProducer` 的 `TrProducer` 实现（`try_as_buff` 永远返回错误，见
-/// [`TrProducer`] 的文档）随核心实现一起落地，当前仅作为类型存在。
+/// 主动生产端由输入设备驱动，不可能再让外部调用者访问：其 `TrProducer`
+/// 实现（`try_as_buff`）**永远返回错误**。`TyInput` 经
+/// [`TrDeviceProducer`] 的关联类型 `InputDevice` 携带设备类型，核心据此在
+/// 内部持有设备（无需类型擦除之外的泛型参数）。
 pub struct DeviceProducer<TyInput, T>
 where
-    TyInput: TrInput,
+    TyInput: TrInput<T>,
 {
-    _marker: PhantomData<fn() -> T>,
     _input: PhantomData<TyInput>,
+    _marker: PhantomData<fn() -> T>,
 }
 
-/// 主动消费端对外不可访问时的**占位类型**（读半部）。
-///
-/// 同 [`DeviceProducer`]：主动消费端由输出设备驱动，不再提供任何有实际效果的
-/// `TrBuffTryRead` 实现，对外接口对主动消费端返回本占位类型。`TyOutput`
-/// 携带输出设备的实际类型（`TrOutput`，默认 `u8`），核心通过
-/// [`TrDeviceConsumer`](crate::circular_buff::TrDeviceConsumer) 的关联类型
-/// `OutputDevice` 取回设备类型，无需类型擦除。
-///
-/// `DeviceConsumer` 的 `TrConsumer` 实现（`try_as_buff` 永远返回错误）随核心
-/// 实现一起落地，当前仅作为类型存在。
+/// 主动消费端的**占位类型**（角色标记，零大小）：携带输出设备的实际类型
+/// `TyOutput`。其 `TrConsumer` 实现（`try_as_buff`）永远返回错误。
 pub struct DeviceConsumer<TyOutput, T>
 where
-    TyOutput: TrOutput,
+    TyOutput: TrOutput<T>,
 {
-    _marker: PhantomData<fn() -> T>,
     _output: PhantomData<TyOutput>,
+    _marker: PhantomData<fn() -> T>,
 }
 
-/// 被动生产端的类型骨架（对外可访问的写半部）。
-///
-/// 被动模式的生产端由调用者通过 `TrBuffTryWrite` 驱动。实现 `TrProducer<T>`：
-/// `try_as_buff` 返回可用的写半部。真正的半部类型（借用环形核心、实现
-/// `TrBuffTryWrite`）随核心实现落地，当前仅作为类型占位。
-pub struct PassiveProducer<'a, T = u8> {
-    _marker: PhantomData<&'a mut [MaybeUninit<T>]>,
-}
+// ---------------------------------------------------------------------------
+// CircularBuff
+// ---------------------------------------------------------------------------
 
-/// 被动消费端的类型骨架（对外可访问的读半部）。
-///
-/// 被动模式的消费端由调用者异步等待就绪的缓冲区后自行读取。实现
-/// `TrConsumer<T>`：`try_as_buff` 返回可用的读半部（随核心实现落地），
-/// 当前仅作为类型占位。
-pub struct PassiveConsumer<'a, T = u8> {
-    _marker: PhantomData<&'a mut [MaybeUninit<T>]>,
-}
-
-/// 唤醒式环形缓冲器 `CircularBuff` 的类型骨架。
+/// 唤醒式环形缓冲器：构造期定「模式与用途」，核心机制与 hook 见模块文档。
 ///
 /// # 泛型参数
 ///
-/// * `'a`——内部缓冲区（以及被动半部、主动端设备）的借用期；
-/// * `P`——**生产端类型**：被动 = [`PassiveProducer`]，主动 = [`DeviceProducer`]；
-///   实现 `TrProducer<T>`；
-/// * `C`——**消费端类型**：被动 = [`PassiveConsumer`]，主动 = [`DeviceConsumer`]；
-///   实现 `TrConsumer<T>`；
-/// * `B`——内部缓冲区拥有者（实践中为 `&'a mut [MaybeUninit<T>]`），只要求
-///   能通过 `BorrowMut` 提供 `&mut [MaybeUninit<T>]` 视图；
+/// * `'a`——内部缓冲区（以及主动端设备）的借用期；
+/// * `P`——生产端类型：被动 = [`PassiveProducer`]，主动 = [`DeviceProducer`]；
+/// * `C`——消费端类型：被动 = [`PassiveConsumer`]，主动 = [`DeviceConsumer`]；
+/// * `B`——存储拥有者，要求能提供 `&mut [MaybeUninit<T>]` 视图
+///   （实践中为 `&'a mut [MaybeUninit<T>]`，`no_std` 下借用而非拥有）；
 /// * `T`——元素类型，默认 `u8`。
 ///
 /// # 设计要点
 ///
-/// * **hook 对调用者透明**：核心内部使用哪个 hook（被动=唤醒 waker/parker，
-///   主动=同步搬运设备数据）是构建期由 builder 决定并隐藏的。类型参数里的
-///   `P` / `C` 是**端类型**（决定可访问性：被动端可访问、主动端是占位类型），
-///   **不是** hook——调用者不参与构造 hook，hook 完全在内部。
-/// * **主动端不对外暴露**：主动端的端类型是 [`DeviceProducer`] /
-///   [`DeviceConsumer`]（占位），对外接口不再提供有实际效果的
-///   `TrBuffTryWrite` / `TrBuffTryRead`。设备类型经
-///   [`TrDeviceProducer`](crate::circular_buff::TrDeviceProducer) /
-///   [`TrDeviceConsumer`](crate::circular_buff::TrDeviceConsumer) 的关联类型
-///   携带在端类型里，核心无需类型擦除。
-/// * **存储统一为 `[MaybeUninit<T>]`**：与 `RingBuffer` 的设计理念不同，这里
-///   **不引入** `RingStorage` 之类的存储抽象层；`B` 只要求
-///   `BorrowMut<[MaybeUninit<T>]>`（能提供 `&mut [MaybeUninit<T>]` 视图），
-///   内部一律以 `[MaybeUninit<T>]` 视图操作缓冲区（`no_std`、无 alloc，
-///   借用而非拥有）。
-///
-/// 字段布局：`buffer_` 即上述统一存储；`producer_` / `consumer_` 是两个端；
-/// 核心状态机（rp / wp / hook 槽位 / 设备引用）在核心实现时补全。
-// 骨架阶段：无构造路径，字段暂时只被声明、不被读取；核心落地后即可移除。
-#[allow(dead_code)]
+/// * **hook 对调用者透明**：核心内部使用哪个 hook（被动=唤醒，主动=搬运）是
+///   构建期由 builder 决定并隐藏的；`P` / `C` 是**端类型**（决定可访问性），
+///   不是 hook；
+/// * **主动端不对外暴露**：主动端的 `try_as_buff` 永远返回错误、`try_split_io`
+///   返回 `None`；设备类型经 `TrDeviceProducer` / `TrDeviceConsumer` 的关联
+///   类型携带在端类型里；
+/// * **存储统一为 `[MaybeUninit<T>]`**：`B` 只要求 `BorrowMut` 提供
+///   `&mut [MaybeUninit<T>]` 视图，内部一律以此视图操作缓冲区。
 pub struct CircularBuff<'a, P, C, B, T = u8>
 where
     P: TrProducer<T>,
     C: TrConsumer<T>,
     B: BorrowMut<[MaybeUninit<T>]>,
 {
-    /// 内部缓冲区拥有者，统一以 `[MaybeUninit<T>]` 视图访问。
+    /// 环形核心：位置状态机 + 两个 hook。
+    core: RingCore<T>,
+    /// 内部缓冲区拥有者（统一以 `[MaybeUninit<T>]` 视图访问）。
+    ///
+    /// 本字段只用于**持有存储借用**（让 `'a` 的借用关系在类型上成立）；
+    /// 实际读写都经核心内部的裸指针（见 `core_` 的安全说明），因此不直接
+    /// 读取本字段。
+    #[allow(dead_code)]
     buffer_: B,
-    /// 生产端（被动=`PassiveProducer`，主动=`DeviceProducer`）。
-    producer_: P,
-    /// 消费端（被动=`PassiveConsumer`，主动=`DeviceConsumer`）。
-    consumer_: C,
+    /// 生产端类型（角色标记）。
+    _producer: PhantomData<P>,
+    /// 消费端类型（角色标记）。
+    _consumer: PhantomData<C>,
     /// 借用期标记：缓冲区与被动半部共享的借用期 `'a`。
     _marker: PhantomData<&'a mut [MaybeUninit<T>]>,
+}
+
+impl<'a, P, C, B, T> CircularBuff<'a, P, C, B, T>
+where
+    P: TrProducer<T>,
+    C: TrConsumer<T>,
+    B: BorrowMut<[MaybeUninit<T>]>,
+{
+    /// 由 builder 构造（内部）。
+    pub(super) fn new(core: RingCore<T>, buffer_: B) -> Self {
+        CircularBuff {
+            core,
+            buffer_,
+            _producer: PhantomData,
+            _consumer: PhantomData,
+            _marker: PhantomData,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 公开 API（集中在一处）
+    // ------------------------------------------------------------------
+
+    /// 环形缓冲容量。
+    pub fn capacity(&self) -> usize {
+        self.core.capacity()
+    }
+
+    /// 当前可读数据量。
+    pub fn data_size(&self) -> usize {
+        self.core.data_size()
+    }
+
+    /// 当前可写空间。
+    pub fn free_size(&self) -> usize {
+        self.core.free_size()
+    }
+
+    /// 写端（生产端）是否已关闭。
+    pub fn is_tx_closed(&self) -> bool {
+        self.core.is_tx_closed()
+    }
+
+    /// 读端（消费端）是否已关闭。
+    pub fn is_rx_closed(&self) -> bool {
+        self.core.is_rx_closed()
+    }
+
+    /// 关闭写端：不再写入，触发消费端 hook（`ProducerClose`）。
+    pub fn close_tx(&self) {
+        self.core.close_tx();
+    }
+
+    /// 关闭读端：不再读取，触发生产端 hook（`ConsumerClose`）。
+    pub fn close_rx(&self) {
+        self.core.close_rx();
+    }
+
+    /// 拆分出写半部与读半部。
+    ///
+    /// 仅当**两端都是被动模式**时返回两个可用的半部；任一端为主动模式时返回
+    /// `None`——主动端由设备驱动、不对外暴露（对应 `RingBuffer` 中「半部
+    /// 不存在」的情形，此处以 `None` 表达，主动端的占位类型见
+    /// [`DeviceProducer`] / [`DeviceConsumer`]）。
+    pub fn try_split_io(&mut self) -> Option<(ProducerHalf<'_, T>, ConsumerHalf<'_, T>)> {
+        if self.core.producer_is_passive() && self.core.consumer_is_passive() {
+            Some((ProducerHalf::new(&self.core), ConsumerHalf::new(&self.core)))
+        } else {
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TrObserver / TrProducer / TrConsumer（CircularBuff 本身即两端的访问入口）
+// ---------------------------------------------------------------------------
+
+impl<P, C, B, T> TrObserver for CircularBuff<'_, P, C, B, T>
+where
+    P: TrProducer<T>,
+    C: TrConsumer<T>,
+    B: BorrowMut<[MaybeUninit<T>]>,
+{
+    fn capacity(&self) -> usize {
+        CircularBuff::capacity(self)
+    }
+
+    fn ready(&self) -> usize {
+        CircularBuff::data_size(self)
+    }
+
+    fn is_remote_end_closing(&self) -> bool {
+        self.core.is_tx_closed() || self.core.is_rx_closed()
+    }
+}
+
+impl<P, C, B, T> TrProducer<T> for CircularBuff<'_, P, C, B, T>
+where
+    P: TrProducer<T>,
+    C: TrConsumer<T>,
+    B: BorrowMut<[MaybeUninit<T>]>,
+{
+    type Buff<'f> = ProducerHalf<'f, T> where Self: 'f;
+    type Err = EndError;
+
+    /// 生产端为被动模式时返回可用的写半部；为主动模式时永远返回错误
+    /// （该端由输入设备驱动，不对外暴露）。
+    fn try_as_buff(&mut self) -> Result<Self::Buff<'_>, Self::Err> {
+        if self.core.producer_is_passive() {
+            Ok(ProducerHalf::new(&self.core))
+        } else {
+            Err(EndError)
+        }
+    }
+}
+
+impl<P, C, B, T> TrConsumer<T> for CircularBuff<'_, P, C, B, T>
+where
+    P: TrProducer<T>,
+    C: TrConsumer<T>,
+    B: BorrowMut<[MaybeUninit<T>]>,
+{
+    type Buff<'f> = ConsumerHalf<'f, T> where Self: 'f;
+    type Err = EndError;
+
+    /// 消费端为被动模式时返回可用的读半部；为主动模式时永远返回错误。
+    fn try_as_buff(&mut self) -> Result<Self::Buff<'_>, Self::Err> {
+        if self.core.consumer_is_passive() {
+            Ok(ConsumerHalf::new(&self.core))
+        } else {
+            Err(EndError)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 端类型标记的 trait 实现（满足 CircularBuff 的类型约束）
+// ---------------------------------------------------------------------------
+
+macro_rules! impl_observer_marker {
+    ($ty:ident $(, $lt:lifetime)?) => {
+        impl<$($lt,)? T> TrObserver for $ty<T> {
+            fn capacity(&self) -> usize {
+                0
+            }
+            fn ready(&self) -> usize {
+                0
+            }
+            fn is_remote_end_closing(&self) -> bool {
+                false
+            }
+        }
+    };
+}
+
+impl_observer_marker!(PassiveProducer);
+impl_observer_marker!(PassiveConsumer);
+
+impl<TyInput, T> TrObserver for DeviceProducer<TyInput, T>
+where
+    TyInput: TrInput<T>,
+{
+    fn capacity(&self) -> usize {
+        0
+    }
+    fn ready(&self) -> usize {
+        0
+    }
+    fn is_remote_end_closing(&self) -> bool {
+        false
+    }
+}
+
+impl<TyOutput, T> TrObserver for DeviceConsumer<TyOutput, T>
+where
+    TyOutput: TrOutput<T>,
+{
+    fn capacity(&self) -> usize {
+        0
+    }
+    fn ready(&self) -> usize {
+        0
+    }
+    fn is_remote_end_closing(&self) -> bool {
+        false
+    }
+}
+
+impl<T> TrProducer<T> for PassiveProducer<T> {
+    type Buff<'f> = ProducerHalf<'f, T> where Self: 'f;
+    type Err = EndError;
+
+    /// 角色标记自身没有环形核心：不直接提供半部。真实的被动写半部请通过
+    /// `CircularBuff`（`TrProducer::try_as_buff` / `try_split_io`）获得。
+    fn try_as_buff(&mut self) -> Result<Self::Buff<'_>, Self::Err> {
+        todo!("角色标记不直接提供半部：请通过 CircularBuff 访问")
+    }
+}
+
+impl<T> TrConsumer<T> for PassiveConsumer<T> {
+    type Buff<'f> = ConsumerHalf<'f, T> where Self: 'f;
+    type Err = EndError;
+
+    fn try_as_buff(&mut self) -> Result<Self::Buff<'_>, Self::Err> {
+        todo!("角色标记不直接提供半部：请通过 CircularBuff 访问")
+    }
+}
+
+impl<TyInput, T> TrProducer<T> for DeviceProducer<TyInput, T>
+where
+    TyInput: TrInput<T>,
+{
+    type Buff<'f> = ProducerHalf<'f, T> where Self: 'f;
+    type Err = EndError;
+
+    /// 主动生产端不对外暴露：永远返回错误。
+    fn try_as_buff(&mut self) -> Result<Self::Buff<'_>, Self::Err> {
+        Err(EndError)
+    }
+}
+
+impl<TyOutput, T> TrConsumer<T> for DeviceConsumer<TyOutput, T>
+where
+    TyOutput: TrOutput<T>,
+{
+    type Buff<'f> = ConsumerHalf<'f, T> where Self: 'f;
+    type Err = EndError;
+
+    /// 主动消费端不对外暴露：永远返回错误。
+    fn try_as_buff(&mut self) -> Result<Self::Buff<'_>, Self::Err> {
+        Err(EndError)
+    }
+}
+
+impl<TyInput, T> TrDeviceProducer<T> for DeviceProducer<TyInput, T>
+where
+    TyInput: TrInput<T>,
+{
+    type InputDevice = TyInput;
+}
+
+impl<TyOutput, T> TrDeviceConsumer<T> for DeviceConsumer<TyOutput, T>
+where
+    TyOutput: TrOutput<T>,
+{
+    type OutputDevice = TyOutput;
 }

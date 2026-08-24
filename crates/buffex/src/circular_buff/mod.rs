@@ -156,30 +156,27 @@
 //! 编译。构建完成后，端类型（`P` / `C`）被确定（被动=可访问半部，主动=占位
 //! 类型），hook 在内部挂载。
 //!
-//! 注意：以上示例展示了 API 形状；端类型（[`DeviceProducer`] /
-//! [`DeviceConsumer`] / [`PassiveProducer`] / [`PassiveConsumer`]）对
-//! [`TrProducer`] / [`TrConsumer`] 的实现随核心一起落地，在此之前 `.build()`
-//! 的返回类型约束无法被满足（示例因此保持 `ignore`）。
+//! 注意：示例中的 `input` / `output` 是实现了 `TrInput` / `TrOutput` 的设备；
+//! `build` 要求存储长度与 `with_capacity` 一致。示例为示意而保持 `ignore`，
+//! 完整可运行的用法见 `tests_` 模块。
 //!
-//! # 核心实现（进行中）
+//! # 实现现状
 //!
-//! 环形核心状态机、hook 槽位的挂载与触发、主动 pump 的同步驱动、以及端类型的
-//! trait 实现目前只有类型骨架（见 [`CircularBuff`] 与 [`DeviceProducer`] /
-//! [`DeviceConsumer`] / [`PassiveProducer`] / [`PassiveConsumer`]），`builder`
-//! 的 `build` 中留了 `todo!()`。待定的具体细节：
+//! 核心已落地：环形状态机（`core_`，原子位置字 + 唤醒槽位）、hook 槽位与
+//! 事件（`hook_`）、两段式段（`segm_`）、被动半部与等待 future（`half_`）、
+//! 主动泵（构建期擦除设备 + 同步轮询，见核心的模块文档说明），`builder`
+//! 的 `build` 已可用。模块划分：公开 API 集中在 `circ_buff_` 的
+//! `CircularBuff`；内部状态分散在 `core_` / `hook_` / `segm_` / `half_`。
 //!
-//! * 容量校验（`2..=MAX_CAPACITY`，与 `ring_buffer` 的上限对齐）；
-//! * 端类型对 `TrProducer` / `TrConsumer` / `TrDeviceProducer` /
-//!   `TrDeviceConsumer` 的实现（`try_as_buff` 的占位语义已写进 [`TrProducer`] /
-//!   [`TrConsumer`] 的文档：主动端永远返回错误），以及被动端的真实半部类型
-//!   （借用环形核心、实现 `TrBuffTryWrite` / `TrBuffTryRead`）与错误类型；
-//! * 核心如何经 `P::InputDevice` / `C::OutputDevice`（关联类型）持有并驱动设备，
-//!   以及 `T ≠ u8` 与主动模式（设备为 u8）的组合如何处理；
-//! * 被动模式的等待接口形态（future + parker，复用 `ring_buffer` 的
-//!   `DemandSlot` 思路还是独立的槽位）；
-//! * 对外拆分接口的形状（返回可用半部 / 占位类型）；
-//! * pump 的标志位与 `drive()` 循环的具体布局；
-//! * 关闭 / 错误传播（EOF、设备错误如何跨过 hook 通知对端）。
+//! 仍待定 / 未完成：
+//!
+//! * **设备错误传播**：当前泵把设备错误视为「本轮无数据」，错误如何跨过 hook
+//!   通知对端（例如让被动端感知设备失败）待定；
+//! * **被动端取消**：`TrMayCancel` 的 `may_cancel_with` 目前忽略取消 token；
+//! * **`T ≠ u8` 与主动模式**：设备元素类型与缓冲元素类型一致（`TrInput<T>`），
+//!   泛型上自洽；`T` 非平凡类型时的实践（drop 语义、`Send`/`Sync` 边界）待验证；
+//! * **发送/共享边界**：核心按 SPSC + 单泵线程约定实现 `Send + Sync`（见
+//!   `core_` 的安全说明），多线程流水测试待补。
 //!
 //! # 与 ring_buffer 的关系
 //!
@@ -190,6 +187,11 @@
 
 mod abs_;
 mod circ_buff_;
+mod core_;
+mod error_;
+mod half_;
+mod hook_;
+mod segm_;
 
 pub mod builder;
 
@@ -198,3 +200,11 @@ pub use builder::{CircularBuffBuilder, ProducerSetBuilder, ReadyBuilder};
 pub use circ_buff_::{
     CircularBuff, DeviceConsumer, DeviceProducer, PassiveConsumer, PassiveProducer,
 };
+pub use error_::{EndError, RxError, TxError};
+pub use half_::{
+    ConsumerHalf, ProducerHalf, ReadAsync, ReadFuture, WriteAsync, WriteFuture,
+};
+pub use segm_::{RdSegm, WrSegm};
+
+#[cfg(test)]
+mod tests_;

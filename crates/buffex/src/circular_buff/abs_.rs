@@ -1,14 +1,17 @@
-﻿use abs_buff::{
+use abs_buff::{
     TrBuffTryRead, TrBuffTryWrite,
     io::{TrInput, TrOutput},
 };
 
 /// 可以观察环形缓冲状态的类型
 pub trait TrObserver {
+    /// 环形缓冲的容量（单元数）。
     fn capacity(&self) -> usize;
 
+    /// 当前可供本端操作的数据量（生产者视角为可写空间，消费者视角为可读数据）。
     fn ready(&self) -> usize;
 
+    /// 对端是否已关闭（生产者视角：消费者端关闭；消费者视角：生产者端关闭）。
     fn is_remote_end_closing(&self) -> bool;
 }
 
@@ -43,7 +46,8 @@ pub trait TrDeviceProducer<T>
 where
     Self: TrProducer<T>,
 {
-    type InputDevice: TrInput;
+    /// 输入设备的实际类型（元素类型与环形缓冲一致为 `T`）。
+    type InputDevice: TrInput<T>;
 }
 
 /// 用于表示消费者端为主动模式时的 trait 约束
@@ -51,5 +55,6 @@ pub trait TrDeviceConsumer<T>
 where
     Self: TrConsumer<T>,
 {
-    type OutputDevice: TrOutput;
+    /// 输出设备的实际类型（元素类型与环形缓冲一致为 `T`）。
+    type OutputDevice: TrOutput<T>;
 }
