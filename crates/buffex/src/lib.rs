@@ -8,9 +8,6 @@ extern crate std;
 
 pub mod ring_buffer;
 
-#[cfg(all(feature = "compio", unix))]
-pub mod unix_stream;
-
 pub mod x_deps {
     pub use abs_buff;
     pub use abs_buff::x_deps::{abs_cancel, anylr};

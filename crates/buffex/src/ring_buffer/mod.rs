@@ -125,15 +125,3 @@ pub use reclaim_::{ReclPeekRef, ReclSliceMut, ReclSliceRef};
 pub use rx_::RingRx;
 pub use state_::{MAX_CAPACITY, RingBuffer};
 pub use tx_::RingTx;
-
-#[cfg(feature = "compio")]
-mod compio_;
-
-#[cfg(feature = "compio")]
-pub use compio_::{RecvSlices, SendSlices};
-
-#[cfg(feature = "tokio")]
-mod tokio_;
-
-#[cfg(feature = "smol")]
-mod smol_;

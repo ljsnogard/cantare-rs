@@ -17,37 +17,11 @@ atomex = { path = "../atomex" }
 # `segm-tests` 仅在测试中启用 abs_buff 的泛型段测试模块（编译时无运行时开销）。
 abs_buff = { path = "../abs_buff", features = ["segm-tests"] }
 
-# -- optional async-framework trait adapters ------------------------------
-# The core ring buffer never depends on any async runtime. These features
-# only add `AsyncRead`/`AsyncWrite` trait implementations for the selected
-# framework on top of the same core logic.
-compio = { version = "0.19.*", optional = true, features = ["fs", "macros", "time", "net"] }
-tokio = { version = "1", optional = true, features = ["io-util"] }
-futures-io = { version = "0.3", optional = true }
-
-[features]
-default = ["compio"]
-
-# Support `compio::io::AsyncRead` / `compio::io::AsyncWrite` (default).
-compio = ["dep:compio"]
-
-# Support `tokio::io::AsyncRead` / `tokio::io::AsyncWrite`.
-tokio = ["dep:tokio"]
-
-# Support `futures_io::AsyncRead` / `futures_io::AsyncWrite` (smol & friends).
-smol = ["dep:futures-io"]
-
-[[bench]]
-name = "unix_stream_bandwidth"
-harness = false
-required-features = ["compio"]
 
 [dev-dependencies]
 env_logger = { workspace = true }
 log = { workspace = true }
 rand = { version = "0.8.*" }
-
 atomic_sync = { path = "../atomic_sync" }
-
 tokio = { version = "1", features = ["full"] }
 futures-lite = { workspace = true }
