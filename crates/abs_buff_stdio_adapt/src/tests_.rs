@@ -473,7 +473,7 @@ fn write_blocks_until_async_consumer_frees_space() {
     const CAP: usize = 16;
     const PAYLOAD_LEN: usize = 100;
 
-    let (mut tx, mut rx) = make_ring(CAP);
+    let (tx, mut rx) = make_ring(CAP);
     let payload: Vec<u8> = (0..PAYLOAD_LEN).map(|i| (i * 13 + 7) as u8).collect();
     let payload_consumer = payload.clone();
 

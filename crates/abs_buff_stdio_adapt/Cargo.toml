@@ -6,4 +6,19 @@ description = "Adapter to make std::io::{Read, Write} fit for abs_buff TrBuffRea
 license = "MIT/Apache-2.0"
 
 [dependencies]
+abs_art-bridge = { version = "0.2.1", default-features = false }
 abs_buff = { path = "../abs_buff" }
+
+# 测试专用的依赖（不影响库本身）：
+# - `abs_art-bridge` 的 backend-tokio：适配器内部的 `block_on` 需要一个真实的
+#   异步后端；按 abs_art-bridge 的设计，后端由"最终的二进制"在各自的
+#   Cargo.toml 里启用，这里作为 dev-dependency 启用，保证 `cargo test
+#   -p abs_buff_stdio_adapt` 能在 tokio 后端下驱动测试；
+# - `tokio`：测试里要构建多线程运行时（`Runtime::block_on` 的 tokio 后端要求
+#   当前线程处于多线程运行时上下文）；
+# - `buffex`：ring buffer 管道，作为"异步数据流"的测试载体（实现 abs_buff 的
+#   TrBuffRead / TrBuffWrite，空/满时会真实地 Pending 等待对端）。
+[dev-dependencies]
+abs_art-bridge = { version = "0.2.1", features = ["backend-tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+buffex = { path = "../buffex", default-features = false }

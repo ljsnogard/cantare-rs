@@ -15,7 +15,8 @@ use crate::buffer::{TrBuffer, TrBufferMut};
 pub trait TrInput<T = u8> {
     type ReadAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<usize, Self::Err>>
     where
-        Self: 'f, T: 'f;
+        Self: 'f,
+        T: 'f;
 
     type Err: Error;
 
@@ -43,7 +44,8 @@ pub trait TrInput<T = u8> {
 pub trait TrOutput<T = u8> {
     type WriteAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<usize, Self::Err>>
     where
-        Self: 'f, T: 'f;
+        Self: 'f,
+        T: 'f;
 
     type Err: Error;
 
