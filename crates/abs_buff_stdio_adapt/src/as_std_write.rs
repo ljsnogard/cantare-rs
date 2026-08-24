@@ -2,12 +2,13 @@ extern crate std;
 
 use std::{io, string::ToString};
 
+use abs_art_bridge::{BLOCK_ON, Runtime, TrBlockOn};
 use abs_buff::{
     Demand, TrBuffTryWrite, TrBuffWrite,
     buffer::TrBuffSegmMut,
     x_deps::abs_cancel,
 };
-use abs_cancel::{NonCancellableToken, TrCancellationToken};
+use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 
 /// An adapter that exposes a [`TrBuffTryWrite`] buffer as a non-blocking
 /// `std::io::Write`.
@@ -27,16 +28,18 @@ use abs_cancel::{NonCancellableToken, TrCancellationToken};
 /// surfaced by the call that makes no progress.
 pub struct AsStdWrite<'a, W, C = NonCancellableToken>
 where
-    W: TrBuffTryWrite,
+    W: TrBuffWrite,
     C: TrCancellationToken,
 {
     buff_w_: &'a mut W,
     cancel_: &'a mut C,
 }
 
+type Rt = Runtime<{ BLOCK_ON} >;
+
 impl<'a, W, C> AsStdWrite<'a, W, C>
 where
-    W: TrBuffTryWrite,
+    W: TrBuffWrite,
     C: TrCancellationToken,
 {
     pub const fn new(w: &'a mut W, cancel: &'a mut C) -> Self {
@@ -50,6 +53,7 @@ where
     pub fn write(&mut self, buf: &[u8]) -> io::Result<usize>
     where
         <W as TrBuffWrite>::Err: core::error::Error,
+        C: TrCancellationToken + Clone,
     {
         let mut c = 0usize;
         let buf_len = buf.len();
@@ -61,7 +65,14 @@ where
                 return Result::Ok(c);
             }
             let demand = Demand::less_than(buf_len - c);
-            let mut w_res = self.buff_w_.try_write(&demand);
+            // 同 `AsStdRead`：`may_cancel_with` 的输出是具体的
+            // `SomeOf<SegmMut, Err>`，且让等待过程真正可被取消。
+            let fut = self
+                .buff_w_
+                .write_async(&demand)
+                .may_cancel_with(&mut *self.cancel_)
+                .into_future();
+            let mut w_res = Rt::block_on(fut);
             if let Option::Some(segm) = w_res.as_mut().pick_left() {
                 // `as_segm_mut` yields the concrete `SegmMut` over the
                 // remaining free items (the borrowed segment's buffer *is*
@@ -108,7 +119,7 @@ where
 impl<'a, W, C> io::Write for AsStdWrite<'a, W, C>
 where
     W: TrBuffTryWrite,
-    C: TrCancellationToken,
+    C: TrCancellationToken + Clone,
 {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {

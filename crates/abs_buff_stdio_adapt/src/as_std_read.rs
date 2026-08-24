@@ -1,11 +1,12 @@
 use std::{io, mem::MaybeUninit, string::ToString};
 
+use abs_art_bridge::{BLOCK_ON, Runtime, TrBlockOn};
 use abs_buff::{
     Demand, TrBuffRead, TrBuffTryRead,
     buffer::TrBuffSegmRef,
     x_deps::abs_cancel
 };
-use abs_cancel::{NonCancellableToken, TrCancellationToken};
+use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 
 /// An adapter that exposes a [`TrBuffTryRead`] buffer as a non-blocking
 /// `std::io::Read`.
@@ -25,16 +26,18 @@ use abs_cancel::{NonCancellableToken, TrCancellationToken};
 /// is only surfaced by the call that makes no progress.
 pub struct AsStdRead<'a, R, C = NonCancellableToken>
 where
-    R: TrBuffTryRead,
+    R: TrBuffRead,
     C: TrCancellationToken,
 {
     buff_r_: &'a mut R,
     cancel_: &'a mut C,
 }
 
+type Rt = Runtime<{ BLOCK_ON }>;
+
 impl<'a, R, C> AsStdRead<'a, R, C>
 where
-    R: TrBuffTryRead,
+    R: TrBuffRead,
     C: TrCancellationToken,
 {
     pub const fn new(r: &'a mut R, cancel: &'a mut C) -> Self {
@@ -48,6 +51,7 @@ where
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>
     where
         <R as TrBuffRead>::Err: core::error::Error,
+        C: TrCancellationToken + Clone,
     {
         let mut c = 0usize;
         let buf_len = buf.len();
@@ -59,7 +63,15 @@ where
                 return Result::Ok(c);
             }
             let demand = Demand::less_than(buf_len - c);
-            let mut r_res = self.buff_r_.try_read(&demand);
+            // `may_cancel_with` 把借用的异步操作转成可取消 future，其输出类型是
+            // 具体的 `SomeOf<SegmRef, Err>`（`TrBuffRead` 的 `ReadAsync` 只是
+            // `TrMayCancel`，直接 `.into_future()` 的输出是无法归一化的投影类型）。
+            let read_fut = self
+                .buff_r_
+                .read_async(&demand)
+                .may_cancel_with(&mut *self.cancel_)
+                .into_future();
+            let mut r_res = Rt::block_on(read_fut);
             if let Option::Some(segm) = r_res.as_mut().pick_left() {
                 // `as_segm_ref` yields the concrete `SegmRef` over the
                 // remaining items (the borrowed segment's buffer *is* the
@@ -113,7 +125,7 @@ where
 impl<'a, R, C> io::Read for AsStdRead<'a, R, C>
 where
     R: TrBuffTryRead,
-    C: TrCancellationToken,
+    C: TrCancellationToken + Clone,
 {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
