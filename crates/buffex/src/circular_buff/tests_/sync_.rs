@@ -17,8 +17,8 @@ fn make_buff<'a, const N: usize>(
     st: &'a mut [core::mem::MaybeUninit<u8>; N],
 ) -> super::super::CircularBuff<
     'a,
-    super::super::PassiveProducer<u8>,
-    super::super::PassiveConsumer<u8>,
+    super::super::BuffProducer<u8>,
+    super::super::BuffConsumer<u8>,
     &'a mut [core::mem::MaybeUninit<u8>],
     u8,
 > {

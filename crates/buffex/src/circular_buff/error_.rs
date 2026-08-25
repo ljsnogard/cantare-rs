@@ -51,16 +51,3 @@ impl<S: fmt::Debug> fmt::Display for RxError<S> {
 }
 
 impl<S: fmt::Debug> core::error::Error for RxError<S> {}
-
-/// 端访问错误：使用了主动模式的那一端由设备驱动、不对外暴露，尝试通过
-/// `TrProducer` / `TrConsumer` 访问时返回此错误。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EndError;
-
-impl fmt::Display for EndError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("该端为主动模式，不对外暴露")
-    }
-}
-
-impl core::error::Error for EndError {}

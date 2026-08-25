@@ -21,9 +21,8 @@ use abs_buff::{
         TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrReclaim,
     }
 };
-// use abs_iter::TrAsSlice;
 
-use super::state_::RingCore;
+use super::abs_comp::TrCircBuffCore;
 
 // ---------------------------------------------------------------------------
 // 物理空间的两段式表示
@@ -143,49 +142,77 @@ impl<'a, T> SegmSlicesRef<'a, T> {
 // ---------------------------------------------------------------------------
 
 /// 提交器：写段 drop 时按已消费量推进写位置。
-pub struct WriterReclaim<'a> {
-    core: &'a RingCore,
-    cap: usize,
+pub struct WriterReclaim<'a, TyCore>
+where
+    TyCore: TrCircBuffCore,
+{
+    core_: &'a TyCore,
+    cap_: usize,
 }
 
-impl<'a> WriterReclaim<'a> {
-    pub(super) const fn new(core: &'a RingCore, cap: usize) -> Self {
-        WriterReclaim { core, cap }
+impl<'a, TyCore> WriterReclaim<'a, TyCore>
+where
+    TyCore: TrCircBuffCore,
+{
+    pub(super) const fn new(core: &'a TyCore, cap: usize) -> Self {
+        WriterReclaim { core_: core, cap_: cap }
     }
 }
 
-impl TrReclaim for WriterReclaim<'_> {
+impl<TyCore> TrReclaim for WriterReclaim<'_, TyCore>
+where
+    TyCore: TrCircBuffCore,
+{
     fn reclaim(&mut self, amount: usize) -> usize {
-        self.core.advance_write(self.cap, amount);
+        self.core_.advance_write(amount);
         0
     }
 }
+
+unsafe impl<TyCore> Send for WriterReclaim<'_, TyCore>
+where
+    TyCore: TrCircBuffCore,
+{}
+
+unsafe impl<TyCore> Sync for WriterReclaim<'_, TyCore>
+where
+    TyCore: TrCircBuffCore,
+{}
 
 /// 提交器：读段 drop 时按已消费量推进读位置。
-pub struct ReaderReclaim<'a> {
-    core: &'a RingCore,
-    cap: usize,
+pub struct ReaderReclaim<'a, TyCore>
+where
+    TyCore: TrCircBuffCore,
+{
+    core_: &'a TyCore,
+    cap_: usize,
 }
 
-impl<'a> ReaderReclaim<'a> {
-    pub(super) const fn new(core: &'a RingCore, cap: usize) -> Self {
-        ReaderReclaim { core, cap }
+impl<'a, TyCore> ReaderReclaim<'a, TyCore>
+where
+    TyCore: TrCircBuffCore,
+{
+    pub(super) const fn new(core: &'a TyCore, cap: usize) -> Self {
+        ReaderReclaim { core_: core, cap_: cap }
     }
 }
 
-impl TrReclaim for ReaderReclaim<'_> {
+impl<TyCore> TrReclaim for ReaderReclaim<'_, TyCore>
+where
+    TyCore: TrCircBuffCore,
+{
     fn reclaim(&mut self, amount: usize) -> usize {
-        self.core.advance_read(self.cap, amount);
+        self.core_.advance_read(amount);
         0
     }
 }
 
-/// 读段 drop 时的两种行为：读段提交（推进读位置），窥视段不提交。
-pub(super) enum ReadReclaim<'a> {
-    /// 读段：drop 时把已消费量提交给 ring（推进读位置）。
-    Consume(ReaderReclaim<'a>),
-    /// 窥视段：drop 时不提交。
-    Peek,
+pub struct NoReclaim;
+
+impl TrReclaim for NoReclaim {
+    fn reclaim(&mut self, _: usize) -> usize {
+        0usize
+    }
 }
 
 pub type ChildReclaim<'a> = SegmReclaim<'a>;
@@ -195,26 +222,35 @@ pub type ChildReclaim<'a> = SegmReclaim<'a>;
 // ---------------------------------------------------------------------------
 
 /// RingBuffer 专用写段：两段物理空间视作逻辑上的一段（见模块文档）。
-pub struct ReclSliceMut<'a, T> {
+pub struct ReclSliceMut<'a, T, R>
+where
+    R: TrReclaim,
+{
     pieces: SegmSlicesMut<'a, T>,
     /// 已消费（已提交给 ring）的逻辑单元数，跨两段累计。
-    offset: usize,
-    reclaim: Option<WriterReclaim<'a>>,
+    offset_: usize,
+    reclaim_: Option<R>,
 }
 
-impl<'a, T> ReclSliceMut<'a, T> {
-    pub(super) fn new(pieces: SegmSlicesMut<'a, T>, reclaim: WriterReclaim<'a>) -> Self {
+impl<'a, T, R> ReclSliceMut<'a, T, R>
+where
+    R: TrReclaim,
+{
+    pub(super) fn new(
+        pieces: SegmSlicesMut<'a, T>,
+        reclaim: R,
+    ) -> Self {
         ReclSliceMut {
             pieces,
-            offset: 0,
-            reclaim: Option::Some(reclaim),
+            offset_: 0,
+            reclaim_: Option::Some(reclaim),
         }
     }
 
     /// 逻辑上剩余（未消费）的单元数：两段物理空间之和减去已消费量。
     #[inline]
     pub fn least_count(&self) -> usize {
-        self.pieces.len() - self.offset
+        self.pieces.len() - self.offset_
     }
 
     #[inline]
@@ -232,18 +268,20 @@ impl<'a, T> ReclSliceMut<'a, T> {
     /// 空段会被过滤，调用方看到的每一段都非空。
     pub fn iter_slices_mut(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<T>]> {
         self.pieces
-            .remaining_mut(self.offset)
+            .remaining_mut(self.offset_)
             .into_iter()
             .filter(|s| !s.is_empty())
     }
 
     /// 当前物理段的剩余部分作为一个 abs_buff 子段；子段 drop 时通过
     /// [`ChildReclaim`] 把其已消费量累计到父段的 `offset`。
-    pub fn as_segm_mut<'f>(&'f mut self) -> SegmMut<'f, T, ChildReclaim<'f>> {
+    pub fn as_segm_mut<'f>(
+        &'f mut self,
+    ) -> SegmMut<'f, T, ChildReclaim<'f>> {
         // 直接借用 `self.pieces` 与 `self.offset`（不同字段，借用检查器
         // 可判定互斥），与 abs_buff 内部 `SegmRef::as_segm_ref` 的做法一致。
-        let slice = self.pieces.current_mut(self.offset);
-        let reclaim = ChildReclaim::new(Pin::new(&mut self.offset));
+        let slice = self.pieces.current_mut(self.offset_);
+        let reclaim = ChildReclaim::new(Pin::new(&mut self.offset_));
         SegmMut::new(slice, reclaim)
     }
 
@@ -259,10 +297,10 @@ impl<'a, T> ReclSliceMut<'a, T> {
         let agreement = demand.compromise(&available)?;
         let max_len = agreement.max()?;
         // 子段只能覆盖当前物理段；跨段部分由下一次 take 处理。
-        let cur = self.pieces.current_mut(self.offset);
+        let cur = self.pieces.current_mut(self.offset_);
         let take = core::cmp::min(*max_len, cur.len());
         let slice = &mut cur[..take];
-        let reclaim = ChildReclaim::new(Pin::new(&mut self.offset));
+        let reclaim = ChildReclaim::new(Pin::new(&mut self.offset_));
         Option::Some(SegmMut::new(slice, reclaim))
     }
 
@@ -277,16 +315,22 @@ impl<'a, T> ReclSliceMut<'a, T> {
     }
 }
 
-impl<'a, T> Drop for ReclSliceMut<'a, T> {
+impl<'a, T, R> Drop for ReclSliceMut<'a, T, R>
+where
+    R: TrReclaim,
+{
     fn drop(&mut self) {
-        let Option::Some(mut r) = self.reclaim.take() else {
+        let Option::Some(mut r) = self.reclaim_.take() else {
             return;
         };
-        r.reclaim(self.offset);
+        r.reclaim(self.offset_);
     }
 }
 
-impl<'a, T> TrBuffSegmView for ReclSliceMut<'a, T> {
+impl<'a, T, R> TrBuffSegmView for ReclSliceMut<'a, T, R>
+where
+    R: TrReclaim,
+{
     type SlicesIter<'f>
         = core::iter::Filter<
             core::array::IntoIter<&'f [MaybeUninit<T>], 2>,
@@ -311,13 +355,16 @@ impl<'a, T> TrBuffSegmView for ReclSliceMut<'a, T> {
     fn iter_slices(&self) -> Self::SlicesIter<'_> {
         let filter: fn(&&[MaybeUninit<T>]) -> bool = non_empty_slice;
         self.pieces
-            .remaining_ref(self.offset)
+            .remaining_ref(self.offset_)
             .into_iter()
             .filter(filter)
     }
 }
 
-impl<'a, T> TrBuffSegmMut<'a, T> for ReclSliceMut<'a, T> {
+impl<'a, T, R> TrBuffSegmMut<'a, T> for ReclSliceMut<'a, T, R>
+where
+    R: TrReclaim,
+{
     type Reclaimer<'f> = ChildReclaim<'f> where Self: 'f;
 
     type TakeSegmMut<'f>
@@ -345,28 +392,37 @@ impl<'a, T> TrBuffSegmMut<'a, T> for ReclSliceMut<'a, T> {
 // ---------------------------------------------------------------------------
 
 /// RingBuffer 专用读段（窥视段是同一类型、只是 drop 时不提交）。
-pub struct ReclSliceRef<'a, T> {
+pub struct ReclSliceRef<'a, T, R>
+where
+    R: TrReclaim,
+{
     pieces: SegmSlicesRef<'a, T>,
-    offset: usize,
-    reclaim: Option<ReadReclaim<'a>>,
+    offset_: usize,
+    reclaim_: Option<R>,
 }
 
 /// RingBuffer 专用窥视段：窥视不消费，drop 时不推进读位置。
-pub type ReclPeekRef<'a, T> = ReclSliceRef<'a, T>;
+pub type ReclPeekRef<'a, T, R> = ReclSliceRef<'a, T, R>;
 
-impl<'a, T> ReclSliceRef<'a, T> {
-    pub(super) fn new(pieces: SegmSlicesRef<'a, T>, reclaim: ReadReclaim<'a>) -> Self {
+impl<'a, T, R> ReclSliceRef<'a, T, R>
+where
+    R: TrReclaim,
+{
+    pub(super) fn new(
+        pieces: SegmSlicesRef<'a, T>,
+        reclaim: R,
+    ) -> Self {
         ReclSliceRef {
             pieces,
-            offset: 0,
-            reclaim: Option::Some(reclaim),
+            offset_: 0,
+            reclaim_: Option::Some(reclaim),
         }
     }
 
     /// 逻辑上剩余（未消费）的单元数。
     #[inline]
     pub fn least_count(&self) -> usize {
-        self.pieces.len() - self.offset
+        self.pieces.len() - self.offset_
     }
 
     #[inline]
@@ -383,7 +439,7 @@ impl<'a, T> ReclSliceRef<'a, T> {
     /// 剩余可读空间按物理段切出（最多两段，逻辑上是一段）；空段被过滤。
     pub fn iter_slices(&self) -> impl Iterator<Item = &[T]> {
         self.pieces
-            .remaining_ref(self.offset)
+            .remaining_ref(self.offset_)
             .into_iter()
             .filter(|s| !s.is_empty())
     }
@@ -399,17 +455,17 @@ impl<'a, T> ReclSliceRef<'a, T> {
         let available = Demand::less_than(c);
         let agreement = demand.compromise(&available)?;
         let max_len = agreement.max()?;
-        let cur = self.pieces.current(self.offset);
+        let cur = self.pieces.current(self.offset_);
         let take = core::cmp::min(*max_len, cur.len());
         let slice = &cur[..take];
-        let reclaim = ChildReclaim::new(Pin::new(&mut self.offset));
+        let reclaim = ChildReclaim::new(Pin::new(&mut self.offset_));
         Option::Some(SegmRef::new(slice, reclaim))
     }
 
     /// 当前物理段的剩余部分作为一个 abs_buff 子段（同写段的设计）。
     pub fn as_segm_ref<'f>(&'f mut self) -> SegmRef<'f, T, ChildReclaim<'f>> {
-        let slice = self.pieces.current(self.offset);
-        let reclaim = ChildReclaim::new(Pin::new(&mut self.offset));
+        let slice = self.pieces.current(self.offset_);
+        let reclaim = ChildReclaim::new(Pin::new(&mut self.offset_));
         SegmRef::new(slice, reclaim)
     }
 
@@ -423,21 +479,22 @@ impl<'a, T> ReclSliceRef<'a, T> {
     }
 }
 
-impl<'a, T> Drop for ReclSliceRef<'a, T> {
+impl<'a, T, R> Drop for ReclSliceRef<'a, T, R>
+where
+    R: TrReclaim,
+{
     fn drop(&mut self) {
-        let Option::Some(r) = self.reclaim.take() else {
+        let Option::Some(mut r) = self.reclaim_.take() else {
             return;
         };
-        match r {
-            ReadReclaim::Consume(mut r) => {
-                r.reclaim(self.offset);
-            }
-            ReadReclaim::Peek => {}
-        }
+        r.reclaim(self.offset_);
     }
 }
 
-impl<'a, T> TrBuffSegmView for ReclSliceRef<'a, T> {
+impl<'a, T, R> TrBuffSegmView for ReclSliceRef<'a, T, R>
+where
+    R: TrReclaim,
+{
     type SlicesIter<'f>
         = core::iter::Filter<
             core::array::IntoIter<&'f [T], 2>,
@@ -462,13 +519,16 @@ impl<'a, T> TrBuffSegmView for ReclSliceRef<'a, T> {
     fn iter_slices(&self) -> Self::SlicesIter<'_> {
         let filter: fn(&&[T]) -> bool = non_empty_slice;
         self.pieces
-            .remaining_ref(self.offset)
+            .remaining_ref(self.offset_)
             .into_iter()
             .filter(filter)
     }
 }
 
-impl<'a, T> TrBuffSegmRef<'a, T> for ReclSliceRef<'a, T> {
+impl<'a, T, R> TrBuffSegmRef<'a, T> for ReclSliceRef<'a, T, R>
+where
+    R: TrReclaim,
+{
     type Reclaimer<'f> = ChildReclaim<'f> where Self: 'f;
 
     type TakeSegmRef<'f>

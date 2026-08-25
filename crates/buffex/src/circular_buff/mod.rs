@@ -185,20 +185,20 @@
 //! 用户线程 + 运行时（内核）两侧的管道；`CircularBuff` 面向**构造期固定
 //! 模式与设备**、由 hook 联动的唤醒式缓冲。
 
-mod abs_;
+pub mod abs_comp;
 mod circ_buff_;
 mod core_;
 mod error_;
 mod half_;
-mod hook_;
+mod reclaim_;
 mod segm_;
+mod spsc_;
 
 pub mod builder;
 
-pub use abs_::{TrConsumer, TrDeviceConsumer, TrDeviceProducer, TrObserver, TrProducer};
 pub use builder::{CircularBuffBuilder, ProducerSetBuilder, ReadyBuilder};
 pub use circ_buff_::{
-    CircularBuff, DeviceConsumer, DeviceProducer, PassiveConsumer, PassiveProducer,
+    CircularBuff, DeviceConsumer, DeviceProducer, BuffConsumer, BuffProducer,
 };
 pub use error_::{EndError, RxError, TxError};
 pub use half_::{

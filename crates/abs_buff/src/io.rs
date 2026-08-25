@@ -1,7 +1,8 @@
 use core::{
-    error::Error,
+    error,
+    future,
+    marker::PhantomData,
     mem::{self, MaybeUninit},
-    ops::{Deref, DerefMut, Try},
     ptr,
 };
 
@@ -18,7 +19,7 @@ pub trait TrInput<T = u8> {
         Self: 'f,
         T: 'f;
 
-    type Err: Error;
+    type Err: error::Error;
 
     /// Read data from this input device and into the specified target buffer.
     ///
@@ -47,7 +48,7 @@ pub trait TrOutput<T = u8> {
         Self: 'f,
         T: 'f;
 
-    type Err: Error;
+    type Err: error::Error;
 
     /// Move data from the specified source into this output device
     fn write_async<'f>(
@@ -75,36 +76,76 @@ pub trait TrOutput<T = u8> {
     }
 }
 
-pub trait TrSink<T = u8> {
-    type WriteAsync<'f, TyBuff>: TrMayCancel<
-        'f,
-        MayCancelOutput: Try<Output = (usize, TyBuff)>,
-    >
+impl<T> TrOutput<T> for () {
+    type WriteAsync<'f> = BlackholeIoAsync<'f, T>
     where
         Self: 'f,
-        TyBuff: Deref<Target: 'static + TrBuffer>;
+        T: 'f;
+    type Err = BlackholeIoError;
 
-    fn write_async<'f, TyBuff>(
-        &'f mut self,
-        source: TyBuff,
-    ) -> Self::WriteAsync<'f, TyBuff>
-    where
-        TyBuff: Deref<Target: 'static + TrBuffer>;
+    fn write_async<'f>(&'f mut self, _: &'f [MaybeUninit<T>]) -> Self::WriteAsync<'f> {
+        BlackholeIoAsync(PhantomData)
+    }
 }
 
-pub trait TrFlux<T = u8> {
-    type ReadAsync<'f, TyBuffMut>: TrMayCancel<
-        'f,
-        MayCancelOutput: Try<Output = (usize, TyBuffMut)>,
-    >
+impl<T> TrInput<T> for () {
+    type ReadAsync<'f> = BlackholeIoAsync<'f, T>
     where
         Self: 'f,
-        TyBuffMut: DerefMut<Target: 'static + TrBufferMut>;
+        T: 'f;
+    type Err = BlackholeIoError;
 
-    fn read_async<'f, TyBuffMut>(
-        &'f mut self,
-        target: TyBuffMut,
-    ) -> Self::ReadAsync<'f, TyBuffMut>
+    fn read_async<'f>(&'f mut self, _: &'f mut [MaybeUninit<T>]) -> Self::ReadAsync<'f> {
+        BlackholeIoAsync(PhantomData)
+    }
+}
+
+/// An error telling user that trying to operate IO on an null device
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BlackholeIoError;
+
+pub struct BlackholeIoAsync<'a, T>(PhantomData<fn(&'a ()) -> T>);
+
+impl core::fmt::Display for BlackholeIoError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "[This is a blackhole!]")
+    }
+}
+
+impl error::Error for BlackholeIoError {}
+
+impl<'a, T> future::IntoFuture for BlackholeIoAsync<'a, T> {
+    type IntoFuture = future::Ready<Self::Output>;
+    type Output = SomeOf<usize, BlackholeIoError>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        future::ready::<SomeOf<usize, BlackholeIoError>>(SomeOf::new_right(BlackholeIoError))
+    }
+}
+
+impl<'a, T> TrMayCancel<'a> for BlackholeIoAsync<'a, T>
+where
+    T: 'a,
+{
+    type MayCancelOutput = <Self as IntoFuture>::Output;
+    type MayCancelFuture<'f, C> = <Self as IntoFuture>::IntoFuture
     where
-        TyBuffMut: DerefMut<Target: 'static + TrBufferMut>;
+        Self: 'f,
+        C: abs_cancel::TrCancellationToken + Clone,
+        C: 'f,
+        'f: 'a;
+
+    fn may_cancel_with<'f, C>(
+        self,
+        _: &'f mut C,
+    ) -> Self::MayCancelFuture<'f, C>
+    where
+        Self: 'f,
+        C: abs_cancel::TrCancellationToken + Clone,
+        C: 'a,
+        C: 'f,
+        'f: 'a,
+    {
+        future::ready(SomeOf::new_right(BlackholeIoError))
+    }
 }

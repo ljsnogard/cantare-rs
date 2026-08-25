@@ -21,7 +21,7 @@ use abs_buff::{
 };
 
 use super::{
-    core_::{RingCore, WakeSlot},
+    core_::{CircCore, WakeSlot},
     error_::{RxError, TxError},
     segm_::{RdSegm, WrSegm},
 };
@@ -32,11 +32,11 @@ use super::{
 
 /// 被动生产端的写半部：借用环形核心，实现 `TrBuffTryWrite`。
 pub struct ProducerHalf<'s, T = u8> {
-    core: &'s RingCore<T>,
+    core: &'s CircCore<T>,
 }
 
 impl<'s, T> ProducerHalf<'s, T> {
-    pub(super) fn new(core: &'s RingCore<T>) -> Self {
+    pub(super) fn new(core: &'s CircCore<T>) -> Self {
         ProducerHalf { core }
     }
 
@@ -116,11 +116,11 @@ impl<'s, T> TrBuffTryWrite<T> for ProducerHalf<'s, T> {
 
 /// 被动消费端的读半部：借用环形核心，实现 `TrBuffTryRead`。
 pub struct ConsumerHalf<'s, T = u8> {
-    core: &'s RingCore<T>,
+    core: &'s CircCore<T>,
 }
 
 impl<'s, T> ConsumerHalf<'s, T> {
-    pub(super) fn new(core: &'s RingCore<T>) -> Self {
+    pub(super) fn new(core: &'s CircCore<T>) -> Self {
         ConsumerHalf { core }
     }
 
@@ -215,11 +215,11 @@ struct Park<'a, T> {
     waiter: super::core_::Waiter,
     registered: bool,
     slot: &'a WakeSlot,
-    check: fn(&RingCore<T>, usize) -> bool,
+    check: fn(&CircCore<T>, usize) -> bool,
 }
 
 impl<'a, T> Park<'a, T> {
-    fn new(slot: &'a WakeSlot, check: fn(&RingCore<T>, usize) -> bool) -> Self {
+    fn new(slot: &'a WakeSlot, check: fn(&CircCore<T>, usize) -> bool) -> Self {
         Park {
             waiter: super::core_::Waiter::new(),
             registered: false,
@@ -229,7 +229,7 @@ impl<'a, T> Park<'a, T> {
     }
 
     /// 轮询：条件满足则注销并返回 `Ready`；否则注册 waker 并返回 `Pending`。
-    fn poll(&mut self, cx: &mut Context<'_>, core: &RingCore<T>, arg: usize) -> Poll<()> {
+    fn poll(&mut self, cx: &mut Context<'_>, core: &CircCore<T>, arg: usize) -> Poll<()> {
         if (self.check)(core, arg) {
             self.deregister();
             return Poll::Ready(());
@@ -262,13 +262,13 @@ pub struct WriteAsync<'a, T>
 where
     T: 'a,
 {
-    core: &'a RingCore<T>,
+    core: &'a CircCore<T>,
     min_len: usize,
     max_len: usize,
 }
 
 impl<'a, T> WriteAsync<'a, T> {
-    pub(super) fn new(core: &'a RingCore<T>, demand: &Demand<usize>) -> Self {
+    pub(super) fn new(core: &'a CircCore<T>, demand: &Demand<usize>) -> Self {
         WriteAsync {
             core,
             min_len: demand.min().copied().unwrap_or(0),
@@ -319,14 +319,14 @@ where
     T: 'ctx,
 {
     _pin: PhantomPinned,
-    core: &'ctx RingCore<T>,
+    core: &'ctx CircCore<T>,
     min_len: usize,
     max_len: usize,
     park: Park<'ctx, T>,
 }
 
 impl<'ctx, T> WriteFuture<'ctx, T> {
-    fn new(core: &'ctx RingCore<T>, min_len: usize, max_len: usize) -> Self {
+    fn new(core: &'ctx CircCore<T>, min_len: usize, max_len: usize) -> Self {
         WriteFuture {
             _pin: PhantomPinned,
             core,
@@ -338,7 +338,7 @@ impl<'ctx, T> WriteFuture<'ctx, T> {
 }
 
 /// 写者可以继续的条件（供 [`Park`] 检查）。
-fn producer_ready<T>(core: &RingCore<T>, min: usize) -> bool {
+fn producer_ready<T>(core: &CircCore<T>, min: usize) -> bool {
     core.producer_ready(min)
 }
 
@@ -393,13 +393,13 @@ pub struct ReadAsync<'a, T>
 where
     T: 'a,
 {
-    core: &'a RingCore<T>,
+    core: &'a CircCore<T>,
     min_len: usize,
     max_len: usize,
 }
 
 impl<'a, T> ReadAsync<'a, T> {
-    pub(super) fn new(core: &'a RingCore<T>, demand: &Demand<usize>) -> Self {
+    pub(super) fn new(core: &'a CircCore<T>, demand: &Demand<usize>) -> Self {
         ReadAsync {
             core,
             min_len: demand.min().copied().unwrap_or(0),
@@ -449,14 +449,14 @@ where
     T: 'ctx,
 {
     _pin: PhantomPinned,
-    core: &'ctx RingCore<T>,
+    core: &'ctx CircCore<T>,
     min_len: usize,
     max_len: usize,
     park: Park<'ctx, T>,
 }
 
 impl<'ctx, T> ReadFuture<'ctx, T> {
-    fn new(core: &'ctx RingCore<T>, min_len: usize, max_len: usize) -> Self {
+    fn new(core: &'ctx CircCore<T>, min_len: usize, max_len: usize) -> Self {
         ReadFuture {
             _pin: PhantomPinned,
             core,
@@ -468,7 +468,7 @@ impl<'ctx, T> ReadFuture<'ctx, T> {
 }
 
 /// 读者可以继续的条件（供 [`Park`] 检查）。
-fn consumer_ready<T>(core: &RingCore<T>, min: usize) -> bool {
+fn consumer_ready<T>(core: &CircCore<T>, min: usize) -> bool {
     core.consumer_ready(min)
 }
 

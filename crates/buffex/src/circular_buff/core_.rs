@@ -38,36 +38,49 @@
 //! 说明）。
 
 use core::{
-    marker::PhantomData,
-    mem::MaybeUninit,
-    ptr,
-    slice,
-    sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
-    task::Waker,
+    cell::UnsafeCell, marker::PhantomData, mem::MaybeUninit, ptr, slice, sync::atomic::{AtomicPtr, AtomicUsize, Ordering}, task::Waker,
 };
 
 use abs_buff::Demand;
+use atomex::AtomicFlags;
+use atomic_sync::{
+    mutex::preemptive::{SpinningMutexOwned, MutexGuard},
+    x_deps::atomex,
+};
 
 use super::{
+    abs_comp::{
+        ConsumerHookEvent, ProducerHookEvent,
+        TrConsumer, TrProducer, TrCircBuffCore,
+    },
     error_::{RxError, TxError},
-    hook_::{ConsumerHook, ConsumerHookEvent, ProducerHook, ProducerHookEvent},
+    reclaim_::{ReclSliceMut, ReclSliceRef, ReaderReclaim, WriterReclaim}
 };
 
 // ---------------------------------------------------------------------------
 // 状态字布局
 // ---------------------------------------------------------------------------
 
+/// 保留高8位作为状态字
+const RSV_BITS: u32 = 8;
+
 /// 生产者（写端）已关闭。
 const TX_CLOSED: usize = 1usize << (usize::BITS - 1);
 /// 消费者（读端）已关闭。
 const RX_CLOSED: usize = 1usize << (usize::BITS - 2);
+/// 生产者（写端）可以接收 ProducerHookEvent
+const TX_STNDBY: usize = 1usize << (usize::BITS - 3);
+/// 消费者（读端）可以接收 ConsumerHookEvent
+const RX_STNDBY: usize = 1usize << (usize::BITS - 4);
+
 /// 两个关闭标志的掩码。
-const FLAG_MASK: usize = TX_CLOSED | RX_CLOSED;
+const FLAG_MASK: usize = TX_CLOSED | RX_CLOSED | TX_STNDBY | RX_STNDBY;
 /// 每个位置占用的位数（两个位置共享低位，两个标志占高位）。
-const POS_BITS: u32 = (usize::BITS - 2) / 2;
+const POS_BITS: u32 = (usize::BITS - RSV_BITS) / 2;
 /// 位置掩码。
 const POS_MASK: usize = (1usize << POS_BITS) - 1;
 
+pub(super) const MIN_CAPACITY: usize = 2;
 /// 环形缓冲的最大容量（与 `ring_buffer` 的 `MAX_CAPACITY` 同量级）。
 pub(super) const MAX_CAPACITY: usize = POS_MASK;
 
@@ -153,27 +166,30 @@ impl WakeSlot {
 // ---------------------------------------------------------------------------
 
 /// 环形核心：一个原子状态字 + 缓冲基址 + 两个 hook + 泵状态。
-pub(super) struct RingCore<T = u8> {
+/// 必须保证 Send + Sync,
+pub(super) struct CircCore<P, C, T = u8>
+where
+    P: TrProducer<Data = T>,
+    C: TrConsumer<Data = T>,
+{
     /// `rp`（低 `POS_BITS` 位）| `wp`（次 `POS_BITS` 位）| 两个关闭标志（高位）。
-    state: AtomicUsize,
-    capacity: usize,
+    atm_stat_: AtomicFlags<usize>,
+    capacity_: usize,
+
     /// 环形缓冲基址（统一 `[MaybeUninit<T>]` 视图）。有效性由持有本核心的
     /// `CircularBuff` 的借用期保证（见模块文档的安全说明）。
-    buffer: *mut MaybeUninit<T>,
-    /// 生产端 hook（被动=唤醒写者，主动=输入设备泵）。
-    producer_hook: ProducerHook<T>,
-    /// 消费端 hook（被动=唤醒读者，主动=输出设备泵）。
-    consumer_hook: ConsumerHook<T>,
-    /// 泵重入保护：正在泵时，hook 只置待办标志。
-    pumping: AtomicBool,
-    /// 待办输入泵标志。
-    input_pending: AtomicBool,
-    /// 待办输出泵标志。
-    output_pending: AtomicBool,
-    _marker: PhantomData<fn() -> T>,
+    buf_base_: *mut MaybeUninit<T>,
+    producer_: UnsafeCell<P>,
+    consumer_: UnsafeCell<C>,
+    _unuse_t_: PhantomData<fn() -> T>,
 }
 
-impl<T> RingCore<T> {
+impl<P, C, T> CircCore<P, C, T>
+where
+    P: TrProducer<Data = T>,
+    C: TrConsumer<Data = T>,
+    // T: 'static,
+{
     /// 构造核心：状态归零，挂载两个 hook。
     ///
     /// # Safety
@@ -181,21 +197,18 @@ impl<T> RingCore<T> {
     /// `buffer` 必须指向一段长度 `capacity` 的 `[MaybeUninit<T>]`，且在本核心
     /// 存活期间有效（由调用方保证，通常是 `CircularBuff` 的存储借用）。
     pub(super) fn new(
-        buffer: *mut MaybeUninit<T>,
+        buf_base: *mut MaybeUninit<T>,
         capacity: usize,
-        producer_hook: ProducerHook<T>,
-        consumer_hook: ConsumerHook<T>,
+        producer: P,
+        consumer: C,
     ) -> Self {
-        RingCore {
-            state: AtomicUsize::new(0),
-            capacity,
-            buffer,
-            producer_hook,
-            consumer_hook,
-            pumping: AtomicBool::new(false),
-            input_pending: AtomicBool::new(false),
-            output_pending: AtomicBool::new(false),
-            _marker: PhantomData,
+        CircCore {
+            atm_stat_: AtomicFlags::new(AtomicUsize::new(0usize)),
+            capacity_: capacity,
+            buf_base_: buf_base,
+            producer_: UnsafeCell::new(producer),
+            consumer_: UnsafeCell::new(consumer),
+            _unuse_t_: PhantomData,
         }
     }
 
@@ -205,42 +218,42 @@ impl<T> RingCore<T> {
 
     #[inline]
     pub(super) fn capacity(&self) -> usize {
-        self.capacity
+        self.capacity_
     }
 
     /// 当前可读数据量。
     #[inline]
     pub(super) fn data_size(&self) -> usize {
-        let (rp, wp) = unpack(self.state.load(Ordering::Acquire));
+        let (rp, wp) = unpack(self.atm_stat_.value());
         self.data_(rp, wp)
     }
 
     /// 当前可写空间量。
     #[inline]
     pub(super) fn free_size(&self) -> usize {
-        let (rp, wp) = unpack(self.state.load(Ordering::Acquire));
+        let (rp, wp) = unpack(self.atm_stat_.value());
         self.free_(rp, wp)
     }
 
     #[inline]
     pub(super) fn is_tx_closed(&self) -> bool {
-        has_flag(self.state.load(Ordering::Acquire), TX_CLOSED)
+        has_flag(self.atm_stat_.value(), TX_CLOSED)
     }
 
     #[inline]
     pub(super) fn is_rx_closed(&self) -> bool {
-        has_flag(self.state.load(Ordering::Acquire), RX_CLOSED)
+        has_flag(self.atm_stat_.value(), RX_CLOSED)
     }
 
     #[inline]
     fn data_(&self, rp: usize, wp: usize) -> usize {
-        (wp + self.capacity - rp) % self.capacity
+        (wp + self.capacity_ - rp) % self.capacity_
     }
 
     /// 可写空间；单空槽方案始终保留一个槽不用。
     #[inline]
     fn free_(&self, rp: usize, wp: usize) -> usize {
-        self.capacity - 1 - self.data_(rp, wp)
+        self.capacity_ - 1 - self.data_(rp, wp)
     }
 
     // ------------------------------------------------------------------
@@ -254,7 +267,7 @@ impl<T> RingCore<T> {
     pub(super) fn try_write_at(&self, demand: &Demand<usize>) -> Result<(usize, usize), TxError<usize>> {
         let min_len = demand.min().copied().unwrap_or(0);
         let max_len = demand.max().copied().unwrap_or(usize::MAX);
-        let state = self.state.load(Ordering::Acquire);
+        let state = self.atm_stat_.value();
         let (rp, wp) = unpack(state);
         let free = self.free_(rp, wp);
         if free == 0 || free < min_len {
@@ -277,7 +290,7 @@ impl<T> RingCore<T> {
     pub(super) fn try_read_at(&self, demand: &Demand<usize>) -> Result<(usize, usize), RxError<usize>> {
         let min_len = demand.min().copied().unwrap_or(0);
         let max_len = demand.max().copied().unwrap_or(usize::MAX);
-        let state = self.state.load(Ordering::Acquire);
+        let state = self.atm_stat_.value();
         let (rp, wp) = unpack(state);
         let data = self.data_(rp, wp);
         if data == 0 {
@@ -316,7 +329,7 @@ impl<T> RingCore<T> {
         // SAFETY: `start`/`take` 来自 `try_write_at`，区域在缓冲内；可写区与
         // 其他活段 / 泵操作不重叠是调用者义务（SPSC）。
         let whole: &'s mut [MaybeUninit<T>] = self.buffer_view_mut();
-        let first = core::cmp::min(take, self.capacity - start);
+        let first = core::cmp::min(take, self.capacity_ - start);
         let pieces = if first < take {
             let (head, tail) = whole.split_at_mut(start);
             let b = &mut head[..take - first];
@@ -330,8 +343,8 @@ impl<T> RingCore<T> {
     /// 构建读段：覆盖 `[start, start+take)`，跨末端时拆成两段物理空间。
     pub(super) fn read_segm<'s>(&'s self, start: usize, take: usize) -> super::segm_::RdSegm<'s, T> {
         // SAFETY: 同 [`RingCore::write_segm`]。
-        let base = self.buffer.cast::<T>();
-        let first = core::cmp::min(take, self.capacity - start);
+        let base = self.buf_base_.cast::<T>();
+        let first = core::cmp::min(take, self.capacity_ - start);
         let pieces = if first < take {
             let a = unsafe { slice::from_raw_parts(base.add(start), first) };
             let b = unsafe { slice::from_raw_parts(base, take - first) };
@@ -351,8 +364,8 @@ impl<T> RingCore<T> {
     pub(super) fn advance_write(&self, amount: usize) {
         self.update_state(|s| {
             let (rp, wp) = unpack(s);
-            debug_assert!(rp < self.capacity && wp < self.capacity);
-            pack(rp, (wp + amount) % self.capacity) | (s & FLAG_MASK)
+            debug_assert!(rp < self.capacity_ && wp < self.capacity_);
+            pack(rp, (wp + amount) % self.capacity_) | (s & FLAG_MASK)
         });
         if self.is_tx_closed() {
             self.fire_consumer(ConsumerHookEvent::ProducerClose(self.data_size()));
@@ -365,8 +378,8 @@ impl<T> RingCore<T> {
     pub(super) fn advance_read(&self, amount: usize) {
         self.update_state(|s| {
             let (rp, wp) = unpack(s);
-            debug_assert!(rp < self.capacity && wp < self.capacity);
-            pack((rp + amount) % self.capacity, wp) | (s & FLAG_MASK)
+            debug_assert!(rp < self.capacity_ && wp < self.capacity_);
+            pack((rp + amount) % self.capacity_, wp) | (s & FLAG_MASK)
         });
         if self.is_rx_closed() {
             self.fire_producer(ProducerHookEvent::ConsumerClose(self.free_size()));
@@ -392,25 +405,37 @@ impl<T> RingCore<T> {
     // ------------------------------------------------------------------
 
     /// 触发生产端 hook（消费端完成读取 / 关闭后）。
-    fn fire_producer(&self, _event: ProducerHookEvent) {
-        match &self.producer_hook {
-            ProducerHook::Passive(slot) => slot.signal(),
-            ProducerHook::Active(_) => {
-                self.input_pending.store(true, Ordering::Release);
-                self.drive();
+    fn fire_producer(&self, event: ProducerHookEvent) -> Option<MutexGuard<'_, P>> {
+        const MAX_TRY: usize = 3;
+        let mut acq = self.producer_.acquire();
+        let mut cnt = 0usize;
+        while cnt < MAX_TRY {
+            let Option::Some(mut guard) = acq.try_lock() else {
+                cnt += 1;
+                continue;
+            };
+            if guard.check(event) {
+                return Option::Some(guard);
             }
         }
+        Option::None
     }
 
     /// 触发消费端 hook（生产端完成写入 / 关闭后）。
-    fn fire_consumer(&self, _event: ConsumerHookEvent) {
-        match &self.consumer_hook {
-            ConsumerHook::Passive(slot) => slot.signal(),
-            ConsumerHook::Active(_) => {
-                self.output_pending.store(true, Ordering::Release);
-                self.drive();
+    fn fire_consumer(&self, event: ConsumerHookEvent) -> Option<MutexGuard<'_, '_, C>> {
+        const MAX_TRY: usize = 3;
+        let mut acq = self.consumer_.acquire();
+        let mut cnt = 0usize;
+        while cnt < MAX_TRY {
+            let Option::Some(mut guard) = acq.try_lock() else {
+                cnt += 1;
+                continue;
+            };
+            if guard.check(event) {
+                return Option::Some(guard);
             }
         }
+        Option::None
     }
 
     /// 生产端是否为被动模式（对外可访问）。
@@ -476,16 +501,16 @@ impl<T> RingCore<T> {
     /// 写满或设备暂无数据。
     fn pump_input(&self) {
         loop {
-            let state = self.state.load(Ordering::Acquire);
+            let state = self.atm_stat_.load(Ordering::Acquire);
             let (rp, wp) = unpack(state);
             let free = self.free_(rp, wp);
             // 无空间、写端关闭、或消费者已关闭（泵进去也没人消费）则停止。
             if free == 0 || has_flag(state, TX_CLOSED) || has_flag(state, RX_CLOSED) {
                 break;
             }
-            let take = core::cmp::min(free, self.capacity - wp);
+            let take = core::cmp::min(free, self.capacity_ - wp);
             // SAFETY: 可写区不与任何活段重叠（泵运行在提交之后，SPSC 纪律）。
-            let dst = unsafe { slice::from_raw_parts_mut(self.buffer.add(wp), take) };
+            let dst = unsafe { slice::from_raw_parts_mut(self.buf_base_.add(wp), take) };
             let ProducerHook::Active(input) = &self.producer_hook else {
                 unreachable!("被动模式不进入泵");
             };
@@ -501,15 +526,15 @@ impl<T> RingCore<T> {
     /// 排空或设备暂不能接收。
     fn pump_output(&self) {
         loop {
-            let state = self.state.load(Ordering::Acquire);
+            let state = self.atm_stat_.value();
             let (rp, wp) = unpack(state);
             let data = self.data_(rp, wp);
             if data == 0 || has_flag(state, RX_CLOSED) {
                 break;
             }
-            let take = core::cmp::min(data, self.capacity - rp);
+            let take = core::cmp::min(data, self.capacity_ - rp);
             // SAFETY: 可读区为已初始化数据；不与活段重叠（同 `pump_input`）。
-            let src = unsafe { slice::from_raw_parts(self.buffer.add(rp), take) };
+            let src = unsafe { slice::from_raw_parts(self.buf_base_.add(rp), take) };
             let ConsumerHook::Active(output) = &self.consumer_hook else {
                 unreachable!("被动模式不进入泵");
             };
@@ -526,19 +551,10 @@ impl<T> RingCore<T> {
     // ------------------------------------------------------------------
 
     /// 自旋 compare-exchange 循环：把状态字替换为 `f(state)`。
-    fn update_state(&self, f: impl Fn(usize) -> usize) {
-        let mut state = self.state.load(Ordering::Acquire);
-        loop {
-            match self.state.compare_exchange_weak(
-                state,
-                f(state),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return,
-                Err(x) => state = x,
-            }
-        }
+    fn update_state(&self, desire: impl Fn(usize) -> usize) {
+        let expect = |_| true;
+        self.atm_stat_
+            .try_spin_compare_exchange_weak(expect, desire);
     }
 
     fn set_flag(&self, flag: usize) {
@@ -548,7 +564,24 @@ impl<T> RingCore<T> {
     /// 整块缓冲的可变视图（内部可变性：由 SPSC 借用纪律保证不与活段重叠）。
     #[allow(clippy::mut_from_ref)]
     fn buffer_view_mut<'s>(&'s self) -> &'s mut [MaybeUninit<T>] {
-        unsafe { slice::from_raw_parts_mut(self.buffer, self.capacity) }
+        unsafe { slice::from_raw_parts_mut(self.buf_base_, self.capacity_) }
+    }
+}
+
+impl<P, C, T> TrCircBuffCore for CircCore<P, C, T>
+where
+    P: Send + Sync + TrProducer<Data = T>,
+    C: Send + Sync + TrConsumer<Data = T>,
+    T: Send + Sync + 'static,
+{
+    type Data = T;
+
+    fn advance_read(&self, amount: usize) {
+        CircCore::advance_read(self, amount);
+    }
+
+    fn advance_write(&self, amount: usize) {
+        CircCore::advance_write(self, amount);
     }
 }
 
@@ -556,13 +589,16 @@ impl<T> RingCore<T> {
 // 线程安全
 // ---------------------------------------------------------------------------
 
-// SAFETY: 核心的全部共享状态为原子（状态字、唤醒槽位、泵标志）。缓冲内存
-// （裸指针 `buffer`）与主动设备（hook 内裸指针）只经内部可变性访问，其
-// 线程安全由 SPSC + 单泵线程约束保证（见模块文档「线程安全」一节）：
-//
-// * 至多一个生产线程写、一个消费线程读，位置推进是单次原子操作；
-// * 主动泵只在其触发线程上执行（被动端在哪一侧，泵就在哪一侧的线程上），
-//   同一时刻至多一个泵线程访问设备；
-// * 元素类型 `T` 要求 `Send + Sync`，保证跨线程移动 / 共享安全。
-unsafe impl<T> Send for RingCore<T> where T: Send {}
-unsafe impl<T> Sync for RingCore<T> where T: Send + Sync {}
+unsafe impl<P, C, T> Send for CircCore<P, C, T>
+where
+    P: Send + TrProducer<Data = T>,
+    C: Send + TrConsumer<Data = T>,
+    T: Send,
+{}
+
+unsafe impl<P, C, T> Sync for CircCore<P, C, T>
+where
+    P: Send + Sync + TrProducer<Data = T>,
+    C: Send + Sync + TrConsumer<Data = T>,
+    T: Send + Sync,
+{}

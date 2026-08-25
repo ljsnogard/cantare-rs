@@ -14,7 +14,7 @@ use abs_buff::{
     buffer::{SegmMut, SegmReclaim, SegmRef, TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView},
 };
 
-use super::core_::RingCore;
+use super::core_::CircCore;
 
 /// 过滤空段（两段式表示的辅助函数）。
 fn non_empty_slice<T>(s: &&[T]) -> bool {
@@ -136,11 +136,11 @@ impl<'a, T> PiecesRef<'a, T> {
 
 /// 写段提交器：drop 时推进写位置。
 pub(super) struct CommitWrite<'s, T> {
-    core: &'s RingCore<T>,
+    core: &'s CircCore<T>,
 }
 
 impl<'s, T> CommitWrite<'s, T> {
-    pub(super) fn new(core: &'s RingCore<T>) -> Self {
+    pub(super) fn new(core: &'s CircCore<T>) -> Self {
         CommitWrite { core }
     }
 
@@ -155,11 +155,11 @@ impl<'s, T> CommitWrite<'s, T> {
 
 /// 读段提交器：drop 时推进读位置。
 pub(super) struct CommitRead<'s, T> {
-    core: &'s RingCore<T>,
+    core: &'s CircCore<T>,
 }
 
 impl<'s, T> CommitRead<'s, T> {
-    pub(super) fn new(core: &'s RingCore<T>) -> Self {
+    pub(super) fn new(core: &'s CircCore<T>) -> Self {
         CommitRead { core }
     }
 
