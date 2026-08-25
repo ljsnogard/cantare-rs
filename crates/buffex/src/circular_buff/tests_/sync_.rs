@@ -6,35 +6,29 @@ use std::pin::pin;
 use std::{vec, vec::Vec};
 
 use abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite};
+use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
 
 use super::{
-    super::{CircularBuffBuilder, RxError},
-    poll_once, storage, take_segm, fill_segm, TestWaker,
+    super::{BuffConsumer, BuffProducer, CircularBuffBuilder, Consumer, Producer, RxError, TxError},
+    fill_segm, poll_once, take_segm, TestWaker,
 };
 
-/// 构建一个容量 `N` 的被动 × 被动 `CircularBuff`（测试辅助）。
-fn make_buff<'a, const N: usize>(
-    st: &'a mut [core::mem::MaybeUninit<u8>; N],
-) -> super::super::CircularBuff<
-    'a,
-    super::super::BuffProducer<u8>,
-    super::super::BuffConsumer<u8>,
-    &'a mut [core::mem::MaybeUninit<u8>],
-    u8,
-> {
+/// 构建一个容量 `N` 的被动 × 被动半部对（测试辅助）。
+fn make_pair<const N: usize>() -> (
+    Producer<BuffProducer<u8>, BuffConsumer<u8>, u8, CoreAlloc>,
+    Consumer<BuffProducer<u8>, BuffConsumer<u8>, u8, CoreAlloc>,
+) {
     CircularBuffBuilder::with_capacity(N)
         .producer_passive()
         .consumer_passive()
-        .build(st)
+        .build()
         .unwrap()
 }
 
 /// 写入 / 读出往返：写 3 字节，读回同样的 3 字节，位置正确推进。
 #[test]
 fn write_read_roundtrip() {
-    let mut st = storage::<8>();
-    let mut buff = make_buff(&mut st);
-    let (mut tx, mut rx) = buff.try_split_io().expect("被动 × 被动可拆分");
+    let (mut tx, mut rx) = make_pair::<8>();
 
     // 写 3 字节。
     let some = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(3));
@@ -57,9 +51,7 @@ fn write_read_roundtrip() {
 /// 段，而应返回 `Drained` 错误（数量不足下限）。
 #[test]
 fn try_read_honours_at_least() {
-    let mut st = storage::<8>();
-    let mut buff = make_buff(&mut st);
-    let (mut tx, mut rx) = buff.try_split_io().unwrap();
+    let (mut tx, mut rx) = make_pair::<8>();
 
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(2))
         .pick_left()
@@ -78,9 +70,7 @@ fn try_read_honours_at_least() {
 /// 段，而应返回 `Stuffed` 错误。
 #[test]
 fn try_write_honours_at_least() {
-    let mut st = storage::<8>();
-    let mut buff = make_buff(&mut st);
-    let (mut tx, mut _rx) = buff.try_split_io().unwrap();
+    let (mut tx, mut _rx) = make_pair::<8>();
 
     // 写 5 字节（一次借出整个可写区，只提交 5）：容量 8 → 单空槽 → free = 2。
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(1))
@@ -93,7 +83,7 @@ fn try_write_honours_at_least() {
 
     let some = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(4));
     assert!(
-        matches!(some.pick_right(), Some(super::super::TxError::Stuffed(_))),
+        matches!(some.pick_right(), Some(TxError::Stuffed(_))),
         "可写空间不足下限时必须返回 Stuffed"
     );
 }
@@ -102,9 +92,7 @@ fn try_write_honours_at_least() {
 /// 逻辑上仍是一段，数据按顺序填入 / 读出。
 #[test]
 fn wrap_around_two_pieces() {
-    let mut st = storage::<5>();
-    let mut buff = make_buff(&mut st);
-    let (mut tx, mut rx) = buff.try_split_io().unwrap();
+    let (mut tx, mut rx) = make_pair::<5>();
 
     // 写 [1,2,3]：wp = 3。
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(3))
@@ -142,9 +130,7 @@ fn wrap_around_two_pieces() {
 /// 写端写入触发消费端 hook，唤醒读者后恢复为 Ready。
 #[test]
 fn read_async_wakes_on_write() {
-    let mut st = storage::<8>();
-    let mut buff = make_buff(&mut st);
-    let (mut tx, mut rx) = buff.try_split_io().unwrap();
+    let (mut tx, mut rx) = make_pair::<8>();
 
     // 读者先等 3 字节：当前为空 → Pending。
     let fut = rx.read_async(&Demand::at_least(3));
@@ -176,9 +162,7 @@ fn read_async_wakes_on_write() {
 /// 读端读取释放空间，触发生产端 hook，唤醒写者后恢复为 Ready。
 #[test]
 fn write_async_wakes_on_read() {
-    let mut st = storage::<4>(); // 容量 4 → 最多 3 字节数据
-    let mut buff = make_buff(&mut st);
-    let (mut tx, mut rx) = buff.try_split_io().unwrap();
+    let (mut tx, mut rx) = make_pair::<4>(); // 容量 4 → 最多 3 字节数据
 
     // 写满 3 字节。
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(3))
@@ -214,4 +198,52 @@ fn write_async_wakes_on_read() {
     fill_segm(&mut ws, &[4]);
     drop(ws);
     assert_eq!(rx.data_size(), 2 + 1, "原有 2 + 新写 1");
+}
+
+/// 被动端的 `check` 按等待者的需求下限裁决：写入量不足下限时**不唤醒**读者
+/// （demand 门控），达到下限才唤醒。
+#[test]
+fn read_async_demand_gates_wakeup() {
+    use std::pin::pin;
+
+    let (mut tx, mut rx) = make_pair::<8>();
+
+    // 读者等 5 字节 → Pending（已登记 demand=5、注册 waker）。
+    let fut = rx.read_async(&Demand::at_least(5));
+    let mut fut = pin!(fut.into_future());
+    let (waker, flag) = TestWaker::new();
+    assert!(poll_once(fut.as_mut(), &waker).is_pending());
+
+    // 只写 2 字节：不足下限 → check 裁决不感兴趣 → 不唤醒。
+    let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(2))
+        .pick_left()
+        .unwrap();
+    fill_segm(&mut ws, &[1, 2]);
+    drop(ws);
+    assert!(
+        !flag.load(std::sync::atomic::Ordering::Acquire),
+        "不足需求下限时不得唤醒读者"
+    );
+    assert!(
+        poll_once(fut.as_mut(), &waker).is_pending(),
+        "不足需求下限时读等待仍应 pending"
+    );
+
+    // 再写 3 字节（累计 5）：达到下限 → check 感兴趣 → 唤醒 → Ready。
+    let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(3))
+        .pick_left()
+        .unwrap();
+    fill_segm(&mut ws, &[3, 4, 5]);
+    drop(ws);
+    assert!(
+        flag.load(std::sync::atomic::Ordering::Acquire),
+        "达到需求下限后应唤醒读者"
+    );
+    let res = poll_once(fut.as_mut(), &waker);
+    let mut rs = match res {
+        std::task::Poll::Ready(r) => r.pick_left().expect("读等待应成功"),
+        std::task::Poll::Pending => panic!("达到下限后读者应被唤醒"),
+    };
+    assert_eq!(rs.least_count(), 5);
+    assert_eq!(take_segm(&mut rs, 5), vec![1, 2, 3, 4, 5]);
 }

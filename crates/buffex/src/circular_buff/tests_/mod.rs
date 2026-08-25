@@ -5,7 +5,7 @@
 //! * [`hook_`]——关闭 / EOF 事件与被动唤醒。
 //!
 //! 本文件提供测试共用的辅助：测试设备（[`TestInput`] / [`TestOutput`]）、
-//! 段操作（[`fill_segm`] / [`take_segm`]）、存储构造与最小执行器。
+//! 段操作（[`fill_segm`] / [`take_segm`]）与最小执行器。
 
 mod hook_;
 mod pump_;
@@ -23,6 +23,7 @@ use std::{
 use core::{fmt, mem::MaybeUninit, pin::Pin};
 
 use abs_buff::{
+    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrReclaim},
     io::{TrInput, TrOutput},
     x_deps::{
         abs_cancel::{TrCancellationToken, TrMayCancel},
@@ -30,7 +31,7 @@ use abs_buff::{
     },
 };
 
-use super::segm_::{RdSegm, WrSegm};
+use super::{ReclSliceMut, ReclSliceRef};
 
 // ---------------------------------------------------------------------------
 // 测试设备（TrInput / TrOutput）
@@ -93,9 +94,9 @@ impl<'f, S: 'f, E: 'f> TrMayCancel<'f> for ReadySegm<S, E> {
     }
 }
 
-/// 测试输入设备：内部数据与读取位置放在 `Arc` 里，**设备被缓冲借用期间**，
-/// 测试仍能通过自己持有的 `Arc` 观察进度（`&mut input` 的借用不允许直接
-/// 读取字段）。
+/// 测试输入设备：内部数据与读取位置放在 `Arc` 里，**设备被缓冲拥有期间**，
+/// 测试仍能通过自己持有的 `Arc` 观察进度（设备 move 进核心后测试无法直接
+/// 访问它）。
 pub(super) struct TestInput {
     pub data: Arc<Mutex<Vec<u8>>>,
     pub pos: Arc<AtomicUsize>,
@@ -161,11 +162,14 @@ impl TrOutput<u8> for TestOutput {
 }
 
 // ---------------------------------------------------------------------------
-// 段操作辅助
+// 段操作辅助（两段式 ReclSliceMut / ReclSliceRef）
 // ---------------------------------------------------------------------------
 
 /// 把 `data` 全部写入写段（经 `move_items_from_buff`，u8 位拷贝）。
-pub(super) fn fill_segm(segm: &mut WrSegm<'_, u8>, data: &[u8]) {
+pub(super) fn fill_segm<R>(segm: &mut ReclSliceMut<'_, u8, R>, data: &[u8])
+where
+    R: TrReclaim,
+{
     assert!(
         data.len() <= segm.least_count(),
         "fill: len({}) > segm({})",
@@ -174,13 +178,16 @@ pub(super) fn fill_segm(segm: &mut WrSegm<'_, u8>, data: &[u8]) {
     );
     let mut staging: Vec<MaybeUninit<u8>> = data.iter().map(|&b| MaybeUninit::new(b)).collect();
     // SAFETY: 测试数据为 u8，位拷贝搬入段中，staging 无剩余需 drop 的内容。
-    let moved = unsafe { abs_buff::buffer::TrBuffSegmMut::move_items_from_buff(segm, &mut staging) };
+    let moved = unsafe { TrBuffSegmMut::move_items_from_buff(segm, &mut staging) };
     assert_eq!(moved, data.len());
 }
 
 /// 从读段取出 `len` 个单元（经 `move_items_to_buff`）；段 drop 时读位置
 /// 推进 `len`。
-pub(super) fn take_segm(segm: &mut RdSegm<'_, u8>, len: usize) -> Vec<u8> {
+pub(super) fn take_segm<R>(segm: &mut ReclSliceRef<'_, u8, R>, len: usize) -> Vec<u8>
+where
+    R: TrReclaim,
+{
     assert!(
         len <= segm.least_count(),
         "take: len({}) > segm({})",
@@ -190,20 +197,11 @@ pub(super) fn take_segm(segm: &mut RdSegm<'_, u8>, len: usize) -> Vec<u8> {
     let mut dst: Vec<MaybeUninit<u8>> = Vec::with_capacity(len);
     dst.resize(len, MaybeUninit::uninit());
     // SAFETY: 测试数据为 u8，位拷贝搬出安全。
-    let moved = unsafe { abs_buff::buffer::TrBuffSegmRef::move_items_to_buff(segm, &mut dst) };
+    let moved = unsafe { TrBuffSegmRef::move_items_to_buff(segm, &mut dst) };
     assert_eq!(moved, len);
     dst.into_iter()
         .map(|m| unsafe { m.assume_init() })
         .collect()
-}
-
-// ---------------------------------------------------------------------------
-// 存储与构建辅助
-// ---------------------------------------------------------------------------
-
-/// 创建 `N` 个未初始化槽位的 `[MaybeUninit<u8>; N]`（测试用存储）。
-pub(super) fn storage<const N: usize>() -> [MaybeUninit<u8>; N] {
-    [MaybeUninit::uninit(); N]
 }
 
 // ---------------------------------------------------------------------------

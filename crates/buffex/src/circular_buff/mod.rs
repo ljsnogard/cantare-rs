@@ -54,34 +54,29 @@
 //! ## 设计要点一：hook 对调用者透明
 //!
 //! 核心内部使用哪个 hook（被动=唤醒，主动=搬运）是构建期由 [`builder`]
-//! 决定并隐藏的，**不通过 `CircularBuff` 的泛型参数暴露**，调用者也不参与构造。
-//! `CircularBuff<'a, P, C, B, T>` 的类型参数是**端类型**（`P` / `C`，决定
-//! 可访问性）与**存储**（`B`），它们不是 hook——hook 完全在内部。
+//! 决定并隐藏的：`CircCore<P, C, T, A>` 的泛型参数 `P` / `C` 是**端类型**
+//! （决定可访问性），`T` 是元素类型，`A` 是分配器——hook 完全在内部，调用者
+//! 不参与构造。
 //!
-//! ## 设计要点二：主动端不对外暴露（占位类型）
+//! ## 设计要点二：主动端不对外暴露
 //!
 //! 模式对调用者唯一可见的影响是**可访问性**：使用了主动模式的那一端由设备驱动，
-//! 不可能再让外部调用者访问——例如主动消费端不会再提供任何有实际效果的
-//! `TrBuffTryRead` 实现。因此主动端的**端类型**是占位类型
-//! （[`DeviceProducer`] / [`DeviceConsumer`]，见 [`TrProducer`] / [`TrConsumer`]
-//! 的文档：`try_as_buff` 永远返回错误），而不是一个可用的半部。这对应了
-//! `RingBuffer` 中「半部不存在」（
+//! 不可能再让外部调用者访问——主动端的半部（[`Producer`](spsc_::Producer) /
+//! [`Consumer`](spsc_::Consumer)）存在但操作返回 [`TxError::Unavailable`] /
+//! [`RxError::Unavailable`]。这对应了 `RingBuffer` 中「半部不存在」（
 //! [`RingBuffer::try_split_io`](crate::ring_buffer::TrRingBuffer::try_split_io)
-//! 返回 `None`）的情形，只是用占位类型而非 `Option` 来表达。
+//! 返回 `None`）的情形，只是用「错误」而非 `Option` 来表达。
 //!
-//! 占位类型在泛型参数中**携带设备的实际类型**（`DeviceProducer<TyInput, T>` /
-//! `DeviceConsumer<TyOutput, T>`），核心通过
-//! [`TrDeviceProducer`]::`InputDevice` / [`TrDeviceConsumer`]::`OutputDevice`
-//! 的关联类型取回设备类型——因此**无需任何类型擦除**（`TrInput` 带泛型关联
-//! 类型、不能直接 `dyn`）即可在内部持有设备。
+//! 主动端的**端类型**（[`DeviceProducer`] / [`DeviceConsumer`]）携带设备的实际
+//! 类型并随设备一同存放进核心——因此**无需任何类型擦除**（`TrInput` 带泛型
+//! 关联类型、不能直接 `dyn`）即可在内部持有并驱动设备。
 //!
-//! ## 设计要点三：存储统一为 `[MaybeUninit<T>]`
+//! ## 设计要点三：缓冲归核心所有（统一 `[MaybeUninit<T>]` 视图）
 //!
-//! 与 `RingBuffer` 的设计理念不同，这里**不引入** `RingStorage` 之类的存储抽象
-//! 层。`B` 只要求 `BorrowMut<[MaybeUninit<T>]>`（能提供 `&mut [MaybeUninit<T>]`
-//! 视图），内部一律以 `[MaybeUninit<T>]` 视图操作缓冲区（`T` 默认 `u8`），内存
-//! 由调用者在构建时以 `&'a mut [MaybeUninit<T>]` 提供（`no_std`、无 alloc，
-//! 借用而非拥有）。
+//! 与 `RingBuffer` 的 `RingStorage` 抽象不同，这里不引入存储抽象层：缓冲由
+//! 核心**拥有**（[`mm_ptr::Owned`]，分配器 `A` 默认 `CoreAlloc`），内部一律以
+//! `[MaybeUninit<T>]` 视图操作（`T` 默认 `u8`）。`no_std` 下 `alloc` 是 stable
+//! crate，`TrMalloc` 抽象用于避免 `allocator_api` nightly 特性。
 //!
 //! # 主动模式的同步驱动（不 spawn，无运行时依赖）
 //!
@@ -126,49 +121,66 @@
 //!
 //! ```ignore
 //! // 被动 × 被动：经典手动管道（两端都可访问）
-//! let mut storage = [MaybeUninit::<u8>::uninit(); 4096];
-//! let buff = CircularBuffBuilder::with_capacity(4096)
+//! let (mut tx, mut rx) = CircularBuffBuilder::with_capacity(4096)
 //!     .producer_passive()
 //!     .consumer_passive()
-//!     .build(&mut storage)?;
+//!     .build()?;
 //!
 //! // 主动生产 × 被动消费：从 TrInput 自动灌入，用户自行读取
-//! let buff = CircularBuffBuilder::with_capacity(4096)
-//!     .pipe_from_input(&mut input)   // 生产端：TrInput 管道进缓冲（对外不可访问）
+//! let (tx, mut rx) = CircularBuffBuilder::with_capacity(4096)
+//!     .pipe_from_input(input)      // 生产端：TrInput 管道进缓冲（对外不可访问）
 //!     .consumer_passive()
-//!     .build(&mut storage)?;
+//!     .build()?;
 //!
 //! // 被动生产 × 主动消费：用户自行写入，写后自动搬运到 TrOutput
-//! let buff = CircularBuffBuilder::with_capacity(4096)
+//! let (mut tx, rx) = CircularBuffBuilder::with_capacity(4096)
 //!     .producer_passive()
-//!     .pipe_into_output(&mut output) // 消费端：缓冲管道进 TrOutput（对外不可访问）
-//!     .build(&mut storage)?;
+//!     .pipe_into_output(output)    // 消费端：缓冲管道进 TrOutput（对外不可访问）
+//!     .build()?;
 //!
 //! // 主动 × 主动：TrInput → 缓冲 → TrOutput 自动流水线（两端都不可直接访问）
-//! let buff = CircularBuffBuilder::with_capacity(4096)
-//!     .pipe_from_input(&mut input)
-//!     .pipe_into_output(&mut output)
-//!     .build(&mut storage)?;
+//! let (tx, rx) = CircularBuffBuilder::with_capacity(4096)
+//!     .pipe_from_input(input)
+//!     .pipe_into_output(output)
+//!     .build()?;
 //! ```
 //!
 //! 构建器用类型状态（type-state）编码强制「两端模式必须在构建期决定」：
 //! `CircularBuffBuilder` → `ProducerSetBuilder` → `ReadyBuilder`，漏设一端无法
-//! 编译。构建完成后，端类型（`P` / `C`）被确定（被动=可访问半部，主动=占位
-//! 类型），hook 在内部挂载。
+//! 编译。构建完成后，端类型（`P` / `C`）被确定（被动=可访问半部，主动=设备
+//! 端，其半部操作返回 `Unavailable`），hook 在内部挂载。
 //!
-//! 注意：示例中的 `input` / `output` 是实现了 `TrInput` / `TrOutput` 的设备；
-//! `build` 要求存储长度与 `with_capacity` 一致。示例为示意而保持 `ignore`，
-//! 完整可运行的用法见 `tests_` 模块。
+//! 注意：示例中的 `input` / `output` 是实现了 `TrInput` / `TrOutput` 的设备
+//! （move 进缓冲）；`build` 返回 `SpscPair`（拥有型半部对）。示例为示意而保持
+//! `ignore`，完整可运行的用法见 `tests_` 模块。
 //!
-//! # 实现现状
+//! # 实现现状（重构已完成）
 //!
-//! 核心已落地：环形状态机（`core_`，原子位置字 + 唤醒槽位）、hook 槽位与
-//! 事件（`hook_`）、两段式段（`segm_`）、被动半部与等待 future（`half_`）、
-//! 主动泵（构建期擦除设备 + 同步轮询，见核心的模块文档说明），`builder`
-//! 的 `build` 已可用。模块划分：公开 API 集中在 `circ_buff_` 的
-//! `CircularBuff`；内部状态分散在 `core_` / `hook_` / `segm_` / `half_`。
+//! 按「端类型即 hook」的目标重构完成：hook 从独立的擦除对象（旧 `hook_` 的
+//! `ActiveInput` / `ActiveOutput`）改为**端类型**——两端以具体类型存放进核心
+//! （`CircCore<P, C, T, A>` 的 `P` / `C`），设备因此**无需类型擦除**；段提交
+//! 经 [`TrCircBuffCore`](abs_comp::TrCircBuffCore) 窄接口解耦（`reclaim_`）。
 //!
-//! 仍待定 / 未完成：
+//! 模块划分：
+//!
+//! * `builder`——类型状态构建链（`CircularBuffBuilder → ProducerSetBuilder →
+//!   ReadyBuilder`），`build` 在堆上装配核心并产出 [`SpscPair`]（拥有型访问
+//!   模型，无「缓冲聚合体」）；
+//! * `spsc_`——公共半部 [`Producer`](spsc_::Producer) /
+//!   [`Consumer`](spsc_::Consumer)（`Shared<CircCore>` + 异步等待 future）；
+//! * `abs_comp`——端契约（`check` / `react_async` 事件模型，`react_async` 泛化
+//!   段参数、端类型不携带段类型，从而解开类型级循环）与
+//!   [`TrCircBuffCore`](abs_comp::TrCircBuffCore)；
+//! * `circ_buff_`——四个端类型（被动 `BuffProducer` / `BuffConsumer`，主动
+//!   `DeviceProducer` / `DeviceConsumer` 携带设备）；
+//! * `core_`——`CircCore<P, C, T, A>`（自有缓冲 + 原子状态机 + 事件分发 +
+//!   同步泵，`pumping` 标志保证泵互斥，无需端锁）；
+//! * `reclaim_`——两段式段（`ReclSliceMut` / `ReclSliceRef`）+ 泛型提交器。
+//!
+//! 旧模型文件（`half_` 借用型半部、`segm_` 旧段、`hook_` 擦除 hook、`abs_`
+//! 旧 trait）已删除。
+//!
+//! 仍待定 / 未完成（与重构正交的长期项）：
 //!
 //! * **设备错误传播**：当前泵把设备错误视为「本轮无数据」，错误如何跨过 hook
 //!   通知对端（例如让被动端感知设备失败）待定；
@@ -176,35 +188,36 @@
 //! * **`T ≠ u8` 与主动模式**：设备元素类型与缓冲元素类型一致（`TrInput<T>`），
 //!   泛型上自洽；`T` 非平凡类型时的实践（drop 语义、`Send`/`Sync` 边界）待验证；
 //! * **发送/共享边界**：核心按 SPSC + 单泵线程约定实现 `Send + Sync`（见
-//!   `core_` 的安全说明），多线程流水测试待补。
+//!   `core_` 的安全说明），多线程流水测试待补；
+//! * **`ring_buffer` 去留**：`reclaim_` 已从 `ring_buffer` 复制为自有实现，
+//!   将来删除 `ring_buffer` 前需先迁移 `buffex_iroh` 的使用方。
 //!
 //! # 与 ring_buffer 的关系
 //!
-//! `CircularBuff` 是新增模块，不改动 [`crate::ring_buffer`] 的任何既有 API 与
-//! 实现。两者在「环形状态机」层面思路一致，但职责不同：`RingBuffer` 面向
-//! 用户线程 + 运行时（内核）两侧的管道；`CircularBuff` 面向**构造期固定
-//! 模式与设备**、由 hook 联动的唤醒式缓冲。
+//! `CircularBuff` 不改动 [`crate::ring_buffer`] 的任何既有 API 与实现。两者在
+//! 「环形状态机」层面思路一致，但职责不同：`RingBuffer` 面向用户线程 + 运行时
+//! （内核）两侧的管道；`CircularBuff` 面向**构造期固定模式与设备**、由 hook
+//! 联动的唤醒式缓冲。规划上 `ring_buffer` 将来会被 `CircularBuff` 取代。
 
 pub mod abs_comp;
 mod circ_buff_;
 mod core_;
 mod error_;
-mod half_;
-mod reclaim_;
-mod segm_;
+pub mod reclaim_;
 mod spsc_;
 
 pub mod builder;
 
-pub use builder::{CircularBuffBuilder, ProducerSetBuilder, ReadyBuilder};
-pub use circ_buff_::{
-    CircularBuff, DeviceConsumer, DeviceProducer, BuffConsumer, BuffProducer,
+pub use abs_comp::{
+    ConsumerHookEvent, ProducerHookEvent, ReceiverReact,
+    TrCircBuffCore, TrConsumer, TrObserver, TrProducer,
 };
-pub use error_::{EndError, RxError, TxError};
-pub use half_::{
-    ConsumerHalf, ProducerHalf, ReadAsync, ReadFuture, WriteAsync, WriteFuture,
-};
-pub use segm_::{RdSegm, WrSegm};
+pub use builder::{BuilderError, CircularBuffBuilder, ProducerSetBuilder, ReadyBuilder};
+pub use circ_buff_::{BuffConsumer, BuffProducer, DeviceConsumer, DeviceProducer};
+pub use error_::{RxError, TxError};
+pub use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
+pub use reclaim_::{ReclSliceMut, ReclSliceRef};
+pub use spsc_::{Consumer, Producer, SpscPair};
 
 #[cfg(test)]
 mod tests_;

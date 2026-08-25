@@ -5,29 +5,25 @@
 //! * 消费者关闭 → 生产端 hook 收到 `ConsumerClose`，写者感知对端关闭；
 //! * 异步等待在关闭事件下不再永远等待。
 
-use std::vec;
+use std::{pin::pin, vec};
 
 use abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite};
+use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
 
 use super::{
-    super::{CircularBuffBuilder, RxError},
-    fill_segm, storage, take_segm, TestWaker,
+    super::{BuffConsumer, BuffProducer, CircularBuffBuilder, Consumer, Producer, RxError},
+    fill_segm, poll_once, take_segm, TestWaker,
 };
 
-/// 构建被动 × 被动缓冲（测试辅助，见 [`super::sync_`] 的说明）。
-fn make_buff<'a, const N: usize>(
-    st: &'a mut [core::mem::MaybeUninit<u8>; N],
-) -> super::super::CircularBuff<
-    'a,
-    super::super::BuffProducer<u8>,
-    super::super::BuffConsumer<u8>,
-    &'a mut [core::mem::MaybeUninit<u8>],
-    u8,
-> {
+/// 构建被动 × 被动半部对（测试辅助，见 [`super::sync_`] 的说明）。
+fn make_pair<const N: usize>() -> (
+    Producer<BuffProducer<u8>, BuffConsumer<u8>, u8, CoreAlloc>,
+    Consumer<BuffProducer<u8>, BuffConsumer<u8>, u8, CoreAlloc>,
+) {
     CircularBuffBuilder::with_capacity(N)
         .producer_passive()
         .consumer_passive()
-        .build(st)
+        .build()
         .unwrap()
 }
 
@@ -35,9 +31,7 @@ fn make_buff<'a, const N: usize>(
 /// 读空后返回 `Closing`。
 #[test]
 fn producer_close_gives_eof() {
-    let mut st = storage::<8>();
-    let mut buff = make_buff(&mut st);
-    let (mut tx, mut rx) = buff.try_split_io().unwrap();
+    let (mut tx, mut rx) = make_pair::<8>();
 
     // 写 2 字节后关闭写端。
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(2))
@@ -67,9 +61,7 @@ fn producer_close_gives_eof() {
 /// 但仍可继续写入（数据无人消费，环满即止）。
 #[test]
 fn consumer_close_fires_event() {
-    let mut st = storage::<8>();
-    let mut buff = make_buff(&mut st);
-    let (mut tx, mut rx) = buff.try_split_io().unwrap();
+    let (mut tx, mut rx) = make_pair::<8>();
 
     rx.close();
     assert!(tx.is_consumer_closed(), "写者应感知消费者关闭");
@@ -82,22 +74,18 @@ fn consumer_close_fires_event() {
 /// 异步读等待在生产者关闭时被唤醒并返回 `Closing`，而不是永远 pending。
 #[test]
 fn read_async_returns_closing_on_eof() {
-    use std::pin::pin;
-
-    let mut st = storage::<8>();
-    let mut buff = make_buff(&mut st);
-    let (mut tx, mut rx) = buff.try_split_io().unwrap();
+    let (mut tx, mut rx) = make_pair::<8>();
 
     // 读者等 3 字节：当前为空 → Pending（已注册 waker）。
     let fut = rx.read_async(&Demand::at_least(3));
     let mut fut = pin!(fut.into_future());
     let (waker, _flag) = TestWaker::new();
-    assert!(super::poll_once(fut.as_mut(), &waker).is_pending());
+    assert!(poll_once(fut.as_mut(), &waker).is_pending());
 
     // 生产者关闭 → 消费端 hook（`ProducerClose`）唤醒读者。
     tx.close();
 
-    let res = super::poll_once(fut.as_mut(), &waker);
+    let res = poll_once(fut.as_mut(), &waker);
     match res {
         std::task::Poll::Ready(r) => {
             assert!(

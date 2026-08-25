@@ -13,6 +13,8 @@ pub enum TxError<S> {
     Stuffed(S),
     /// 写端已关闭，不再接受数据。
     Closing,
+    /// 本端为主动模式（设备驱动），不对外提供写访问。
+    Unavailable,
     /// 参数非法（例如 `Demand` 区间非法）。
     Argument,
 }
@@ -22,6 +24,7 @@ impl<S: fmt::Debug> fmt::Display for TxError<S> {
         match self {
             TxError::Stuffed(wp) => write!(f, "环形缓冲已满（写位置 {wp:?}）"),
             TxError::Closing => write!(f, "写端已关闭"),
+            TxError::Unavailable => write!(f, "主动生产端不对外提供写访问"),
             TxError::Argument => write!(f, "参数非法"),
         }
     }
@@ -36,6 +39,8 @@ pub enum RxError<S> {
     Drained(S),
     /// 读端已关闭，不再有数据。
     Closing,
+    /// 本端为主动模式（设备驱动），不对外提供读访问。
+    Unavailable,
     /// 参数非法。
     Argument,
 }
@@ -45,6 +50,7 @@ impl<S: fmt::Debug> fmt::Display for RxError<S> {
         match self {
             RxError::Drained(rp) => write!(f, "环形缓冲已空（读位置 {rp:?}）"),
             RxError::Closing => write!(f, "读端已关闭"),
+            RxError::Unavailable => write!(f, "主动消费端不对外提供读访问"),
             RxError::Argument => write!(f, "参数非法"),
         }
     }

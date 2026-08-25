@@ -15,4 +15,4 @@ anylr = { git = "https://gitee.com/lino_snsalias/anylr.rs.git", branch = "dev/0.
 anyhow = "1"
 thiserror = "2"
 iroh = "1.0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

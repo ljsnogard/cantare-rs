@@ -1,18 +1,36 @@
-//! RingBuffer 专用的段类型：写段 / 读段 / 窥视段。
+//! 环形缓冲的段类型：写段 / 读段（本次重构从 `ring_buffer::reclaim_`
+//! 复制而来，模块头注释仍残留「RingBuffer 专用」字样）。
 //!
 //! 普通的 abs_buff `SegmRef` / `SegmMut` 只能表达**一段物理连续**的缓冲区。
-//! 但 RingBuffer 的可用 / 可读区域在环绕缓冲区末端时会被物理拆成两段
-//! （例如末端 2 格 + 开端 2 格）。因此这里为 RingBuffer 定制了专用的段类型，
-//! 内部用一个 enum 表达"只有一段连续空间"或"拥有两段连续空间"两种可能性，
-//! 把两段物理空间视作**逻辑上的一段**——这样生产者 / 消费者可以一次性拿到
-//! 跨末端的全部空间，而不是被"单连续 slice"的表示卡死。
+//! 但环形缓冲的可用 / 可读区域在环绕缓冲区末端时会被物理拆成两段
+//! （例如末端 2 格 + 开端 2 格）。因此这里定制了专用段类型，内部用一个 enum
+//! 表达"只有一段连续空间"或"拥有两段连续空间"两种可能性，把两段物理空间
+//! 视作**逻辑上的一段**——这样生产者 / 消费者可以一次性拿到跨末端的全部空间。
 //!
 //! 这些类型同样实现 `TrBuffSegmRef` / `TrBuffSegmMut`，因此 abs_buff 的管道
 //! 机制（PipeJoin）可以直接使用；`as_segm_ref` / `as_segm_mut` 每次交出
 //! 当前物理段的一个子段，父段的 offset 在子段 drop 时累计，段整体 drop 时
-//! 按已消费量提交给 ring（逐段回收粒度）。
+//! 按已消费量提交给核心（逐段回收粒度）。
+//!
+//! # 与旧 `segm_` 的关系
+//!
+//! 旧 `segm_` 的 `WrSegm` / `RdSegm` 是旧设计（提交器直接引用单参数
+//! `CircCore<T>`），已随重构删除；本模块的 `ReclSliceMut` / `ReclSliceRef`
+//! 把提交器泛型化于 `TyCore: TrCircBuffCore`
+//! （[`super::abs_comp::TrCircBuffCore`]），是重构后的替代实现。
+//!
+//! # 设计意图
+//!
+//! 段 = 物理空间（两段式 enum）+ 已消费 offset + 提交器（drop 时回收）。提交器
+//! 只依赖 [`TrCircBuffCore`](super::abs_comp::TrCircBuffCore) 窄接口，因此段
+//! 类型本身**不指名核心的具体类型**——这是本重构解开类型级循环的关键拼图
+//! （循环发生在端类型携带段类型关联时，见
+//! [`super::abs_comp`] 模块文档）。
 
-use core::{mem::MaybeUninit, pin::Pin};
+use core::{
+    mem::MaybeUninit,
+    pin::Pin,
+};
 
 use abs_buff::{
     Demand,
@@ -142,20 +160,23 @@ impl<'a, T> SegmSlicesRef<'a, T> {
 // ---------------------------------------------------------------------------
 
 /// 提交器：写段 drop 时按已消费量推进写位置。
+///
+/// 泛型于 `TyCore: TrCircBuffCore`——通过窄接口提交，**不指名核心的具体类型**
+/// （若指名 `CircCore<P, C, T>` 且该段出现在端类型的关联类型中，就构成类型级
+/// 循环，见 [`super::abs_comp`] 模块文档）。
 pub struct WriterReclaim<'a, TyCore>
 where
     TyCore: TrCircBuffCore,
 {
     core_: &'a TyCore,
-    cap_: usize,
 }
 
 impl<'a, TyCore> WriterReclaim<'a, TyCore>
 where
     TyCore: TrCircBuffCore,
 {
-    pub(super) const fn new(core: &'a TyCore, cap: usize) -> Self {
-        WriterReclaim { core_: core, cap_: cap }
+    pub(super) const fn new(core: &'a TyCore) -> Self {
+        WriterReclaim { core_: core }
     }
 }
 
@@ -179,21 +200,20 @@ where
     TyCore: TrCircBuffCore,
 {}
 
-/// 提交器：读段 drop 时按已消费量推进读位置。
+/// 提交器：读段 drop 时按已消费量推进读位置。同 [`WriterReclaim`] 的设计。
 pub struct ReaderReclaim<'a, TyCore>
 where
     TyCore: TrCircBuffCore,
 {
     core_: &'a TyCore,
-    cap_: usize,
 }
 
 impl<'a, TyCore> ReaderReclaim<'a, TyCore>
 where
     TyCore: TrCircBuffCore,
 {
-    pub(super) const fn new(core: &'a TyCore, cap: usize) -> Self {
-        ReaderReclaim { core_: core, cap_: cap }
+    pub(super) const fn new(core: &'a TyCore) -> Self {
+        ReaderReclaim { core_: core }
     }
 }
 
@@ -221,7 +241,10 @@ pub type ChildReclaim<'a> = SegmReclaim<'a>;
 // 写段
 // ---------------------------------------------------------------------------
 
-/// RingBuffer 专用写段：两段物理空间视作逻辑上的一段（见模块文档）。
+/// 环形核心专用写段：两段物理空间视作逻辑上的一段（见模块文档）。
+///
+/// drop 时把已消费量经 `R`（通常是 [`WriterReclaim`]）提交给核心，推进写位置
+/// 并触发消费端 hook。
 pub struct ReclSliceMut<'a, T, R>
 where
     R: TrReclaim,
@@ -391,7 +414,10 @@ where
 // 读段 / 窥视段
 // ---------------------------------------------------------------------------
 
-/// RingBuffer 专用读段（窥视段是同一类型、只是 drop 时不提交）。
+/// 环形核心专用读段（窥视段是同一类型、只是 drop 时不提交）。
+///
+/// drop 时把已消费量经 `R`（通常是 [`ReaderReclaim`]）提交给核心，推进读位置
+/// 并触发生产端 hook。
 pub struct ReclSliceRef<'a, T, R>
 where
     R: TrReclaim,
