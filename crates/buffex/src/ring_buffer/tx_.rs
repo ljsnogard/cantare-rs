@@ -176,7 +176,7 @@ where
     type Err = TxError<usize>;
 
     #[inline]
-    fn is_blocked_closing(&self) -> bool {
+    fn is_stuffed_closing(&self) -> bool {
         RingTx::is_blocked_closing(self)
     }
 

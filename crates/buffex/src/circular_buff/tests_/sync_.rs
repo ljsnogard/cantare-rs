@@ -9,15 +9,14 @@ use abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite};
 use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
 
 use super::{
-    super::{BuffConsumer, BuffProducer, CircularBuffBuilder, Consumer, Producer, RxError, TxError},
+    super::{BuffConsumer, BuffProducer, CircularBuffBuilder, RxError, TxError, SpscPair},
     fill_segm, poll_once, take_segm, TestWaker,
 };
 
+type MadePair = SpscPair<BuffProducer<u8>, BuffConsumer<u8>, u8, CoreAlloc>;
+
 /// 构建一个容量 `N` 的被动 × 被动半部对（测试辅助）。
-fn make_pair<const N: usize>() -> (
-    Producer<BuffProducer<u8>, BuffConsumer<u8>, u8, CoreAlloc>,
-    Consumer<BuffProducer<u8>, BuffConsumer<u8>, u8, CoreAlloc>,
-) {
+fn make_pair<const N: usize>() -> MadePair {
     CircularBuffBuilder::with_capacity(N)
         .producer_passive()
         .consumer_passive()
@@ -77,7 +76,7 @@ fn try_write_honours_at_least() {
         .pick_left()
         .expect("应可写");
     assert!(ws.least_count() >= 5, "可写区应至少 5 格");
-    fill_segm(&mut ws, &vec![0; 5]);
+    fill_segm(&mut ws, &[0; 5]);
     drop(ws);
     assert_eq!(tx.free_size(), 2, "写 5 后应剩 2 格可写空间");
 
@@ -135,7 +134,7 @@ fn read_async_wakes_on_write() {
     // 读者先等 3 字节：当前为空 → Pending。
     let fut = rx.read_async(&Demand::at_least(3));
     let mut fut = pin!(fut.into_future());
-    let (waker, _flag) = TestWaker::new();
+    let (waker, _flag) = TestWaker::make_waker_tuple();
     assert!(
         poll_once(fut.as_mut(), &waker).is_pending(),
         "无数据时读等待必须 pending"
@@ -175,7 +174,7 @@ fn write_async_wakes_on_read() {
     // 写者等 1 格空间：当前满 → Pending。
     let fut = tx.write_async(&Demand::at_least(1));
     let mut fut = pin!(fut.into_future());
-    let (waker, _flag) = TestWaker::new();
+    let (waker, _flag) = TestWaker::make_waker_tuple();
     assert!(
         poll_once(fut.as_mut(), &waker).is_pending(),
         "环满时写等待必须 pending"
@@ -211,7 +210,7 @@ fn read_async_demand_gates_wakeup() {
     // 读者等 5 字节 → Pending（已登记 demand=5、注册 waker）。
     let fut = rx.read_async(&Demand::at_least(5));
     let mut fut = pin!(fut.into_future());
-    let (waker, flag) = TestWaker::new();
+    let (waker, flag) = TestWaker::make_waker_tuple();
     assert!(poll_once(fut.as_mut(), &waker).is_pending());
 
     // 只写 2 字节：不足下限 → check 裁决不感兴趣 → 不唤醒。

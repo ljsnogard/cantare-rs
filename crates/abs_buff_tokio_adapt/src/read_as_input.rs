@@ -1,9 +1,7 @@
 use std::{mem::MaybeUninit, slice};
 
 use abs_buff::{
-    gen_may_cancel_future,
-    io::TrInput,
-    x_deps::{abs_cancel, anylr},
+    error::{TaggedError, ReadErrTag}, gen_may_cancel_future, io::TrInput, x_deps::{abs_cancel, anylr},
 };
 use abs_cancel::TrCancellationToken;
 use anylr::SomeOf;
@@ -24,7 +22,7 @@ where
         &'f mut self,
         target: &'f mut [MaybeUninit<u8>],
     ) -> InputReadAsync<'f, R> {
-        InputReadAsync(&mut self.0, target)
+        InputReadAsync(self.0, target)
     }
 }
 
@@ -34,7 +32,7 @@ where
 {
     type ReadAsync<'f> = InputReadAsync<'f, R> where Self: 'f, u8: 'f;
 
-    type Err = std::io::Error;
+    type Err = TaggedError<std::io::Error, ReadErrTag>;
 
     #[inline]
     fn read_async<'f>(
@@ -50,7 +48,7 @@ async fn input_read_impl_async_<'f, R, C>(
     input: &'f mut R,
     target: &'f mut [MaybeUninit<u8>],
     _token: &'f mut C,
-) -> SomeOf<usize, std::io::Error>
+) -> SomeOf<usize, TaggedError<std::io::Error, ReadErrTag>>
 where
     R: tokio::io::AsyncRead + Unpin,
     C: TrCancellationToken + Clone,
@@ -58,5 +56,8 @@ where
     let size = target.len();
     let buff = target.as_mut_ptr() as *mut u8;
     let buff = unsafe { slice::from_raw_parts_mut(buff, size) };
-    <R as tokio::io::AsyncReadExt>::read(input, buff).await.into()
+    <R as tokio::io::AsyncReadExt>::read(input, buff)
+        .await
+        .map_err(|e| (e, ReadErrTag::Propagated).into())
+        .into()
 }

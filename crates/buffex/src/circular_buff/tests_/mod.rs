@@ -23,9 +23,7 @@ use std::{
 use core::{fmt, mem::MaybeUninit, pin::Pin};
 
 use abs_buff::{
-    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrReclaim},
-    io::{TrInput, TrOutput},
-    x_deps::{
+    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrReclaim}, error::{ReadErrTag, TrTaggedError, WriteErrTag}, io::{TrInput, TrOutput}, x_deps::{
         abs_cancel::{TrCancellationToken, TrMayCancel},
         anylr::SomeOf,
     },
@@ -52,6 +50,18 @@ impl fmt::Display for TestErr {
 }
 
 impl core::error::Error for TestErr {}
+
+impl TrTaggedError<ReadErrTag> for TestErr {
+    fn err_tag(&self) -> ReadErrTag {
+        ReadErrTag::Unknown
+    }
+}
+
+impl TrTaggedError<WriteErrTag> for TestErr {
+    fn err_tag(&self) -> WriteErrTag {
+        WriteErrTag::Unknown
+    }
+}
 
 /// 一个立即就绪的 `TrMayCancel` future（测试设备的异步操作返回它）。
 pub(super) struct ReadySegm<S, E>(Option<SomeOf<S, E>>);
@@ -213,7 +223,7 @@ pub(super) struct TestWaker(Arc<AtomicBool>);
 
 impl TestWaker {
     /// 创建 waker 与其唤醒标志（测试轮询后检查标志以确认被唤醒）。
-    pub(super) fn new() -> (Waker, Arc<AtomicBool>) {
+    pub(super) fn make_waker_tuple() -> (Waker, Arc<AtomicBool>) {
         let flag = Arc::new(AtomicBool::new(false));
         let waker = Waker::from(Arc::new(TestWaker(flag.clone())));
         (waker, flag)

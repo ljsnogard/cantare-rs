@@ -1,6 +1,7 @@
 use std::{mem::MaybeUninit, slice};
 
 use abs_buff::{
+    error::{TaggedError, WriteErrTag},
     gen_may_cancel_future,
     io::TrOutput,
     x_deps::{abs_cancel, anylr},
@@ -24,7 +25,7 @@ where
         &'f mut self,
         source: &'f [MaybeUninit<u8>],
     ) -> OutputWriteAsync<'f, W> {
-        OutputWriteAsync(&mut self.0, source)
+        OutputWriteAsync(self.0, source)
     }
 }
 
@@ -33,7 +34,7 @@ where
     W: tokio::io::AsyncWrite + Unpin,
 {
     type WriteAsync<'f> = OutputWriteAsync<'f, W> where Self: 'f, u8: 'f;
-    type Err = std::io::Error;
+    type Err = TaggedError<std::io::Error, WriteErrTag>;
 
     #[inline]
     fn write_async<'f>(
@@ -49,7 +50,7 @@ async fn output_write_impl_async_<'f, W, C>(
     output: &'f mut W,
     source: &'f [MaybeUninit<u8>],
     _token: &'f mut C,
-) -> SomeOf<usize, std::io::Error>
+) -> SomeOf<usize, TaggedError<std::io::Error, WriteErrTag>>
 where
     W: tokio::io::AsyncWrite + Unpin,
     C: TrCancellationToken + Clone,
@@ -57,5 +58,8 @@ where
     let size = source.len();
     let buff = source.as_ptr() as *const _ as *const u8;
     let buff = unsafe { slice::from_raw_parts(buff, size) };
-    <W as tokio::io::AsyncWriteExt>::write(output, buff).await.into()
+    <W as tokio::io::AsyncWriteExt>::write(output, buff)
+        .await
+        .map_err(|e| (e, WriteErrTag::Propagated).into())
+        .into()
 }

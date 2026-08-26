@@ -6,6 +6,7 @@ use gen_mcf_macro::gen_may_cancel_future;
 use crate::{
     Demand, TrBuffRead, TrBuffWrite,
     buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView},
+    error::{ReadErrTag, WriteErrTag, TrTaggedError},
 };
 
 pub enum PipeJoinIoResult<W, R, T>
@@ -78,7 +79,7 @@ where
         if c == usize::MAX {
             return PipeJoinIoResult::SizeLimit(c);
         }
-        if buff_w.is_blocked_closing() {
+        if buff_w.is_stuffed_closing() {
             return PipeJoinIoResult::TxBlocked(c);
         }
         if buff_r.is_drained_closing() {
@@ -113,18 +114,20 @@ where
                     c += copied;
                 }
                 if let Option::Some(tx_err) = w_res.pick_right() {
-                    return PipeJoinIoResult::TxErr {
-                        count: c,
-                        err: tx_err,
-                    };
+                    if tx_err.err_tag().should_terminate() {
+                        return PipeJoinIoResult::TxErr { count: c, err: tx_err }
+                    } else {
+                        continue;
+                    }
                 }
             }
         }
         if let Option::Some(rx_err) = r_res.pick_right() {
-            return PipeJoinIoResult::RxErr {
-                count: c,
-                err: rx_err,
-            };
+            if rx_err.err_tag().should_terminate() {
+                return PipeJoinIoResult::RxErr { count: c, err: rx_err };
+            } else {
+                continue;
+            }
         }
     }
 }
@@ -145,7 +148,7 @@ mod tests_ {
     use anylr::SomeOf;
 
     use super::*;
-    use crate::buffer::{SegmMut, SegmReclaim, SegmRef};
+    use crate::{buffer::{SegmMut, SegmReclaim, SegmRef}, error::{ReadErrTag, TrTaggedError}};
 
     //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
     // Test doubles: a read buffer and a write buffer built directly on
@@ -155,18 +158,30 @@ mod tests_ {
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestErr {
-        Blocked,
+        Stuffed,
     }
 
     impl fmt::Display for TestErr {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
-                TestErr::Blocked => write!(f, "blocked"),
+                TestErr::Stuffed => write!(f, "blocked"),
             }
         }
     }
 
     impl Error for TestErr {}
+
+    impl TrTaggedError<ReadErrTag> for TestErr {
+        fn err_tag(&self) -> ReadErrTag {
+            ReadErrTag::Unknown
+        }
+    }
+
+    impl TrTaggedError<WriteErrTag> for TestErr {
+        fn err_tag(&self) -> WriteErrTag {
+            WriteErrTag::Unknown
+        }
+    }
 
     /// An immediately-ready future carrying a `SomeOf` result. It ignores the
     /// cancellation token (the operations complete synchronously), which keeps
@@ -308,17 +323,14 @@ mod tests_ {
     }
 
     impl<T> TrBuffWrite<T> for TestTx<T> {
-        type WriteAsync<'f>
-            = ReadySegm<SegmMut<'f, T, SegmReclaim<'f>>, TestErr>
-        where
-            Self: 'f;
-        type SegmMut<'f>
-            = SegmMut<'f, T, SegmReclaim<'f>>
-        where
-            Self: 'f;
+        type WriteAsync<'f> = ReadySegm<Self::SegmMut<'f>, TestErr>
+        where Self: 'f;
+
+        type SegmMut<'f> = SegmMut<'f, T, SegmReclaim<'f>> where Self: 'f;
+
         type Err = TestErr;
 
-        fn is_blocked_closing(&self) -> bool {
+        fn is_stuffed_closing(&self) -> bool {
             self.pos == self.buff.len()
         }
 
@@ -328,7 +340,7 @@ mod tests_ {
         ) -> Self::WriteAsync<'f> {
             let free = self.buff.len() - self.pos;
             if free == 0 {
-                return ReadySegm::new(SomeOf::new_right(TestErr::Blocked));
+                return ReadySegm::new(SomeOf::new_right(TestErr::Stuffed));
             }
             let take = core::cmp::min(
                 demand.max().copied().unwrap_or(usize::MAX),
@@ -420,7 +432,7 @@ mod tests_ {
             pipe.pipe_async().await
         });
         assert!(
-            matches!(result, PipeJoinIoResult::TxErr { count, err: TestErr::Blocked } if count == TX_CAP),
+            matches!(result, PipeJoinIoResult::TxErr { count, err: TestErr::Stuffed } if count == TX_CAP),
             "exactly one write piece must be transferred"
         );
         // The reader stopped right after the transferred piece...

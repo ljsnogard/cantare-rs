@@ -9,7 +9,7 @@ use core::{
 use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
-use crate::buffer::{TrBuffer, TrBufferMut};
+use crate::error::{ReadErrTag, TrTaggedError, WriteErrTag};
 
 /// A device that will produce data. And the data shall be buffered when taking
 /// taking out of them from this device.
@@ -19,7 +19,7 @@ pub trait TrInput<T = u8> {
         Self: 'f,
         T: 'f;
 
-    type Err: error::Error;
+    type Err: TrTaggedError<ReadErrTag>;
 
     /// Read data from this input device and into the specified target buffer.
     ///
@@ -48,7 +48,7 @@ pub trait TrOutput<T = u8> {
         Self: 'f,
         T: 'f;
 
-    type Err: error::Error;
+    type Err: TrTaggedError<WriteErrTag>;
 
     /// Move data from the specified source into this output device
     fn write_async<'f>(
@@ -113,6 +113,18 @@ impl core::fmt::Display for BlackholeIoError {
 }
 
 impl error::Error for BlackholeIoError {}
+
+impl TrTaggedError<ReadErrTag> for BlackholeIoError {
+    fn err_tag(&self) -> ReadErrTag {
+        ReadErrTag::Closing
+    }
+}
+
+impl TrTaggedError<WriteErrTag> for BlackholeIoError {
+    fn err_tag(&self) -> WriteErrTag {
+        WriteErrTag::Closing
+    }
+}
 
 impl<'a, T> future::IntoFuture for BlackholeIoAsync<'a, T> {
     type IntoFuture = future::Ready<Self::Output>;

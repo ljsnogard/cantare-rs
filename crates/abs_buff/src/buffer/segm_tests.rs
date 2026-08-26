@@ -177,9 +177,10 @@ mod tests_ {
     use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
     use anylr::SomeOf;
 
-    use super::super::segm_::{SegmMut, SegmReclaim, SegmRef};
     use crate::{
         Demand,
+        buffer::segm_::{SegmMut, SegmReclaim, SegmRef},
+        error::{ReadErrTag, WriteErrTag, TrTaggedError},
         io::{TrInput, TrOutput},
     };
 
@@ -198,6 +199,18 @@ mod tests_ {
     }
 
     impl Error for TestErr {}
+
+    impl TrTaggedError<ReadErrTag> for TestErr {
+        fn err_tag(&self) -> ReadErrTag {
+            ReadErrTag::Unknown
+        }
+    }
+
+    impl TrTaggedError<WriteErrTag> for TestErr {
+        fn err_tag(&self) -> WriteErrTag {
+            WriteErrTag::Unknown
+        }
+    }
 
     /// 一个立即就绪的 `TrMayCancel` future，用于测试 `TrInput` / `TrOutput`
     /// 的简单实现。

@@ -429,7 +429,7 @@ impl<W: TrBuffWrite<u8>> TrBuffWrite<u8> for ConservativeTx<W> {
     type SegmMut<'f> = W::SegmMut<'f> where Self: 'f;
     type Err = W::Err;
 
-    fn is_blocked_closing(&self) -> bool {
+    fn is_stuffed_closing(&self) -> bool {
         false // 故意保守：永不提前退出，强制走 write_async 的等待路径
     }
 

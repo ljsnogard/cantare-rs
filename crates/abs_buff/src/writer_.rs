@@ -1,26 +1,28 @@
-use core::error::Error;
-
 use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
-use crate::{Demand, buffer::TrBuffSegmMut};
+use crate::{Demand, buffer::TrBuffSegmMut, error::{TrTaggedError, WriteErrTag}};
 
 /// A kind of buffer that owns the memory for writing data by lending some
 /// segments to the producer.
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffWrite<T = u8> {
-    type WriteAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>>
-        where Self: 'f;
+    type WriteAsync<'f>: TrMayCancel<'f, MayCancelOutput =
+        SomeOf<Self::SegmMut<'f>, Self::Err>>
+    where
+        Self: 'f;
 
     type SegmMut<'f>: TrBuffSegmMut<'f, T> where Self: 'f;
-    type Err: Error;
 
-    /// Indicates whethe the buff will no longer accept data writing.
+    type Err: TrTaggedError<WriteErrTag>;
+
+    /// Indicates whethe the buff will no longer accept data writing. Equivalent
+    /// of `WriteErrTag::Closing`.
     ///
     /// This function lets the user knows when to stop producing loop regardless
     /// any knowledge of the error type.
-    fn is_blocked_closing(&self) -> bool;
+    fn is_stuffed_closing(&self) -> bool;
 
     /// Lend some segments for writing in an async manner. The total amount of
     /// items is specified by the parameter `demand`.

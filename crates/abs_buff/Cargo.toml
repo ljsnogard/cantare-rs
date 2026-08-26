@@ -20,9 +20,6 @@ gen_mcf_macro = { path = "../gen_mcf_macro" }
 funty = { workspace = true }
 
 [features]
-std_write = []
-std_read = []
-std_io = ["std_read", "std_write"]
 
 # 编译 `buffer::segm_tests` 泛型段测试模块，供依赖方在测试中使用。
 segm-tests = []

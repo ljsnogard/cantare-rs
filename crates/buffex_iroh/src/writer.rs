@@ -89,8 +89,8 @@ impl TrBuffWrite<u8> for IrohWriter {
     type SegmMut<'f> = <Inner as TrBuffWrite<u8>>::SegmMut<'f> where Self: 'f;
     type Err = <Inner as TrBuffWrite<u8>>::Err;
 
-    fn is_blocked_closing(&self) -> bool {
-        self.tx.is_blocked_closing()
+    fn is_stuffed_closing(&self) -> bool {
+        self.tx.is_stuffed_closing()
     }
 
     fn write_async<'f>(

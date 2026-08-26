@@ -177,13 +177,13 @@ where
                 Err(TxError::Stuffed(_)) => {
                     if this.cancel.is_cancelled() {
                         this.park.deregister(ring);
-                        return Poll::Ready(SomeOf::new_right(TxError::Stuffed(0)));
+                        return Poll::Ready(SomeOf::new_right(TxError::Cancelled));
                     }
                     if this.park.poll(cx, ring, this.min_len).is_pending() {
                         return Poll::Pending;
                     }
                 }
-                Err(TxError::Closing) => {
+                Err(TxError::Closing | TxError::Cancelled) => {
                     this.park.deregister(ring);
                     return Poll::Ready(SomeOf::new_right(TxError::Closing));
                 }
@@ -349,7 +349,7 @@ where
                         }
                         if this.cancel.is_cancelled() {
                             this.park.deregister(ring);
-                            return Poll::Ready(SomeOf::new_right(RxError::Drained(0)));
+                            return Poll::Ready(SomeOf::new_right(RxError::Cancelled));
                         }
                         if this.park.poll(cx, ring, this.min_len).is_pending() {
                             return Poll::Pending;
@@ -377,7 +377,7 @@ where
                         return Poll::Pending;
                     }
                 }
-                Err(RxError::Closing) => {
+                Err(RxError::Closing | RxError::Cancelled) => {
                     this.park.deregister(ring);
                     return Poll::Ready(SomeOf::new_right(RxError::Closing));
                 }
@@ -509,13 +509,13 @@ where
                 Err(RxError::Drained(_)) => {
                     if this.cancel.is_cancelled() {
                         this.park.deregister(ring);
-                        return Poll::Ready(SomeOf::new_right(RxError::Drained(0)));
+                        return Poll::Ready(SomeOf::new_right(RxError::Cancelled));
                     }
                     if this.park.poll(cx, ring, 0).is_pending() {
                         return Poll::Pending;
                     }
                 }
-                Err(RxError::Closing) => {
+                Err(RxError::Closing | RxError::Cancelled) => {
                     this.park.deregister(ring);
                     return Poll::Ready(SomeOf::new_right(RxError::Closing));
                 }

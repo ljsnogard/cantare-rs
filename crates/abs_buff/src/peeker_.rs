@@ -1,21 +1,24 @@
-use core::error::Error;
-
 use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
-use crate::buffer::TrBuffSegmRef;
+use crate::{
+    buffer::TrBuffSegmRef,
+    error::{ReadErrTag, TrTaggedError},
+};
 
 /// A kind of buffer that owns the memory for peeking the received data without
 /// consuming them.
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffPeek<T = u8> {
-    type PeekAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmPeek<'f>, Self::Err>>
-        where Self: 'f;
+    type PeekAsync<'f>: TrMayCancel<'f, MayCancelOutput =
+        SomeOf<Self::SegmPeek<'f>, Self::Err>>
+    where
+        Self: 'f;
 
     type SegmPeek<'f>: TrBuffSegmRef<'f, T> where Self: 'f;
 
-    type Err: Error;
+    type Err: TrTaggedError<ReadErrTag>;
 
     /// Lend some slices for peeking. The number and the length of the slices
     /// to peek are decided by the buffer.

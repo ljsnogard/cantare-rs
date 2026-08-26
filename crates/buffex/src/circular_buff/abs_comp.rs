@@ -86,7 +86,7 @@ pub enum ReceiverReact {
     /// Receiver has reacted upon the given buffer
     Reacted,
 
-    /// Receiver
+    /// Receiver 
     Continue,
 }
 

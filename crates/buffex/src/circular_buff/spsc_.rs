@@ -75,7 +75,6 @@ where
 /// 核心实现 [`TrCircBuffCore`](super::abs_comp::TrCircBuffCore)（其超类
 /// `Send + Sync`），故两端与元素类型必须 `Send + Sync`。此约束由各 impl 的
 /// where 子句直接表达。
-
 impl<P, C, T, A> Producer<P, C, T, A>
 where
     P: Send + Sync + TrProducer<Data = T>,
@@ -174,7 +173,7 @@ where
     /// 与 [`TrBuffTryRead::try_read`] 语义一致，但不需要 `&mut self`——供
     /// 「等待 future 持有共享引用、并要把段借用到结构体自身生命周期」的场景
     /// （例如 `buffex_iroh` 的无后台任务读等待）使用。
-    pub fn try_read_shared<'f>(
+    pub(super) fn try_read_shared<'f>(
         &'f self,
         demand: &Demand<usize>,
     ) -> SomeOf<
@@ -227,7 +226,7 @@ where
     type Err = TxError<usize>;
 
     #[inline]
-    fn is_blocked_closing(&self) -> bool {
+    fn is_stuffed_closing(&self) -> bool {
         self.core_ref_.is_tx_closed() || !self.core_ref_.producer_ready(1)
     }
 
@@ -245,7 +244,10 @@ where
     A: Send + Sync + TrMalloc + Clone,
 {
     #[inline]
-    fn try_write<'f>(&'f mut self, demand: &Demand<usize>) -> SomeOf<Self::SegmMut<'f>, Self::Err> {
+    fn try_write<'f>(
+        &'f mut self,
+        demand: &Demand<usize>,
+    ) -> SomeOf<Self::SegmMut<'f>, Self::Err> {
         // 主动生产端不对外暴露：半部操作返回错误。
         if !self.core_ref_.producer_is_passive() {
             return SomeOf::new_right(TxError::Unavailable);

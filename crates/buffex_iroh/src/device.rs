@@ -117,11 +117,18 @@ fn poll_once<F: Future>(fut: Pin<&mut F>) -> Poll<F::Output> {
 /// `read_async` **只轮询一次**（try-once）：网络当前无数据时返回 0（泵停止），
 /// 不阻塞、不等待。数据由适配器在每次用户操作前显式 `drive()` 拉取。
 ///
-/// 共享状态：`eof`（流结束 / 出错）与 `err`（最近一次读错误）供适配器合成
-/// `Closing` / `take_error`。
+/// 字段说明（哪些需要共享、哪些不需要）：
+///
+/// * `stream`——**普通字段**：只有泵（单线程，经核心的 `&mut` 纪律）访问它，
+///   读侧从不取回流（`RecvStream` drop 即停止、无需 finish）——不需要
+///   `Arc<Mutex>`；
+/// * `eof` / `err`——**共享句柄**：设备在核心内，适配器无法直接观察其状态，
+///   故经 `Arc` 共享。`eof` 用 `AtomicBool`（同线程读写，但 Arc 内容必须
+///   `Sync` 以维持设备的 `Send + Sync`）；`err` 用 `Mutex`（`take_error` 是
+///   公开 `&self`，可跨线程读取，与设备的写入无类型层面互斥）。
 #[doc(hidden)]
 pub struct StreamInput {
-    stream: Arc<Mutex<Option<RecvStream>>>,
+    stream: RecvStream,
     eof: Arc<AtomicBool>,
     err: Arc<Mutex<Option<ReadError>>>,
 }
@@ -132,11 +139,7 @@ impl StreamInput {
         eof: Arc<AtomicBool>,
         err: Arc<Mutex<Option<ReadError>>>,
     ) -> Self {
-        StreamInput {
-            stream: Arc::new(Mutex::new(Some(stream))),
-            eof,
-            err,
-        }
+        StreamInput { stream, eof, err }
     }
 }
 
@@ -148,37 +151,31 @@ impl TrInput<u8> for StreamInput {
         &'f mut self,
         target: &'f mut [MaybeUninit<u8>],
     ) -> Self::ReadAsync<'f> {
-        let mut guard = self.stream.lock().unwrap();
-        let result = match guard.as_mut() {
-            Some(stream) => {
-                // SAFETY: 以 u8 视图写入未初始化内存；u8 无 drop 需求，
-                // 写入的字节即已初始化。
-                let bytes: &mut [u8] = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        target.as_mut_ptr() as *mut u8,
-                        target.len(),
-                    )
-                };
-                let mut fut = pin!(stream.read(bytes));
-                match poll_once(fut.as_mut()) {
-                    Poll::Ready(Ok(Some(n))) => SomeOf::new_left(n),
-                    Poll::Ready(Ok(None)) => {
-                        // EOF：记入共享状态，本轮返回 0（泵停止）。
-                        self.eof.store(true, Ordering::Release);
-                        SomeOf::new_left(0)
-                    }
-                    Poll::Ready(Err(e)) => {
-                        // 读错误：记录并视为 EOF（适配器可经 take_error 取回）。
-                        if let Ok(mut g) = self.err.lock() {
-                            *g = Some(e);
-                        }
-                        self.eof.store(true, Ordering::Release);
-                        SomeOf::new_left(0)
-                    }
-                    Poll::Pending => SomeOf::new_left(0), // 无数据：本轮不搬
-                }
+        // SAFETY: 以 u8 视图写入未初始化内存；u8 无 drop 需求，
+        // 写入的字节即已初始化。
+        let bytes: &mut [u8] = unsafe {
+            core::slice::from_raw_parts_mut(
+                target.as_mut_ptr() as *mut u8,
+                target.len(),
+            )
+        };
+        let mut fut = pin!(self.stream.read(bytes));
+        let result = match poll_once(fut.as_mut()) {
+            Poll::Ready(Ok(Some(n))) => SomeOf::new_left(n),
+            Poll::Ready(Ok(None)) => {
+                // EOF：记入共享状态，本轮返回 0（泵停止）。
+                self.eof.store(true, Ordering::Release);
+                SomeOf::new_left(0)
             }
-            None => SomeOf::new_left(0),
+            Poll::Ready(Err(e)) => {
+                // 读错误：记录并视为 EOF（适配器可经 take_error 取回）。
+                if let Ok(mut g) = self.err.lock() {
+                    *g = Some(e);
+                }
+                self.eof.store(true, Ordering::Release);
+                SomeOf::new_left(0)
+            }
+            Poll::Pending => SomeOf::new_left(0), // 无数据：本轮不搬
         };
         ReadyIo::new(result)
     }
@@ -194,6 +191,16 @@ impl TrInput<u8> for StreamInput {
 /// 必然送达。在 tokio 多线程运行时下，流控随对端 ACK 推进（由运行时其他
 /// 任务驱动），自旋必然终止；单线程运行时下会自旋饿死，属无任务模型的固有
 /// 边界（见 `buffex` 的 `core_` 模块文档）。
+///
+/// # 为什么这里必须保留 `Arc<Mutex>`（与 [`StreamInput`] 不同）
+///
+/// * `stream`——写侧需要 **`shutdown` 取回流执行 `finish()`**（对端读侧由此
+///   看到 EOF）。取流与泵的 `write_async` 是**两条独立路径**（设备在核心的
+///   `UnsafeCell` 内经 `&mut` 访问，适配器经本 Arc 访问），类型系统无法证明
+///   二者互斥（`shutdown` 是公开方法、可跨线程调用）——并发即双重 `&mut`
+///   UB，`Mutex` 是 soundness 保障；
+/// * `err`——同 [`StreamInput`]：`take_error` 可跨线程读取，与设备的写入
+///   无类型层面互斥，`Mutex` 必需。
 #[doc(hidden)]
 pub struct StreamOutput {
     stream: Arc<Mutex<Option<SendStream>>>,

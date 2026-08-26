@@ -14,33 +14,49 @@ use abs_cancel::{TrCancellationToken, TrMayCancel};
 use anylr::SomeOf;
 
 use crate::{
-    Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
-    buffer::{
-        SegmMut, SegmReclaim, SegmRef, TrBuffSegmMut, TrBuffSegmRef,
-        TrBuffSegmView,
-    },
+    Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite, buffer::{
+        SegmMut, SegmReclaim, SegmRef,
+        TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView,
+    }, error::{ReadErrTag, TrErrTag, TrTaggedError, WriteErrTag},
 };
 
 /// Error returned when a borrowed byte slice is empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BorrowedSliceError {
-    Empty,
+pub enum BorrowedSliceError<TyTag>
+where
+    TyTag: TrErrTag,
+{
+    Empty(TyTag),
 }
 
-impl fmt::Display for BorrowedSliceError {
+impl<TyTag> fmt::Display for BorrowedSliceError<TyTag>
+where
+    TyTag: TrErrTag,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BorrowedSliceError::Empty => {
-                write!(f, "borrowed byte slice is empty")
+            BorrowedSliceError::Empty(tag) => {
+                write!(f, "{}: borrowed byte slice is empty", tag)
             }
         }
     }
 }
 
-impl Error for BorrowedSliceError {}
+impl<TyTag: TrErrTag> Error for BorrowedSliceError<TyTag> {}
+
+impl<TyTag> TrTaggedError<TyTag> for BorrowedSliceError<TyTag>
+where
+    TyTag: TrErrTag,
+{
+    fn err_tag(&self) -> TyTag {
+        match self {
+            BorrowedSliceError::Empty(tag) => *tag,
+        }
+    }
+}
 
 /// A simple immediately-ready `TrMayCancel` future carrying a `SomeOf`.
-struct ReadySegm<S, E>(Option<SomeOf<S, E>>);
+pub struct ReadySegm<S, E>(Option<SomeOf<S, E>>);
 
 impl<S, E> ReadySegm<S, E> {
     fn new(value: SomeOf<S, E>) -> Self {
@@ -420,15 +436,13 @@ impl<T> TrBuffRead<u8> for T
 where
     T: Borrow<[u8]>,
 {
-    type ReadAsync<'f>
-        = impl TrMayCancel<'f, MayCancelOutput = SomeOf<BorrowedReadSegm<'f, T>, BorrowedSliceError>>
+    type ReadAsync<'f> = ReadySegm<Self::SegmRef<'f>, Self::Err>
     where
         Self: 'f;
-    type SegmRef<'f>
-        = BorrowedReadSegm<'f, T>
-    where
-        Self: 'f;
-    type Err = BorrowedSliceError;
+
+    type SegmRef<'f> = BorrowedReadSegm<'f, T> where Self: 'f;
+
+    type Err = BorrowedSliceError<ReadErrTag>;
 
     #[inline]
     fn is_drained_closing(&self) -> bool {
@@ -438,13 +452,12 @@ where
     fn read_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> Self::ReadAsync<'f>
-    {
+    ) -> Self::ReadAsync<'f> {
         let len = Borrow::<[u8]>::borrow(self).len();
         let min_len = demand.min().copied().unwrap_or(0);
         if len == 0 || len < min_len {
             return ReadySegm::new(SomeOf::new_right(
-                BorrowedSliceError::Empty,
+                BorrowedSliceError::Empty(ReadErrTag::Closing),
             ));
         }
         let max_len = demand.max().copied();
@@ -466,7 +479,8 @@ where
         let len = Borrow::<[u8]>::borrow(self).len();
         let min_len = demand.min().copied().unwrap_or(0);
         if len == 0 || len < min_len {
-            return SomeOf::new_right(BorrowedSliceError::Empty);
+            let err = BorrowedSliceError::Empty(ReadErrTag::Closing);
+            return SomeOf::new_right(err);
         }
         let max_len = demand.max().copied();
         SomeOf::new_left(BorrowedReadSegm::with_limit(self, max_len))
@@ -477,18 +491,16 @@ impl<T> TrBuffWrite<u8> for T
 where
     T: BorrowMut<[u8]>,
 {
-    type WriteAsync<'f>
-        = impl TrMayCancel<'f, MayCancelOutput = SomeOf<BorrowedWriteSegm<'f, T>, BorrowedSliceError>>
+    type WriteAsync<'f> = ReadySegm<Self::SegmMut<'f>, Self::Err>
     where
         Self: 'f;
-    type SegmMut<'f>
-        = BorrowedWriteSegm<'f, T>
-    where
-        Self: 'f;
-    type Err = BorrowedSliceError;
+
+    type SegmMut<'f> = BorrowedWriteSegm<'f, T> where Self: 'f;
+
+    type Err = BorrowedSliceError<WriteErrTag>;
 
     #[inline]
-    fn is_blocked_closing(&self) -> bool {
+    fn is_stuffed_closing(&self) -> bool {
         Borrow::<[u8]>::borrow(self).is_empty()
     }
 
@@ -501,7 +513,7 @@ where
         let min_len = demand.min().copied().unwrap_or(0);
         if len == 0 || len < min_len {
             return ReadySegm::new(SomeOf::new_right(
-                BorrowedSliceError::Empty,
+                BorrowedSliceError::Empty(WriteErrTag::Closing),
             ));
         }
         let max_len = demand.max().copied();
@@ -523,7 +535,8 @@ where
         let len = Borrow::<[u8]>::borrow(self).len();
         let min_len = demand.min().copied().unwrap_or(0);
         if len == 0 || len < min_len {
-            return SomeOf::new_right(BorrowedSliceError::Empty);
+            let err = BorrowedSliceError::Empty(WriteErrTag::Closing);
+            return SomeOf::new_right(err);
         }
         let max_len = demand.max().copied();
         SomeOf::new_left(BorrowedWriteSegm::with_limit(self, max_len))

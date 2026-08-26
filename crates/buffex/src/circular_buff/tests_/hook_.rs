@@ -11,15 +11,14 @@ use abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite};
 use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
 
 use super::{
-    super::{BuffConsumer, BuffProducer, CircularBuffBuilder, Consumer, Producer, RxError},
+    super::{BuffConsumer, BuffProducer, CircularBuffBuilder, RxError, SpscPair},
     fill_segm, poll_once, take_segm, TestWaker,
 };
 
+type MadePair = SpscPair<BuffProducer<u8>, BuffConsumer<u8>, u8, CoreAlloc>;
+
 /// 构建被动 × 被动半部对（测试辅助，见 [`super::sync_`] 的说明）。
-fn make_pair<const N: usize>() -> (
-    Producer<BuffProducer<u8>, BuffConsumer<u8>, u8, CoreAlloc>,
-    Consumer<BuffProducer<u8>, BuffConsumer<u8>, u8, CoreAlloc>,
-) {
+fn make_pair<const N: usize>() -> MadePair {
     CircularBuffBuilder::with_capacity(N)
         .producer_passive()
         .consumer_passive()
@@ -79,7 +78,7 @@ fn read_async_returns_closing_on_eof() {
     // 读者等 3 字节：当前为空 → Pending（已注册 waker）。
     let fut = rx.read_async(&Demand::at_least(3));
     let mut fut = pin!(fut.into_future());
-    let (waker, _flag) = TestWaker::new();
+    let (waker, _flag) = TestWaker::make_waker_tuple();
     assert!(poll_once(fut.as_mut(), &waker).is_pending());
 
     // 生产者关闭 → 消费端 hook（`ProducerClose`）唤醒读者。

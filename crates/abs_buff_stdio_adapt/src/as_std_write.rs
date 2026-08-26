@@ -59,7 +59,7 @@ where
         let buf_len = buf.len();
         loop {
             if c >= buf_len
-                || self.buff_w_.is_blocked_closing()
+                || self.buff_w_.is_stuffed_closing()
                 || self.cancel_.is_cancelled()
             {
                 return Result::Ok(c);

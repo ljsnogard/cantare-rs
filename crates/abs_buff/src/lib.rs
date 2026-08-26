@@ -13,6 +13,7 @@ extern crate std;
 pub use gen_mcf_macro::gen_may_cancel_future;
 
 pub mod buffer;
+pub mod error;
 pub mod io;
 pub mod pipelining;
 

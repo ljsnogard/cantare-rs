@@ -231,7 +231,7 @@ impl WakeSlot {
 #[inline]
 fn block_on<F: Future>(fut: F) -> F::Output {
     let waker = Waker::noop();
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(waker);
     let mut fut = pin!(fut);
     loop {
         if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
@@ -315,8 +315,13 @@ where
     ///
     /// `capacity` 必须已在 [`MIN_CAPACITY`] ..= [`MAX_CAPACITY`] 之间（builder
     /// 保证）。
-    pub(super) fn new(capacity: usize, producer: P, consumer: C, alloc: A) -> Self {
-        let buf = Owned::<[MaybeUninit<T>], A>::new_uninit_slice(capacity, alloc.clone());
+    pub(super) fn new(
+        capacity: usize,
+        producer: P,
+        consumer: C,
+        alloc: A,
+    ) -> Self {
+        let buf = Owned::<[MaybeUninit<T>], A>::new_uninit_slice(capacity, alloc);
         CircCore {
             atm_stat_: AtomicFlags::new(AtomicUsize::new(0usize)),
             capacity_: capacity,
@@ -441,7 +446,10 @@ where
     ///
     /// 尊重 `Demand` 的 `[min, max]` 区间：**可写空间不足下限时不返回**（返回
     /// `Stuffed`），满足时最多借出 `max`。区域可能跨末端环绕（由段类型表达）。
-    pub(super) fn try_write_at(&self, demand: &Demand<usize>) -> Result<(usize, usize), TxError<usize>> {
+    pub(super) fn try_write_at(
+        &self,
+        demand: &Demand<usize>,
+    ) -> Result<(usize, usize), TxError<usize>> {
         let min_len = demand.min().copied().unwrap_or(0);
         let max_len = demand.max().copied().unwrap_or(usize::MAX);
         let state = self.atm_stat_.value();
@@ -464,7 +472,10 @@ where
     /// （返回 `Drained`）；**EOF 例外**——写端已关闭（不再会有更多数据）时，
     /// 返回现有部分（可能不足下限）；读端已关闭或缓冲区已空时返回 `Closing` /
     /// `Drained`。
-    pub(super) fn try_read_at(&self, demand: &Demand<usize>) -> Result<(usize, usize), RxError<usize>> {
+    pub(super) fn try_read_at(
+        &self,
+        demand: &Demand<usize>,
+    ) -> Result<(usize, usize), RxError<usize>> {
         let min_len = demand.min().copied().unwrap_or(0);
         let max_len = demand.max().copied().unwrap_or(usize::MAX);
         let state = self.atm_stat_.value();
@@ -505,7 +516,11 @@ where
     ///
     /// 段 drop 时经 [`WriterReclaim`] 提交回本核心（推进写位置并触发消费端
     /// 事件）。
-    pub(super) fn write_segm<'s>(&'s self, start: usize, take: usize) -> ReclSliceMut<'s, T, WriterReclaim<'s, Self>> {
+    pub(super) fn write_segm<'s>(
+        &'s self,
+        start: usize,
+        take: usize,
+    ) -> ReclSliceMut<'s, T, WriterReclaim<'s, Self>> {
         // SAFETY: `start`/`take` 来自 `try_write_at`，区域在缓冲内；可写区与
         // 其他活段 / 泵操作不重叠是调用者义务（SPSC）。
         let whole: &'s mut [MaybeUninit<T>] = self.buffer_view_mut();
@@ -524,7 +539,11 @@ where
     ///
     /// 段 drop 时经 [`ReaderReclaim`] 提交回本核心（推进读位置并触发生产端
     /// 事件）。
-    pub(super) fn read_segm<'s>(&'s self, start: usize, take: usize) -> ReclSliceRef<'s, T, ReaderReclaim<'s, Self>> {
+    pub(super) fn read_segm<'s>(
+        &'s self,
+        start: usize,
+        take: usize,
+    ) -> ReclSliceRef<'s, T, ReaderReclaim<'s, Self>> {
         // SAFETY: 同 [`CircCore::write_segm`]。
         let base = self.buf_.as_ptr().cast::<T>();
         let first = core::cmp::min(take, self.capacity_ - start);

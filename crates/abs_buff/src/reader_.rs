@@ -1,23 +1,28 @@
-use core::error::Error;
-
 use abs_cancel::TrMayCancel;
 use anylr::SomeOf;
 
-use crate::{Demand, buffer::TrBuffSegmRef};
+use crate::{
+    Demand,
+    buffer::TrBuffSegmRef,
+    error::{ReadErrTag, TrTaggedError},
+};
 
 /// A kind of buffer that owns the memory for reading data by lending some
 /// segments to the consumer.
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffRead<T = u8> {
-    type ReadAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>>
-        where Self: 'f;
+    type ReadAsync<'f>: TrMayCancel<'f, MayCancelOutput =
+        SomeOf<Self::SegmRef<'f>, Self::Err>>
+    where
+        Self: 'f;
 
     type SegmRef<'f>: TrBuffSegmRef<'f, T> where Self: 'f;
 
-    type Err: Error;
+    type Err: TrTaggedError<ReadErrTag>;
 
-    /// Indicates whether this buff will no longer emits any data.
+    /// Indicates whether this buff will no longer emits any data. This is
+    /// equivalent of `ReadErrTag::Closing`.
     ///
     /// This function lets the user knows when to stop consuming loop regardless
     /// any knowledge of the error type.

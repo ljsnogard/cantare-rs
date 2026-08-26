@@ -6,6 +6,8 @@
 
 use core::fmt;
 
+use abs_buff::error::{ReadErrTag, TrTaggedError, WriteErrTag};
+
 /// 写（生产）端错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxError<S> {
@@ -32,6 +34,17 @@ impl<S: fmt::Debug> fmt::Display for TxError<S> {
 
 impl<S: fmt::Debug> core::error::Error for TxError<S> {}
 
+impl<S: fmt::Debug> TrTaggedError<WriteErrTag> for TxError<S> {
+    fn err_tag(&self) -> WriteErrTag {
+        match self {
+            TxError::Closing | TxError::Unavailable
+                => WriteErrTag::Closing,
+            TxError::Argument => WriteErrTag::Unknown,
+            TxError::Stuffed(_) => WriteErrTag::Stuffed,
+        }
+    }
+}
+
 /// 读（消费）端错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RxError<S> {
@@ -57,3 +70,14 @@ impl<S: fmt::Debug> fmt::Display for RxError<S> {
 }
 
 impl<S: fmt::Debug> core::error::Error for RxError<S> {}
+
+impl<S: fmt::Debug> TrTaggedError<ReadErrTag> for RxError<S> {
+    fn err_tag(&self) -> ReadErrTag {
+        match self {
+            RxError::Closing | RxError::Unavailable
+                => ReadErrTag::Closing,
+            RxError::Argument => ReadErrTag::Unknown,
+            RxError::Drained(_) => ReadErrTag::Drained,
+        }
+    }
+}
