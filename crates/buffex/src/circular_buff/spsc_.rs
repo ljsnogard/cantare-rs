@@ -1,8 +1,9 @@
 //! 提供给最终用户、暴露的公共接口 Producer 和 Consumer。
 //! 所有对 Circular Buffer 的操作都必须通过这两个实例。
 //! 如果有一端在 Circular Buffer 构建时就已经被指定（主动模式），那么这一端
-//! 的半部虽然存在，但操作返回错误（不对外暴露，见 [`TxError::Unavailable`] /
-//! [`RxError::Unavailable`]）。
+//! **不产出半部**——`build` 只把被动端的半部交给调用者（见
+//! [`super::builder::BuildOutcome`]）；全主动时产出 [`Pipeline`]（流水线
+//! future，由设备驱动）。
 //!
 //! # 设计意图（拥有型访问模型）
 //!
@@ -17,6 +18,7 @@
 use core::{
     marker::PhantomPinned,
     pin::Pin,
+    sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll},
 };
 
@@ -39,7 +41,10 @@ use super::{
 };
 
 /// 堆上核心的共享引用。
-pub(super) type CoreRef<P, C, T, A> = Shared<CircCore<P, C, T, A>, A>;
+///
+/// 名义 `pub`（模块 `spsc_` 私有，对外不可达）：构建产物装配
+/// （[`super::builder::BuildOutcome`]）的公开 trait 方法签名需要引用它。
+pub type CoreRef<P, C, T, A> = Shared<CircCore<P, C, T, A>, A>;
 
 /// 构建器产出的半部对：`(Producer, Consumer)`。使用者可持有两者或其一。
 pub type SpscPair<T = u8, A = CoreAlloc> = (
@@ -54,8 +59,11 @@ pub type SpscPair<T = u8, A = CoreAlloc> = (
 /// 生产端半部：持有一份堆上核心的引用，代理转发用户请求到 `CircCore`。
 ///
 /// `P` / `C` / `T` 与核心的端类型一致（被动 / 主动由构建期决定），`A` 是
-/// 分配器（默认 `CoreAlloc`）。若生产端为主动模式（`P = DeviceProducer`），
-/// 本半部的写操作返回 [`TxError::Unavailable`]。
+/// 分配器（默认 `CoreAlloc`）。
+///
+/// **主动端不产出半部**：若生产端为主动模式（`P = DeviceProducer`），构建器
+/// 不会把它交给调用者（见 [`super::builder::BuildOutcome`]）——本半部只代表
+/// 被动生产端。
 pub struct Producer<P, C, T, A>
 where
     P: TrProducer<Data = T>,
@@ -65,8 +73,10 @@ where
     core_ref_: CoreRef<P, C, T, A>,
 }
 
-/// 消费端半部：与 [`Producer`] 对称（读路径）。若消费端为主动模式
-/// （`C = DeviceConsumer`），读操作返回 [`RxError::Unavailable`]。
+/// 消费端半部：与 [`Producer`] 对称（读路径）。
+///
+/// **主动端不产出半部**：若消费端为主动模式（`C = DeviceConsumer`），构建器
+/// 不会把它交给调用者——本半部只代表被动消费端。
 pub struct Consumer<P, C, T, A>
 where
     P: TrProducer<Data = T>,
@@ -171,6 +181,198 @@ where
     /// 本端是否为被动模式（对外可访问）。
     pub fn is_passive(&self) -> bool {
         self.core_ref_.consumer_is_passive()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 全主动流水线（双端主动时 `build` 的产物）：一个由设备驱动的 Future
+// ---------------------------------------------------------------------------
+
+/// 双端全主动（`TrInput → 缓冲 → TrOutput`）时 `build` 的产物：一条**流水线
+/// Future**。
+///
+/// 由调用者交给异步运行时（`spawn`）驱动：**只要本 future 存活（未被取消 /
+/// 未结束），数据就持续从输入设备流向输出设备**——泵循环 await 两端设备的
+/// `read_async` / `write_async`，由设备自身的就绪/阻塞驱动流动；直到：
+///
+/// * 一端**出错**（设备 future 返回错误——表现为该方向不再有进展）；
+/// * 一端**关闭**（核心的 tx / rx 端被关闭）；
+/// * 调用者**请求断开**（[`Pipeline::disconnect_handle`] 的
+///   [`PipelineDisconnect::request`]，或直接 drop / 取消本 future）。
+///
+/// 断开时流水线关闭两端、把缓冲残留排空到输出设备后结束（future 返回
+/// `()`）。
+///
+/// # 设备契约
+///
+/// 为让「数据一到达就流动」，输入/输出设备的异步操作应在暂时无数据 / 无空间
+/// 时返回 `Pending`（并注册 waker），由设备的运行时在就绪时唤醒——本 future
+/// 的轮询完全由设备的就绪驱动。若设备在无数据时立即返回 `Ready(0)`（非阻塞
+/// 风格），流水线在本轮无进展后停驻（不再流动，也不会空转）。
+///
+/// # 与被动端混合
+///
+/// 若需要流水线**自动**持续流动且不想持有本 future，请让至少一端保持被动：
+/// 被动端的每次读写都会自动驱动对端的主动泵（见 [`Consumer`] / [`Producer`]）。
+pub struct Pipeline<P, C, T, A>
+where
+    P: TrProducer<Data = T>,
+    C: TrConsumer<Data = T>,
+    A: TrMalloc + Clone,
+{
+    core_ref_: CoreRef<P, C, T, A>,
+    /// 断开请求标志：调用者持有一份副本（[`PipelineDisconnect`]），置位后
+    /// 流水线在下一轮 pump 时关闭并结束。
+    disconnect_: Shared<AtomicBool, A>,
+    /// 是否已持有核心的泵互斥（`PUMPING`）——首次 poll 时获取，防止段提交
+    /// 触发的 `fire_*` 同步 `drive()` 与本异步泵竞争。
+    pumping_: bool,
+}
+
+impl<P, C, T, A> Pipeline<P, C, T, A>
+where
+    P: Send + Sync + TrProducer<Data = T>,
+    C: Send + Sync + TrConsumer<Data = T>,
+    T: Send + Sync,
+    A: Send + Sync + TrMalloc + Clone,
+{
+    pub(super) fn new(core_ref_: CoreRef<P, C, T, A>, alloc: A) -> Self {
+        let disconnect_ = Shared::new(AtomicBool::new(false), alloc);
+        Pipeline {
+            core_ref_,
+            disconnect_,
+            pumping_: false,
+        }
+    }
+
+    /// 取得**断开句柄**：把它交给任意线程 / 调用方持有，在想要停止数据流动
+    /// 时调用 [`PipelineDisconnect::request`]——流水线在下一轮 pump 时关闭
+    /// 两端、排空残留并结束（future 返回）。
+    ///
+    /// 句柄只引用断开标志，不持有核心与设备：流水线自身（future）被 drop /
+    /// 取消后，核心与设备随之释放。
+    pub fn disconnect_handle(&self) -> PipelineDisconnect<A> {
+        PipelineDisconnect {
+            flag: self.disconnect_.clone(),
+        }
+    }
+
+    /// 环形缓冲的容量（单元数）。
+    pub fn capacity(&self) -> usize {
+        self.core_ref_.capacity()
+    }
+
+    /// 缓冲中当前的数据量。
+    pub fn data_size(&self) -> usize {
+        self.core_ref_.data_size()
+    }
+
+    /// 缓冲中当前的可写空间。
+    pub fn free_size(&self) -> usize {
+        self.core_ref_.free_size()
+    }
+
+    /// 关闭两端并排空缓冲残留到输出设备（断开收尾，供结束路径共用）。
+    fn shutdown(&mut self, cx: &mut Context<'_>) {
+        let core = &*self.core_ref_;
+        core.close_tx(); // 写端关闭（输出 pump 仍可排空：RX 未关）
+        // 显式排空残留（`fire_*` 的 drive 被 PUMPING 互斥抑制，须手动泵）；
+        // 输出设备阻塞时尽力而为（残留随核心释放丢弃）。
+        let drain = core.pump_output_once_async();
+        let mut drain = core::pin::pin!(drain);
+        let _ = drain.as_mut().poll(cx);
+        core.close_rx(); // 读端关闭：输入 pump 停止
+        core.exit_pump();
+        self.pumping_ = false;
+    }
+}
+
+impl<P, C, T, A> core::future::Future for Pipeline<P, C, T, A>
+where
+    P: Send + Sync + TrProducer<Data = T>,
+    C: Send + Sync + TrConsumer<Data = T>,
+    T: Send + Sync,
+    A: Send + Sync + TrMalloc + Clone,
+{
+    type Output = ();
+
+    /// 驱动一轮流水线泵：
+    ///
+    /// * 检查断开请求 / 端关闭 → 关闭两端、排空残留并 `Ready`；
+    /// * 否则**输出优先**地交替 await 输出泵与输入泵（设备阻塞时挂起、由设备
+    ///   唤醒后继续），同一 poll 内收敛到无进展；
+    /// * 输入设备挂起时，若本段已搬入部分数据，先尽力排空一次输出再挂起，
+    ///   避免数据滞留缓冲；
+    /// * 两端都无进展（非阻塞设备当前无数据）→ `Pending` 停驻。
+    ///
+    /// 首次 poll 获取核心的泵互斥（`PUMPING`），结束路径释放。
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        // 首次 poll 持有泵互斥：段提交触发的 fire_* 只会置待办标志，不会
+        // 同步 drive（block_on）与本异步泵竞争。
+        if !this.pumping_ {
+            if !this.core_ref_.try_enter_pump() {
+                // 理论不可达（全主动无其他泵）：让出，等待下一轮。
+                return Poll::Pending;
+            }
+            this.pumping_ = true;
+        }
+        loop {
+            if this.disconnect_.load(Ordering::Acquire) {
+                this.shutdown(cx);
+                return Poll::Ready(());
+            }
+            let core = &*this.core_ref_;
+            if core.is_tx_closed() || core.is_rx_closed() {
+                this.shutdown(cx);
+                return Poll::Ready(());
+            }
+            let mut progressed = false;
+            // 输出优先：先把缓冲中的数据排空（输出设备阻塞则挂起——已消费部分
+            // 已提交，残留留在缓冲，安全）。
+            if core.data_size() > 0 {
+                let out_pump = core.pump_output_once_async();
+                let mut out_pump = core::pin::pin!(out_pump);
+                match out_pump.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(p) => progressed |= p,
+                }
+            }
+            // 再补输入：读一次设备到可写段并提交（读不到则干净挂起）。
+            if core.free_size() > 0 {
+                let in_pump = core.pump_input_once_async();
+                let mut in_pump = core::pin::pin!(in_pump);
+                match in_pump.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(p) => progressed |= p,
+                }
+            }
+            if !progressed {
+                // 两端均无进展（非阻塞设备当前无数据 / 错误）：停驻等待设备
+                // 唤醒。阻塞设备不会走到这里——await 已挂起。
+                return Poll::Pending;
+            }
+        }
+    }
+}
+
+/// 流水线的断开句柄（见 [`Pipeline::disconnect_handle`]）。
+///
+/// 只引用一个原子标志，不持有核心与设备；可跨线程持有，随时请求断开。
+pub struct PipelineDisconnect<A = CoreAlloc>
+where
+    A: TrMalloc + Clone,
+{
+    flag: Shared<AtomicBool, A>,
+}
+
+impl<A> PipelineDisconnect<A>
+where
+    A: TrMalloc + Clone,
+{
+    /// 请求断开：流水线在下一轮 pump 时关闭两端、排空残留并结束。
+    pub fn request(&self) {
+        self.flag.store(true, Ordering::Release);
     }
 }
 

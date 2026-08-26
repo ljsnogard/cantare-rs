@@ -15,6 +15,7 @@ use abs_buff::{
     Demand,
     buffer::{TrBuffSegmMut, TrBuffSegmRef},
     io::{TrInput, TrOutput},
+    x_deps::abs_cancel::{NonCancellableToken, TrMayCancel},
 };
 
 use super::abs_comp_::{
@@ -264,6 +265,28 @@ where
             ReceiverReact::Reacted
         } else {
             ReceiverReact::Continue
+        }
+    }
+
+    /// 单次读入：一次 `read_async` 到 `target`（供全主动流水线的异步输入泵）。
+    ///
+    /// 与 [`DeviceProducer::react_async`]（循环搬满整段）不同：本方法只读一次，
+    /// 设备阻塞时干净挂起（无部分写入滞留段内）。
+    fn read_once_async<'f>(
+        &'f mut self,
+        target: &'f mut [core::mem::MaybeUninit<T>],
+    ) -> impl Future<Output = usize> + 'f
+    where
+        Self: 'f,
+    {
+        async move {
+            let x = self
+                .input_
+                .read_async(target)
+                .may_cancel_with(NonCancellableToken::shared_mut())
+                .await;
+            // 设备错误：视为 0。
+            x.pick_left().unwrap_or(0)
         }
     }
 }

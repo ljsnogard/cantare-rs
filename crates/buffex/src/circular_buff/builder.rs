@@ -24,6 +24,12 @@
 //!
 //! # 用法一览（生产端/消费端可任意换序）
 //!
+//! **主动端不产出半部**——`build` 的返回类型由两端模式决定：双端被动 → 一对
+//! 半部（[`SpscPair`]）；主动生产 × 被动消费 → 仅消费端半部；被动生产 ×
+//! 主动消费 → 仅生产端半部；主动 × 主动 → [`Pipeline`]（流水线 future：
+//! 交给运行时 spawn 后持续由设备驱动流动，断开经
+//! [`Pipeline::disconnect_handle`]）。
+//!
 //! ```ignore
 //! // 双端被动（默认）：经典手动管道，两端都可访问——不 pipe 任何设备
 //! let (mut tx, mut rx) = CircularBuffBuilder::with_capacity(4096)
@@ -42,25 +48,29 @@
 //!     .build()?;
 //!
 //! // 主动生产 × 被动消费：从 TrInput 自动灌入，用户自行读取
-//! let (tx, mut rx) = CircularBuffBuilder::with_capacity(4096)
+//! // （主动生产端不产出半部——只拿到消费端）
+//! let mut rx = CircularBuffBuilder::with_capacity(4096)
 //!     .pipe_from_input(input)      // 生产端先行
 //!     .consumer_passive()
 //!     .build()?;
 //!
 //! // 被动生产 × 主动消费：用户自行写入，写后自动搬运到 TrOutput
-//! let (mut tx, rx) = CircularBuffBuilder::with_capacity(4096)
+//! // （主动消费端不产出半部——只拿到生产端）
+//! let mut tx = CircularBuffBuilder::with_capacity(4096)
 //!     .pipe_into_output(output)    // 消费端先行
 //!     .producer_passive()
 //!     .build()?;
 //!
-//! // 主动 × 主动：TrInput → 缓冲 → TrOutput 自动流水线（两端都不可直接访问）
-//! let (tx, rx) = CircularBuffBuilder::with_capacity(4096)
+//! // 主动 × 主动：TrInput → 缓冲 → TrOutput 流水线——`build` 返回 [`Pipeline`]
+//! // （Future）：交给运行时 spawn 后持续由设备驱动流动，断开经
+//! // `pipeline.disconnect_handle().request()`
+//! let pipeline = CircularBuffBuilder::with_capacity(4096)
 //!     .pipe_into_output(output)    // 消费端先行
 //!     .pipe_from_input(input)      // 生产端后设
 //!     .build()?;
 //!
 //! // 一步同时设置两端（等价于上例）
-//! let (tx, rx) = CircularBuffBuilder::with_capacity(4096)
+//! let pipeline = CircularBuffBuilder::with_capacity(4096)
 //!     .pipe_between(input, output)
 //!     .build()?;
 //! ```
@@ -79,7 +89,7 @@ use super::{
     abs_comp_::{TrConsumer, TrProducer},
     circ_buff_::{BuffConsumer, BuffProducer, DeviceConsumer, DeviceProducer},
     core_::{self, CircCore},
-    spsc_::{Consumer, Producer, SpscPair},
+    spsc_::{Consumer, CoreRef, Pipeline, Producer, SpscPair},
 };
 
 /// 构建错误：容量超出合法区间（`core_::MIN_CAPACITY` ..= `core_::MAX_CAPACITY`）。
@@ -355,11 +365,23 @@ where
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    /// 装配核心并产出半部对 `(Producer, Consumer)`。
+    /// 装配核心并产出**按两端模式决定的构建产物**。
     ///
     /// 校验容量 → 分配缓冲并装入两端（`CircCore::new`）→ 移到堆上
-    /// （[`Shared`]）→ 构建期初始驱动（主动端先泵一轮，让数据开始流动）。
-    pub fn build(self) -> Result<(Producer<P, C, T, A>, Consumer<P, C, T, A>), BuilderError<usize>> {
+    /// （[`Shared`]）→ 构建期初始驱动（主动端先泵一轮，让数据开始流动）→
+    /// 按模式装配产物（**主动端不产出半部**，见 [`BuildOutcome`]）。
+    ///
+    /// 返回类型由两端模式决定：被动 × 被动 → [`SpscPair`]（一对半部，调用者
+    /// 自行读写）；主动生产 × 被动消费 → 仅消费端半部（读取即自动驱动输入泵
+    /// 补位）；被动生产 × 主动消费 → 仅生产端半部（写入即自动驱动输出泵排空）；
+    /// 主动 × 主动 → [`Pipeline`]（流水线 future：交给运行时 spawn 后持续
+    /// 由两端设备驱动流动，直到一端出错 / 关闭或调用者请求断开）。
+    pub fn build(
+        self,
+    ) -> Result<<() as BuildOutcome<P, C, T, A>>::Output, BuilderError<usize>>
+    where
+        (): BuildOutcome<P, C, T, A>,
+    {
         let cap = self.capacity;
         if cap < core_::MIN_CAPACITY {
             return Err(BuilderError::SizeTooSmall(cap));
@@ -373,11 +395,130 @@ where
             self.consumer,
             self.alloc.clone(),
         );
-        let shared = Shared::new(core, self.alloc);
-        let producer = Producer::new(shared.clone());
-        let consumer = Consumer::new(shared.clone());
-        // 构建期初始驱动：主动端先各自泵一轮（被动端为无操作）。
-        shared.start();
-        Ok((producer, consumer))
+        let shared = Shared::new(core, self.alloc.clone());
+        // 构建期初始驱动：除「全主动流水线」外，主动端先各自泵一轮（被动端为
+        // 无操作）。全主动的驱动交给 `Pipeline` future（首个 poll），避免阻塞
+        // 式输入设备在 build 期间自旋挂死。
+        if <() as BuildOutcome<P, C, T, A>>::DRIVE_ON_BUILD {
+            shared.start();
+        }
+        Ok(<() as BuildOutcome<P, C, T, A>>::assemble(
+            shared, self.alloc,
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 构建产物装配：按两端模式决定 `build` 的返回类型
+// ---------------------------------------------------------------------------
+
+/// 按两端模式装配 `build` 的产物（**内部机制**，调用者不应实现或直接使用）。
+///
+/// 设计初衷：**主动端不产出半部**——主动端由设备驱动，调用者不应持有任何
+/// 可操作它的对象，因此 `build` 的返回类型随两端模式而定：
+///
+/// * 被动 × 被动 → [`SpscPair`]（一对半部）；
+/// * 主动生产 × 被动消费 → 仅消费端半部；
+/// * 被动生产 × 主动消费 → 仅生产端半部；
+/// * 主动 × 主动 → [`Pipeline`]（流水线 future，由设备驱动）。
+///
+/// 类型状态链保证 `P` / `C` 只能是四个端类型（`BuffProducer` /
+/// `BuffConsumer` / `DeviceProducer` / `DeviceConsumer`），下面的四个实现
+/// 覆盖全部组合；密封（`sealed::Sealed`）保证调用者无法为其它类型实现。
+#[doc(hidden)]
+pub trait BuildOutcome<P, C, T, A>: sealed::Sealed
+where
+    P: TrProducer<Data = T>,
+    C: TrConsumer<Data = T>,
+    A: TrMalloc + Clone,
+{
+    type Output;
+
+    /// 构建期是否需要初始 drive（全主动不需要——由 `Pipeline` future 驱动）。
+    const DRIVE_ON_BUILD: bool;
+
+    /// 装配构建产物。`alloc` 是构建器的分配器（`Pipeline` 需要它分配断开标志）。
+    fn assemble(core_ref: CoreRef<P, C, T, A>, alloc: A) -> Self::Output;
+}
+
+mod sealed {
+    /// 密封标记：仅 `()` 实现，外部无法自定义 `BuildOutcome`。
+    pub trait Sealed {}
+}
+
+impl sealed::Sealed for () {}
+
+impl<T, A> BuildOutcome<BuffProducer<T>, BuffConsumer<T>, T, A> for ()
+where
+    T: Send + Sync,
+    A: Send + Sync + TrMalloc + Clone,
+{
+    type Output = SpscPair<T, A>;
+
+    const DRIVE_ON_BUILD: bool = true;
+
+    fn assemble(
+        core_ref: CoreRef<BuffProducer<T>, BuffConsumer<T>, T, A>,
+        _alloc: A,
+    ) -> SpscPair<T, A> {
+        (Producer::new(core_ref.clone()), Consumer::new(core_ref))
+    }
+}
+
+impl<I, T, A> BuildOutcome<DeviceProducer<I, T>, BuffConsumer<T>, T, A> for ()
+where
+    I: Send + Sync + TrInput<T>,
+    T: Send + Sync,
+    A: Send + Sync + TrMalloc + Clone,
+{
+    type Output = Consumer<DeviceProducer<I, T>, BuffConsumer<T>, T, A>;
+
+    const DRIVE_ON_BUILD: bool = true;
+
+    fn assemble(
+        core_ref: CoreRef<DeviceProducer<I, T>, BuffConsumer<T>, T, A>,
+        _alloc: A,
+    ) -> Self::Output {
+        Consumer::new(core_ref)
+    }
+}
+
+impl<O, T, A> BuildOutcome<BuffProducer<T>, DeviceConsumer<O, T>, T, A> for ()
+where
+    O: Send + Sync + TrOutput<T>,
+    T: Send + Sync,
+    A: Send + Sync + TrMalloc + Clone,
+{
+    type Output = Producer<BuffProducer<T>, DeviceConsumer<O, T>, T, A>;
+
+    const DRIVE_ON_BUILD: bool = true;
+
+    fn assemble(
+        core_ref: CoreRef<BuffProducer<T>, DeviceConsumer<O, T>, T, A>,
+        _alloc: A,
+    ) -> Self::Output {
+        Producer::new(core_ref)
+    }
+}
+
+impl<I, O, T, A> BuildOutcome<DeviceProducer<I, T>, DeviceConsumer<O, T>, T, A>
+    for ()
+where
+    I: Send + Sync + TrInput<T>,
+    O: Send + Sync + TrOutput<T>,
+    T: Send + Sync,
+    A: Send + Sync + TrMalloc + Clone,
+{
+    type Output = Pipeline<DeviceProducer<I, T>, DeviceConsumer<O, T>, T, A>;
+
+    /// 全主动流水线不在此处驱动——驱动交给 `Pipeline` future 的首个 poll
+    /// （build 期间驱动会阻塞在阻塞式设备的 `read_async` 上）。
+    const DRIVE_ON_BUILD: bool = false;
+
+    fn assemble(
+        core_ref: CoreRef<DeviceProducer<I, T>, DeviceConsumer<O, T>, T, A>,
+        alloc: A,
+    ) -> Self::Output {
+        Pipeline::new(core_ref, alloc)
     }
 }

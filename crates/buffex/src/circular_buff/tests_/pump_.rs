@@ -1,54 +1,49 @@
 //! 主动模式的测试：输入泵（`pipe_from_input`）、输出泵（`pipe_into_output`）、
-//! 以及全主动流水线。主动端不 `spawn` 任何任务：数据在构建期 / 对端操作时
-//! 由 hook 同步搬运。
+//! 以及全主动流水线（`Pipeline` future）。主动端不 `spawn` 任何任务：数据在
+//! 构建期 / 对端操作时由 hook 同步搬运；全主动流水线由设备驱动的 `Pipeline`
+//! future 持续搬运。
+//!
+//! 主动端**不产出半部**：`build` 只把被动端的半部交给调用者（主动生产 ×
+//! 被动消费 → 仅消费端；被动生产 × 主动消费 → 仅生产端；主动 × 主动 →
+//! `Pipeline` future）。
 //!
 //! 设备 move 进核心后测试无法直接访问，经 `Arc` 观察其内部状态。
 
-use std::{
-    sync::atomic::Ordering,
-    vec,
-    vec::Vec,
-};
+use std::{pin::Pin, sync::atomic::Ordering, vec, vec::Vec};
 
-use abs_buff::{Demand, TrBuffTryRead, TrBuffTryWrite};
+use abs_buff::{
+    Demand, TrBuffTryRead, TrBuffTryWrite,
+    x_deps::{
+        abs_cancel::{TrCancellationToken, TrMayCancel},
+        anylr::SomeOf,
+    },
+};
 use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
 
 use super::{
-    super::{
-        BuffConsumer, BuffProducer, CircularBuffBuilder, Consumer, DeviceConsumer,
-        DeviceProducer, Producer, RxError, TxError,
-    },
-    fill_segm, take_segm, TestInput, TestOutput,
+    super::{CircularBuffBuilder, RxError, TxError},
+    TestErr, TestInput, TestOutput, TestWaker, fill_segm, poll_once, take_segm,
 };
-
-type Pair<P, C, T = u8, A = CoreAlloc> = (Producer<P, C, T, A>, Consumer<P, C, T, A>);
 
 /// 主动生产 × 被动消费：构造即从 `TrInput` 泵入；消费端每读取一次，
 /// 释放的可写空间立即被新数据补满；输入耗尽后停止。
+///
+/// `build` 只返回消费端半部——主动生产端由设备驱动，不产出写半部。
 #[test]
 fn pipe_from_input_fills_and_refills() {
     let input = TestInput::new((0..20).collect());
     let data = input.data.clone();
     let pos = input.pos.clone();
 
-    let (mut tx, mut rx): Pair<DeviceProducer<TestInput, u8>, BuffConsumer<u8>> =
-        CircularBuffBuilder::with_capacity(8)
-            .pipe_from_input(input)
-            .consumer_passive()
-            .build()
-            .unwrap();
+    let mut rx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+        .pipe_from_input(input)
+        .consumer_passive()
+        .build()
+        .unwrap();
 
     // 构造完成即已泵入：容量 8 → 单空槽 → 最多 7 格数据。
     assert_eq!(rx.data_size(), 7);
     assert_eq!(pos.load(Ordering::Relaxed), 7, "输入设备已被读走 7 字节");
-
-    // 主动生产端不对外暴露：写半部操作返回 Unavailable。
-    assert!(
-        TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(1))
-            .pick_right()
-            .is_some(),
-        "主动生产端的写半部不可用"
-    );
 
     // 边读边补：读空当前数据 → hook 立即从输入设备拉取下一批。
     let mut total = Vec::new();
@@ -75,25 +70,18 @@ fn pipe_from_input_fills_and_refills() {
 }
 
 /// 被动生产 × 主动消费：写入缓冲的数据**立即**被搬运到 `TrOutput`。
+///
+/// `build` 只返回生产端半部——主动消费端由设备驱动，不产出读半部。
 #[test]
 fn pipe_into_output_drains_on_write() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let (mut tx, mut rx): Pair<BuffProducer<u8>, DeviceConsumer<TestOutput, u8>> =
-        CircularBuffBuilder::with_capacity(8)
-            .producer_passive()
-            .pipe_into_output(output)
-            .build()
-            .unwrap();
-
-    // 主动消费端不对外暴露：读半部操作返回 Unavailable。
-    assert!(
-        TrBuffTryRead::try_read(&mut rx, &Demand::at_least(1))
-            .pick_right()
-            .is_some(),
-        "主动消费端的读半部不可用"
-    );
+    let mut tx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+        .producer_passive()
+        .pipe_into_output(output)
+        .build()
+        .unwrap();
 
     // 写 3 字节 → 写段 drop 提交 → 消费端 hook 立即泵出。
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(3))
@@ -116,10 +104,14 @@ fn pipe_into_output_drains_on_write() {
         fill_segm(&mut ws, &[chunk * 10 + 1, chunk * 10 + 2]);
         drop(ws);
     }
-    assert_eq!(*out_data.lock().unwrap(), vec![1, 2, 3, 1, 2, 11, 12, 21, 22]);
+    assert_eq!(
+        *out_data.lock().unwrap(),
+        vec![1, 2, 3, 1, 2, 11, 12, 21, 22]
+    );
 }
 
-/// 主动 × 主动：`TrInput → 缓冲 → TrOutput` 同步流水线，构建完成即全部贯通。
+/// 主动 × 主动：`TrInput → 缓冲 → TrOutput` 流水线。`build` 返回
+/// [`Pipeline`] future；首个 poll 即由设备驱动把当前可用的输入全部流到输出。
 #[test]
 fn pipe_both_active_pipeline() {
     let input = TestInput::new((0..20).collect());
@@ -127,16 +119,171 @@ fn pipe_both_active_pipeline() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let _pair: Pair<DeviceProducer<TestInput, u8>, DeviceConsumer<TestOutput, u8>> =
-        CircularBuffBuilder::with_capacity(8)
-            .pipe_from_input(input)
-            .pipe_into_output(output)
-            .build()
-            .unwrap();
+    let mut pipeline = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+        .pipe_from_input(input)
+        .pipe_into_output(output)
+        .build()
+        .unwrap();
 
-    // 构建期的一轮 drive 把整个流水线跑完：输入数据全部流到输出。
+    // 首个 poll：输入泵 + 输出泵跑完整个流水线（非阻塞设备立即就绪）。
+    let (waker, _wake_flag) = TestWaker::make_waker_tuple();
+    let mut pinned = Pin::new(&mut pipeline);
+    let _ = poll_once(pinned.as_mut(), &waker);
+
     assert_eq!(*out_data.lock().unwrap(), (0..20).collect::<Vec<_>>());
     assert_eq!(pos.load(Ordering::Relaxed), 20, "输入设备已全部读完");
+}
+
+/// 阻塞式输入设备：无数据时 `read_async` 挂起（注册 waker）；调用方经 `Arc`
+/// 压入数据并唤醒后，下一次 poll 即有数据可读。用于验证「由设备驱动」的
+/// 流水线流动。
+struct BlockingInput {
+    data: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    pos: usize,
+    waker: std::sync::Arc<std::sync::Mutex<Option<std::task::Waker>>>,
+}
+
+impl BlockingInput {
+    fn new() -> (
+        Self,
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        std::sync::Arc<std::sync::Mutex<Option<std::task::Waker>>>,
+    ) {
+        let data = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let waker = std::sync::Arc::new(std::sync::Mutex::new(None));
+        (
+            BlockingInput {
+                data: data.clone(),
+                pos: 0,
+                waker: waker.clone(),
+            },
+            data,
+            waker,
+        )
+    }
+}
+
+struct BlockingRead<'f> {
+    input: &'f mut BlockingInput,
+    target: &'f mut [core::mem::MaybeUninit<u8>],
+}
+
+impl core::future::Future for BlockingRead<'_> {
+    type Output = SomeOf<usize, TestErr>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        let this = &mut *self;
+        let data = this.input.data.lock().unwrap();
+        let avail = data.len().saturating_sub(this.input.pos);
+        if avail == 0 {
+            // 无数据：注册 waker 并挂起；数据到达时由 push 侧唤醒。
+            *this.input.waker.lock().unwrap() = Some(cx.waker().clone());
+            return core::task::Poll::Pending;
+        }
+        let n = core::cmp::min(this.target.len(), avail);
+        for (i, slot) in this.target[..n].iter_mut().enumerate() {
+            *slot = core::mem::MaybeUninit::new(data[this.input.pos + i]);
+        }
+        this.input.pos += n;
+        core::task::Poll::Ready(SomeOf::new_left(n))
+    }
+}
+
+impl<'f> TrMayCancel<'f> for BlockingRead<'f> {
+    type MayCancelFuture<'g, C> = BlockingRead<'f>
+    where
+        Self: 'g,
+        C: TrCancellationToken + Clone,
+        C: 'f,
+        C: 'g,
+        'g: 'f;
+    type MayCancelOutput = SomeOf<usize, TestErr>;
+
+    fn may_cancel_with<'g, C>(
+        self,
+        _cancel: &'g mut C,
+    ) -> Self::MayCancelFuture<'g, C>
+    where
+        Self: 'g,
+        'g: 'f,
+        C: TrCancellationToken + Clone,
+    {
+        self
+    }
+}
+
+impl abs_buff::io::TrInput<u8> for BlockingInput {
+    type ReadAsync<'f> = BlockingRead<'f> where Self: 'f;
+    type Err = TestErr;
+
+    fn read_async<'f>(
+        &'f mut self,
+        target: &'f mut [core::mem::MaybeUninit<u8>],
+    ) -> Self::ReadAsync<'f> {
+        BlockingRead {
+            input: self,
+            target,
+        }
+    }
+}
+
+/// 双端全主动：数据流动**由两端设备驱动**——`Pipeline` future 存活期间持续
+/// 搬运，直到调用者请求断开。
+///
+/// 1. 输入设备无数据 → 流水线挂起（await 输入设备的 `read_async`，Pending）；
+/// 2. 压入数据并唤醒 → 流水线自动把数据流到输出（无需任何显式 drive）；
+/// 3. 再次压入 → 再次流动；
+/// 4. `disconnect_handle().request()` → 流水线关闭两端并结束（future 返回）。
+#[test]
+fn pipeline_flows_driven_by_devices_until_disconnect() {
+    let (input, in_data, in_waker) = BlockingInput::new();
+    let output = TestOutput::new();
+    let out_data = output.data.clone();
+
+    let pipeline = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+        .pipe_between(input, output)
+        .build()
+        .unwrap();
+    let disconnect = pipeline.disconnect_handle();
+
+    let (waker, _wake_flag) = TestWaker::make_waker_tuple();
+    let mut pipeline = pipeline;
+    let mut pinned = Pin::new(&mut pipeline);
+
+    // 输入设备无数据：流水线挂起，等待输入设备唤醒。
+    assert!(
+        poll_once(pinned.as_mut(), &waker).is_pending(),
+        "输入设备无数据时应挂起"
+    );
+    assert!(out_data.lock().unwrap().is_empty());
+
+    // 设备就绪（压入数据 + 唤醒）：流水线由输入设备驱动，数据自动流到输出。
+    in_data.lock().unwrap().extend_from_slice(&[1, 2, 3]);
+    if let Some(w) = in_waker.lock().unwrap().take() {
+        w.wake();
+    }
+    assert!(poll_once(pinned.as_mut(), &waker).is_pending());
+    assert_eq!(
+        *out_data.lock().unwrap(),
+        vec![1, 2, 3],
+        "设备就绪后数据应自动流动"
+    );
+
+    // 第二批数据：同样自动流动（输入设备再次就绪）。
+    in_data.lock().unwrap().extend_from_slice(&[4, 5]);
+    if let Some(w) = in_waker.lock().unwrap().take() {
+        w.wake();
+    }
+    assert!(poll_once(pinned.as_mut(), &waker).is_pending());
+    assert_eq!(*out_data.lock().unwrap(), vec![1, 2, 3, 4, 5]);
+
+    // 请求断开：流水线关闭两端、排空残留并结束。
+    disconnect.request();
+    assert!(poll_once(pinned.as_mut(), &waker).is_ready());
+    assert_eq!(*out_data.lock().unwrap(), vec![1, 2, 3, 4, 5]);
 }
 
 /// 主动生产端在输入耗尽后停止泵入；再次消费时不再有数据。
@@ -145,12 +292,11 @@ fn pipe_from_input_stops_when_exhausted() {
     let input = TestInput::new(vec![1, 2, 3]);
     let pos = input.pos.clone();
 
-    let (_tx, mut rx): Pair<DeviceProducer<TestInput, u8>, BuffConsumer<u8>> =
-        CircularBuffBuilder::with_capacity(8)
-            .pipe_from_input(input)
-            .consumer_passive()
-            .build()
-            .unwrap();
+    let mut rx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+        .pipe_from_input(input)
+        .consumer_passive()
+        .build()
+        .unwrap();
 
     let mut total = Vec::new();
     loop {
@@ -185,7 +331,10 @@ struct GatedInput {
 }
 
 impl abs_buff::io::TrInput<u8> for GatedInput {
-    type ReadAsync<'f> = super::ReadySegm<usize, super::TestErr> where Self: 'f;
+    type ReadAsync<'f>
+        = super::ReadySegm<usize, super::TestErr>
+    where
+        Self: 'f;
     type Err = super::TestErr;
 
     fn read_async<'f>(
@@ -195,7 +344,9 @@ impl abs_buff::io::TrInput<u8> for GatedInput {
         use std::sync::atomic::Ordering as O;
         self.calls.fetch_add(1, O::Relaxed);
         if !self.gate.load(O::Acquire) || self.pos >= self.data.len() {
-            return super::ReadySegm::new(abs_buff::x_deps::anylr::SomeOf::new_left(0));
+            return super::ReadySegm::new(
+                abs_buff::x_deps::anylr::SomeOf::new_left(0),
+            );
         }
         let n = core::cmp::min(target.len(), self.data.len() - self.pos);
         for (i, slot) in target[..n].iter_mut().enumerate() {
@@ -225,12 +376,11 @@ fn try_read_auto_drives_active_producer() {
         calls: calls.clone(),
     };
 
-    let (_tx, mut rx): Pair<DeviceProducer<GatedInput, u8>, BuffConsumer<u8>> =
-        CircularBuffBuilder::with_capacity(8)
-            .pipe_from_input(input)
-            .consumer_passive()
-            .build()
-            .unwrap();
+    let mut rx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+        .pipe_from_input(input)
+        .consumer_passive()
+        .build()
+        .unwrap();
 
     // 构造期 start() 泵了一轮，但门未开 → 缓冲为空。
     assert_eq!(rx.data_size(), 0);
@@ -245,7 +395,10 @@ fn try_read_auto_drives_active_producer() {
     drop(rs);
 
     // 设备已供完：后续 try_read 自动驱动一次（读到 Drained），不阻塞。
-    assert!(calls.load(Ordering::Relaxed) >= 3, "try_read 应自动驱动输入泵");
+    assert!(
+        calls.load(Ordering::Relaxed) >= 3,
+        "try_read 应自动驱动输入泵"
+    );
     let some = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(1));
     assert!(
         matches!(some.pick_right(), Some(RxError::Drained(_))),
@@ -260,12 +413,11 @@ fn close_tx_drains_remaining_output() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let (mut tx, _rx): Pair<BuffProducer<u8>, DeviceConsumer<TestOutput, u8>> =
-        CircularBuffBuilder::with_capacity(8)
-            .producer_passive()
-            .pipe_into_output(output)
-            .build()
-            .unwrap();
+    let mut tx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+        .producer_passive()
+        .pipe_into_output(output)
+        .build()
+        .unwrap();
 
     // 写 5 字节（一次借出可写区，全部写入并提交）。
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(5))

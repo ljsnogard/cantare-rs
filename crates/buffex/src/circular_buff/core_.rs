@@ -569,11 +569,12 @@ where
             debug_assert!(rp < self.capacity_ && wp < self.capacity_);
             pack(rp, (wp + amount) % self.capacity_) | (s & FLAG_MASK)
         });
-        if self.is_tx_closed() {
-            self.fire_consumer(ConsumerHookEvent::ProducerClose(self.data_size()));
+        let event = if self.is_tx_closed() {
+            ConsumerHookEvent::ProducerClose(self.data_size())
         } else {
-            self.fire_consumer(ConsumerHookEvent::Available(self.data_size()));
-        }
+            ConsumerHookEvent::Available(self.data_size())
+        };
+        self.fire_consumer(event);
     }
 
     /// 读提交：按已消费量推进读位置，触发生产端事件。
@@ -583,11 +584,12 @@ where
             debug_assert!(rp < self.capacity_ && wp < self.capacity_);
             pack((rp + amount) % self.capacity_, wp) | (s & FLAG_MASK)
         });
-        if self.is_rx_closed() {
-            self.fire_producer(ProducerHookEvent::ConsumerClose(self.free_size()));
+        let event = if self.is_rx_closed() {
+            ProducerHookEvent::ConsumerClose(self.free_size())
         } else {
-            self.fire_producer(ProducerHookEvent::Available(self.free_size()));
-        }
+            ProducerHookEvent::Available(self.free_size())
+        };
+        self.fire_producer(event);
     }
 
     /// 关闭写端：不再接受写入，触发消费端事件（`ProducerClose`）。
@@ -636,6 +638,7 @@ where
             let producer = self.producer_mut();
             let passive = producer.is_passive();
             // 被动端：armed 才继续（状态字 Acquire 读建立 happens-before）。
+            // 主动端不设 STNDBY（无等待者），不受此门控——否则泵链断链。
             if passive && !has_flag(self.atm_stat_.value(), TX_STNDBY) {
                 return;
             }
@@ -661,6 +664,7 @@ where
             let consumer = self.consumer_mut();
             let passive = consumer.is_passive();
             // 被动端：armed 才继续（状态字 Acquire 读建立 happens-before）。
+            // 主动端不设 STNDBY（无等待者），不受此门控——否则泵链断链。
             if passive && !has_flag(self.atm_stat_.value(), RX_STNDBY) {
                 return;
             }
@@ -839,6 +843,84 @@ where
     }
 
     // ------------------------------------------------------------------
+    // 异步泵（全主动流水线句柄 `Pipeline` 的 Future 驱动用）
+    // ------------------------------------------------------------------
+
+    /// 异步输入泵（**单段单读**）：借一段可写区，经
+    /// [`TrProducer::read_once_async`] 从设备**读一次**，随即手动提交
+    /// （`advance_write`）；段 drop 提交 0（offset 未动）。
+    ///
+    /// 与同步 [`CircCore::pump_input`]（`react_async` 循环搬满整段）的区别：
+    /// * 一次只读一次设备——设备阻塞时**干净挂起**（无部分写入滞留段内、
+    ///   提交 0），不会出现「段中途挂起 → 已写部分要到 future 被 drop 才
+    ///   提交」的数据滞留；
+    /// * 用真 await 而非 `block_on`——由流水线 future 在 poll 中与输出泵交替
+    ///   调用，读到数据即提交、随即排空输出。
+    ///
+    /// # 约束
+    ///
+    /// 调用方（[`super::spsc_::Pipeline`]）必须已持有泵互斥（[`CircCore::try_enter_pump`]），
+    /// 否则提交触发的对端 `fire_*` 会同步 `drive()`（`block_on`）与本泵竞争
+    /// （阻塞设备的 future 在 noop waker 下会自旋）。
+    ///
+    /// 返回本次是否读到数据（`false` = 设备暂无数据 / 错误 / 端已关闭）。
+    pub(super) async fn pump_input_once_async(&self) -> bool {
+        let state = self.atm_stat_.value();
+        let (rp, wp) = unpack(state);
+        let free = self.free_(rp, wp);
+        // 无空间、写端关闭、或消费者已关闭（泵进去也没人消费）则停止。
+        if free == 0 || has_flag(state, TX_CLOSED) || has_flag(state, RX_CLOSED)
+        {
+            return false;
+        }
+        let take = core::cmp::min(free, self.capacity_ - wp);
+        // SAFETY: 泵互斥（PUMPING）由调用方持有，本线程独占生产端。
+        let producer = self.producer_mut();
+        if !producer.check(ProducerHookEvent::Available(free)) {
+            return false; // 设备对当前可写量不感兴趣：停止本轮
+        }
+        // SAFETY: 可写区不与任何活段重叠（泵运行在提交之后，SPSC 纪律）。
+        let mut segm = self.write_segm(wp, take);
+        // 读到段的第一段物理空间（不跨末端环绕；write_segm 已按末端拆分）。
+        let Some(slice) = segm.iter_slices_mut().next() else {
+            return false;
+        };
+        let n = producer.read_once_async(slice).await;
+        if n > 0 {
+            // 手动提交（segm 的 offset 未被写方法推进，drop 时提交 0，不会
+            // 重复推进）：推进写位置并触发消费端事件。
+            self.advance_write(n);
+        }
+        n > 0
+    }
+
+    /// 异步输出泵（**单段**）：与 [`CircCore::pump_input_once_async`] 对称
+    /// （await 主动消费端 `react_async` 把一段可读数据搬给输出设备）。
+    ///
+    /// 返回本段是否搬出数据。
+    pub(super) async fn pump_output_once_async(&self) -> bool {
+        let state = self.atm_stat_.value();
+        let (rp, wp) = unpack(state);
+        let data = self.data_(rp, wp);
+        if data == 0 || has_flag(state, RX_CLOSED) {
+            return false;
+        }
+        let take = core::cmp::min(data, self.capacity_ - rp);
+        // SAFETY: 泵互斥（PUMPING）由调用方持有，本线程独占消费端。
+        let consumer = self.consumer_mut();
+        if !consumer.check(ConsumerHookEvent::Available(data)) {
+            return false; // 设备对当前数据量不感兴趣：停止本轮
+        }
+        // SAFETY: 可读区为已初始化数据；不与活段重叠。
+        let mut segm = self.read_segm(rp, take);
+        let before = segm.least_count();
+        let _react = consumer.react_async(&mut segm).await;
+        let moved = before - segm.least_count();
+        // `segm` drop：提交 advance_read → 触发生产端事件。
+        moved > 0
+    }
+
+    // ------------------------------------------------------------------
     // 原子辅助
     // ------------------------------------------------------------------
 
@@ -874,7 +956,11 @@ where
 
     /// 尝试获取泵互斥（`PUMPING` 位 test-and-set）：成功返回 `true`，
     /// 已在泵中返回 `false`（不阻塞）。
-    fn try_enter_pump(&self) -> bool {
+    ///
+    /// `pub(super)`：全主动流水线句柄（[`super::spsc_::Pipeline`]）在其
+    /// `Future::poll` 期间持有本互斥，使段提交触发的 `fire_*` 只置待办标志、
+    /// 不会同步 `drive()`（`block_on`）与异步泵竞争。
+    pub(super) fn try_enter_pump(&self) -> bool {
         let mut state = self.atm_stat_.value();
         loop {
             if has_flag(state, PUMPING) {
@@ -891,8 +977,8 @@ where
         }
     }
 
-    /// 释放泵互斥（清除 `PUMPING` 位）。
-    fn exit_pump(&self) {
+    /// 释放泵互斥（清除 `PUMPING` 位）。见 [`CircCore::try_enter_pump`]。
+    pub(super) fn exit_pump(&self) {
         self.update_state(|s| s & !PUMPING);
     }
 

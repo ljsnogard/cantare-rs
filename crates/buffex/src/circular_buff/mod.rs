@@ -58,14 +58,17 @@
 //! （决定可访问性），`T` 是元素类型，`A` 是分配器——hook 完全在内部，调用者
 //! 不参与构造。
 //!
-//! ## 设计要点二：主动端不对外暴露
+//! ## 设计要点二：主动端不产出半部
 //!
 //! 模式对调用者唯一可见的影响是**可访问性**：使用了主动模式的那一端由设备驱动，
-//! 不可能再让外部调用者访问——主动端的半部（[`Producer`] /
-//! [`Consumer`]）存在但操作返回 [`TxError::Unavailable`] /
-//! [`RxError::Unavailable`]。这对应了 `RingBuffer` 中「半部不存在」（
+//! 调用者**根本拿不到它的半部**——`build` 只把**被动端**的半部交给调用者
+//! （见 [`BuildOutcome`](builder::BuildOutcome)）：被动 × 被动 → 一对半部；
+//! 主动生产 × 被动消费 → 仅消费端半部；被动生产 × 主动消费 → 仅生产端半部；
+//! 主动 × 主动 → [`Pipeline`]（流水线 future，无半部）。这对应了
+//! `RingBuffer` 中「半部不存在」（
 //! [`RingBuffer::try_split_io`](crate::ring_buffer::TrRingBuffer::try_split_io)
-//! 返回 `None`）的情形，只是用「错误」而非 `Option` 来表达。
+//! 返回 `None`）的情形——主动端连「返回错误的空半部」都没有，从类型层面
+//! 杜绝调用者持有主动端。
 //!
 //! 主动端的**端类型**（[`DeviceProducer`] / [`DeviceConsumer`]）携带设备的实际
 //! 类型并随设备一同存放进核心——因此**无需任何类型擦除**（`TrInput` 带泛型
@@ -115,6 +118,13 @@
 //! 增长（收敛在单层 `drive()` 循环里）。若输入设备是阻塞式的，`drive()` 会阻塞
 //! 在 `read_async` 上等待数据——这是无任务模型下「自动搬运」的固有语义。
 //!
+//! 注意：两端全主动时 `build` 返回 [`Pipeline`]（一个 **Future**，见
+//! [`Pipeline`]）——交给异步运行时 `spawn` 后，**只要它存活，数据就持续由
+//! 两端设备驱动流动**（泵循环 await 设备的 `read_async` / `write_async`，
+//! 设备就绪即流动、阻塞即挂起等待），直到一端出错 / 关闭、或调用者用
+//! [`PipelineDisconnect`] 请求断开。若不想持有 `Pipeline` future，请让至少
+//! 一端保持被动：被动端的每次读写都会自动驱动对端的主动泵。
+//!
 //! # 构建期决策（builder）
 //!
 //! 模式与用途的决策全部收敛在构建器里，见 [`builder`]。**两端可以任意顺序
@@ -133,26 +143,29 @@
 //!     .build()?;
 //!
 //! // 主动生产 × 被动消费：从 TrInput 自动灌入，用户自行读取
-//! let (tx, mut rx) = CircularBuffBuilder::with_capacity(4096)
+//! // （主动生产端不产出半部——只拿到消费端）
+//! let mut rx = CircularBuffBuilder::with_capacity(4096)
 //!     .pipe_from_input(input)      // 生产端先行
 //!     .consumer_passive()
 //!     .build()?;
 //!
 //! // 被动生产 × 主动消费：用户自行写入，写后自动搬运到 TrOutput
-//! // （消费端先行、生产端后设——顺序与上例对调）
-//! let (mut tx, rx) = CircularBuffBuilder::with_capacity(4096)
+//! // （消费端先行、生产端后设——顺序与上例对调；主动消费端不产出半部）
+//! let mut tx = CircularBuffBuilder::with_capacity(4096)
 //!     .pipe_into_output(output)    // 消费端先行
 //!     .producer_passive()          // 生产端后设
 //!     .build()?;
 //!
-//! // 主动 × 主动：TrInput → 缓冲 → TrOutput 自动流水线（两端都不可直接访问）
-//! let (tx, rx) = CircularBuffBuilder::with_capacity(4096)
+//! // 主动 × 主动：TrInput → 缓冲 → TrOutput 流水线——`build` 返回 [`Pipeline`]
+//! // （Future）：交给运行时 spawn 后持续由设备驱动流动，断开经
+//! // `pipeline.disconnect_handle().request()`
+//! let pipeline = CircularBuffBuilder::with_capacity(4096)
 //!     .pipe_into_output(output)    // 消费端先行
 //!     .pipe_from_input(input)      // 生产端后设
 //!     .build()?;
 //!
 //! // 一步同时设置两端（等价于上例）
-//! let (tx, rx) = CircularBuffBuilder::with_capacity(4096)
+//! let pipeline = CircularBuffBuilder::with_capacity(4096)
 //!     .pipe_between(input, output)
 //!     .build()?;
 //! ```
@@ -161,12 +174,12 @@
 //! `CircularBuffBuilder`（仅容量）→ 任一「单端已定」的中态
 //! （[`ProducerSetBuilder`] 生产端已定 / [`ConsumerSetBuilder`] 消费端已定）→
 //! [`ReadyBuilder`]（两端已定）→ `build`，漏设一端无法编译。构建完成后，
-//! 端类型（`P` / `C`）被确定（被动=可访问半部，主动=设备端，其半部操作返回
-//! `Unavailable`），hook 在内部挂载。
+//! 端类型（`P` / `C`）被确定，hook 在内部挂载；`build` 的返回类型由两端模式
+//! 决定（**主动端不产出半部**，见上文「设计要点二」）。
 //!
 //! 注意：示例中的 `input` / `output` 是实现了 `TrInput` / `TrOutput` 的设备
-//! （move 进缓冲）；`build` 返回 `SpscPair`（拥有型半部对）。示例为示意而保持
-//! `ignore`，完整可运行的用法见 `tests_` 模块。
+//! （move 进缓冲）。示例为示意而保持 `ignore`，完整可运行的用法见 `tests_`
+//! 模块。
 //!
 //! # 实现现状（重构已完成）
 //!
@@ -234,7 +247,7 @@ pub use circ_buff_::{
 pub use error_::{RxError, TxError};
 pub use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
 pub use reclaim_::{ReclSliceMut, ReclSliceRef};
-pub use spsc_::{Consumer, Producer, SpscPair};
+pub use spsc_::{Consumer, Pipeline, PipelineDisconnect, Producer, SpscPair};
 
 #[cfg(test)]
 mod tests_;

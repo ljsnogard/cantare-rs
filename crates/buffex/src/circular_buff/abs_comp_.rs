@@ -179,4 +179,21 @@ pub trait TrProducer {
     where
         TySegm: TrBuffSegmMut<'f, Self::Data>,
         Self: 'f;
+
+    /// **单次读入**：一次 `read_async` 到 `target`，返回读到的数量（设备错误
+    /// 返回 0）。
+    ///
+    /// 供全主动流水线的异步输入泵使用：`react_async` 会循环搬满整段，若设备在
+    /// 段中途挂起，已写部分会滞留段内、直到 future 被 drop 才提交——流水线
+    /// 无法在同一轮 poll 里排空它。本方法只读一次：读不到就干净挂起（段提交
+    /// 0），读到就提交并返回，流水线随即排空输出。被动端无设备，默认返回 0。
+    fn read_once_async<'f>(
+        &'f mut self,
+        _target: &'f mut [core::mem::MaybeUninit<Self::Data>],
+    ) -> impl Future<Output = usize> + 'f
+    where
+        Self: 'f,
+    {
+        async move { 0 }
+    }
 }
