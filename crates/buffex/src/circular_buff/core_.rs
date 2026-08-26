@@ -25,7 +25,7 @@
 //! # 事件分发与同步泵（不 spawn）
 //!
 //! 状态提交（写入 / 读取推进、关闭）后，核心向对端触发事件
-//! （[`super::abs_comp`] 的 `ProducerHookEvent` / `ConsumerHookEvent`），
+//! （[`super::abs_comp_`] 的 `ProducerHookEvent` / `ConsumerHookEvent`），
 //! **先问对端 `check(event)` 是否对当前数据量感兴趣**，感兴趣才行动：
 //!
 //! * **被动端**：唤醒等待者——`signal` 核心持有的唤醒槽位（[`WakeSlot`]）。
@@ -94,7 +94,7 @@ use mm_ptr::{
 };
 
 use super::{
-    abs_comp::{
+    abs_comp_::{
         ConsumerHookEvent, ProducerHookEvent,
         TrCircBuffCore, TrConsumer, TrProducer,
     },
@@ -255,10 +255,10 @@ fn block_on<F: Future>(fut: F) -> F::Output {
 ///
 /// * `P`——生产端类型：被动 `BuffProducer`
 ///   / 主动 `DeviceProducer`，实现
-///   [`TrProducer`](super::abs_comp::TrProducer)；
+///   [`TrProducer`](super::abs_comp_::TrProducer)；
 /// * `C`——消费端类型：被动 `BuffConsumer`
 ///   / 主动 `DeviceConsumer`，实现
-///   [`TrConsumer`](super::abs_comp::TrConsumer)；
+///   [`TrConsumer`](super::abs_comp_::TrConsumer)；
 /// * `T`——元素类型（默认 `u8`）；
 /// * `A`——分配器（默认 `CoreAlloc`）：用于分配自有缓冲（[`Owned`]）。
 ///
@@ -273,7 +273,7 @@ fn block_on<F: Future>(fut: F) -> F::Output {
 ///   每次迁移是一个自旋 compare-exchange 循环；
 /// * **区域借出**：`try_write_at` / `try_read_at` 尊重 `Demand` 的 `[min, max]`
 ///   区间，把可写 / 可读区借出为两段式段（[`super::reclaim_`]），段 drop 时
-///   按已消费量提交回本核心（经 [`TrCircBuffCore`](super::abs_comp::TrCircBuffCore)）；
+///   按已消费量提交回本核心（经 [`TrCircBuffCore`](super::abs_comp_::TrCircBuffCore)）；
 /// * **事件分发**：提交路径上向对端触发事件——被动端 `signal` 唤醒槽位，
 ///   主动端置待办泵标志 + `drive()`；
 /// * **同步泵**：`drive()` 内构造段、调用端类型 `react_async`、以
@@ -898,7 +898,7 @@ where
 
     /// 整块缓冲的可变视图（内部可变性：由 SPSC 借用纪律保证不与活段重叠）。
     #[allow(clippy::mut_from_ref)]
-    fn buffer_view_mut<'s>(&'s self) -> &'s mut [MaybeUninit<T>] {
+    fn buffer_view_mut(&self) -> &mut [MaybeUninit<T>] {
         let base = self.buf_.as_ptr() as *const MaybeUninit<T> as *mut MaybeUninit<T>;
         unsafe { slice::from_raw_parts_mut(base, self.capacity_) }
     }

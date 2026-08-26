@@ -29,8 +29,10 @@ use mm_ptr::{
     x_deps::abs_mm::mem_alloc::{CoreAlloc, TrMalloc},
 };
 
+use crate::circular_buff::{BuffConsumer, BuffProducer};
+
 use super::{
-    abs_comp::{TrConsumer, TrObserver, TrProducer},
+    abs_comp_::{TrConsumer, TrProducer},
     core_::{CircCore, WakeSlot},
     error_::{RxError, TxError},
     reclaim_::{ReaderReclaim, ReclSliceMut, ReclSliceRef, WriterReclaim},
@@ -40,7 +42,10 @@ use super::{
 pub(super) type CoreRef<P, C, T, A> = Shared<CircCore<P, C, T, A>, A>;
 
 /// 构建器产出的半部对：`(Producer, Consumer)`。使用者可持有两者或其一。
-pub type SpscPair<P, C, T = u8, A = CoreAlloc> = (Producer<P, C, T, A>, Consumer<P, C, T, A>);
+pub type SpscPair<T = u8, A = CoreAlloc> = (
+    Producer<BuffProducer<T>, BuffConsumer<T>, T, A>,
+    Consumer<BuffProducer<T>, BuffConsumer<T>, T, A>,
+);
 
 // ---------------------------------------------------------------------------
 // 生产端半部（拥有型）
@@ -72,7 +77,7 @@ where
 }
 
 /// 半部的公共借用约束：段类型（[`ReclSliceMut`] / [`ReclSliceRef`]）要求
-/// 核心实现 [`TrCircBuffCore`](super::abs_comp::TrCircBuffCore)（其超类
+/// 核心实现 `TrCircBuffCore`（其超类
 /// `Send + Sync`），故两端与元素类型必须 `Send + Sync`。此约束由各 impl 的
 /// where 子句直接表达。
 impl<P, C, T, A> Producer<P, C, T, A>
@@ -166,47 +171,6 @@ where
     /// 本端是否为被动模式（对外可访问）。
     pub fn is_passive(&self) -> bool {
         self.core_ref_.consumer_is_passive()
-    }
-
-    /// 只读借用的 `try_read`：经核心的 `&self` 路径借出读段。
-    ///
-    /// 与 [`TrBuffTryRead::try_read`] 语义一致，但不需要 `&mut self`——供
-    /// 「等待 future 持有共享引用、并要把段借用到结构体自身生命周期」的场景
-    /// （例如 `buffex_iroh` 的无后台任务读等待）使用。
-    pub(super) fn try_read_shared<'f>(
-        &'f self,
-        demand: &Demand<usize>,
-    ) -> SomeOf<
-        ReclSliceRef<'f, T, ReaderReclaim<'f, CircCore<P, C, T, A>>>,
-        RxError<usize>,
-    > {
-        // 主动消费端不对外暴露：半部操作返回错误。
-        if !self.core_ref_.consumer_is_passive() {
-            return SomeOf::new_right(RxError::Unavailable);
-        }
-        // 对端（生产端）为主动设备时，先驱动一轮输入泵拉取数据——无后台任务
-        // 模型下「操作即事件」；对端被动时不驱动（泵会在用户可能持有活写段的
-        // 同一侧构造段，造成别名 UB，且无意义）。
-        if !self.core_ref_.producer_is_passive() {
-            self.core_ref_.drive_input();
-        }
-        let min_len = demand.min().copied().unwrap_or(0);
-        match self.core_ref_.try_read_at(demand) {
-            Ok((start, take)) => {
-                // EOF 例外：写端已关闭时允许返回不足下限的部分数据。
-                if take < min_len && !self.core_ref_.is_tx_closed() {
-                    let e = if self.core_ref_.is_rx_closed() {
-                        RxError::Closing
-                    } else {
-                        RxError::Drained(start)
-                    };
-                    SomeOf::new_right(e)
-                } else {
-                    SomeOf::new_left(self.core_ref_.read_segm(start, take))
-                }
-            }
-            Err(err) => SomeOf::new_right(err),
-        }
     }
 }
 
@@ -336,56 +300,6 @@ where
             }
             Err(err) => SomeOf::new_right(err),
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 观察者
-// ---------------------------------------------------------------------------
-
-impl<P, C, T, A> TrObserver for Producer<P, C, T, A>
-where
-    P: Send + Sync + TrProducer<Data = T>,
-    C: Send + Sync + TrConsumer<Data = T>,
-    T: Send + Sync,
-    A: Send + Sync + TrMalloc + Clone,
-{
-    #[inline]
-    fn capacity(&self) -> usize {
-        Producer::capacity(self)
-    }
-
-    #[inline]
-    fn ready(&self) -> usize {
-        Producer::free_size(self)
-    }
-
-    #[inline]
-    fn is_remote_end_closing(&self) -> bool {
-        Producer::is_consumer_closed(self)
-    }
-}
-
-impl<P, C, T, A> TrObserver for Consumer<P, C, T, A>
-where
-    P: Send + Sync + TrProducer<Data = T>,
-    C: Send + Sync + TrConsumer<Data = T>,
-    T: Send + Sync,
-    A: Send + Sync + TrMalloc + Clone,
-{
-    #[inline]
-    fn capacity(&self) -> usize {
-        Consumer::capacity(self)
-    }
-
-    #[inline]
-    fn ready(&self) -> usize {
-        Consumer::data_size(self)
-    }
-
-    #[inline]
-    fn is_remote_end_closing(&self) -> bool {
-        Consumer::is_producer_closed(self)
     }
 }
 

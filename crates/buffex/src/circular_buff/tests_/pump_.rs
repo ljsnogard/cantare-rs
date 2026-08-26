@@ -21,10 +21,7 @@ use super::{
     fill_segm, take_segm, TestInput, TestOutput,
 };
 
-type Pair<P, C> = (
-    Producer<P, C, u8, CoreAlloc>,
-    Consumer<P, C, u8, CoreAlloc>,
-);
+type Pair<P, C, T = u8, A = CoreAlloc> = (Producer<P, C, T, A>, Consumer<P, C, T, A>);
 
 /// 主动生产 × 被动消费：构造即从 `TrInput` 泵入；消费端每读取一次，
 /// 释放的可写空间立即被新数据补满；输入耗尽后停止。

@@ -6,7 +6,7 @@ use gen_mcf_macro::gen_may_cancel_future;
 use crate::{
     Demand, TrBuffRead, TrBuffWrite,
     buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView},
-    error::{ReadErrTag, WriteErrTag, TrTaggedError},
+    error::TrTaggedError,
 };
 
 pub enum PipeJoinIoResult<W, R, T>
@@ -148,7 +148,10 @@ mod tests_ {
     use anylr::SomeOf;
 
     use super::*;
-    use crate::{buffer::{SegmMut, SegmReclaim, SegmRef}, error::{ReadErrTag, TrTaggedError}};
+    use crate::{
+        buffer::{SegmMut, SegmReclaim, SegmRef},
+        error::{ReadErrTag, TrTaggedError, WriteErrTag},
+    };
 
     //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
     // Test doubles: a read buffer and a write buffer built directly on

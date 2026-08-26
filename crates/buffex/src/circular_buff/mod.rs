@@ -61,8 +61,8 @@
 //! ## 设计要点二：主动端不对外暴露
 //!
 //! 模式对调用者唯一可见的影响是**可访问性**：使用了主动模式的那一端由设备驱动，
-//! 不可能再让外部调用者访问——主动端的半部（[`Producer`](spsc_::Producer) /
-//! [`Consumer`](spsc_::Consumer)）存在但操作返回 [`TxError::Unavailable`] /
+//! 不可能再让外部调用者访问——主动端的半部（[`Producer`] /
+//! [`Consumer`]）存在但操作返回 [`TxError::Unavailable`] /
 //! [`RxError::Unavailable`]。这对应了 `RingBuffer` 中「半部不存在」（
 //! [`RingBuffer::try_split_io`](crate::ring_buffer::TrRingBuffer::try_split_io)
 //! 返回 `None`）的情形，只是用「错误」而非 `Option` 来表达。
@@ -117,10 +117,16 @@
 //!
 //! # 构建期决策（builder）
 //!
-//! 模式与用途的决策全部收敛在构建器里，见 [`builder`]：
+//! 模式与用途的决策全部收敛在构建器里，见 [`builder`]。**两端可以任意顺序
+//! 设置**——既可以从生产端开始，也可以从消费端开始，还可以一步同时设置两端，
+//! 或两端都不设置（默认双端被动）：
 //!
 //! ```ignore
-//! // 被动 × 被动：经典手动管道（两端都可访问）
+//! // 双端被动（默认，不 pipe 任何设备）：经典手动管道（两端都可访问）
+//! let (mut tx, mut rx) = CircularBuffBuilder::with_capacity(4096)
+//!     .build()?;
+//!
+//! // 显式双端被动：`producer_passive` / `consumer_passive` 可任意换序
 //! let (mut tx, mut rx) = CircularBuffBuilder::with_capacity(4096)
 //!     .producer_passive()
 //!     .consumer_passive()
@@ -128,27 +134,35 @@
 //!
 //! // 主动生产 × 被动消费：从 TrInput 自动灌入，用户自行读取
 //! let (tx, mut rx) = CircularBuffBuilder::with_capacity(4096)
-//!     .pipe_from_input(input)      // 生产端：TrInput 管道进缓冲（对外不可访问）
+//!     .pipe_from_input(input)      // 生产端先行
 //!     .consumer_passive()
 //!     .build()?;
 //!
 //! // 被动生产 × 主动消费：用户自行写入，写后自动搬运到 TrOutput
+//! // （消费端先行、生产端后设——顺序与上例对调）
 //! let (mut tx, rx) = CircularBuffBuilder::with_capacity(4096)
-//!     .producer_passive()
-//!     .pipe_into_output(output)    // 消费端：缓冲管道进 TrOutput（对外不可访问）
+//!     .pipe_into_output(output)    // 消费端先行
+//!     .producer_passive()          // 生产端后设
 //!     .build()?;
 //!
 //! // 主动 × 主动：TrInput → 缓冲 → TrOutput 自动流水线（两端都不可直接访问）
 //! let (tx, rx) = CircularBuffBuilder::with_capacity(4096)
-//!     .pipe_from_input(input)
-//!     .pipe_into_output(output)
+//!     .pipe_into_output(output)    // 消费端先行
+//!     .pipe_from_input(input)      // 生产端后设
+//!     .build()?;
+//!
+//! // 一步同时设置两端（等价于上例）
+//! let (tx, rx) = CircularBuffBuilder::with_capacity(4096)
+//!     .pipe_between(input, output)
 //!     .build()?;
 //! ```
 //!
 //! 构建器用类型状态（type-state）编码强制「两端模式必须在构建期决定」：
-//! `CircularBuffBuilder` → `ProducerSetBuilder` → `ReadyBuilder`，漏设一端无法
-//! 编译。构建完成后，端类型（`P` / `C`）被确定（被动=可访问半部，主动=设备
-//! 端，其半部操作返回 `Unavailable`），hook 在内部挂载。
+//! `CircularBuffBuilder`（仅容量）→ 任一「单端已定」的中态
+//! （[`ProducerSetBuilder`] 生产端已定 / [`ConsumerSetBuilder`] 消费端已定）→
+//! [`ReadyBuilder`]（两端已定）→ `build`，漏设一端无法编译。构建完成后，
+//! 端类型（`P` / `C`）被确定（被动=可访问半部，主动=设备端，其半部操作返回
+//! `Unavailable`），hook 在内部挂载。
 //!
 //! 注意：示例中的 `input` / `output` 是实现了 `TrInput` / `TrOutput` 的设备
 //! （move 进缓冲）；`build` 返回 `SpscPair`（拥有型半部对）。示例为示意而保持
@@ -159,22 +173,24 @@
 //! 按「端类型即 hook」的目标重构完成：hook 从独立的擦除对象（旧 `hook_` 的
 //! `ActiveInput` / `ActiveOutput`）改为**端类型**——两端以具体类型存放进核心
 //! （`CircCore<P, C, T, A>` 的 `P` / `C`），设备因此**无需类型擦除**；段提交
-//! 经 [`TrCircBuffCore`](abs_comp::TrCircBuffCore) 窄接口解耦（`reclaim_`）。
+//! 经 `TrCircBuffCore` 窄接口解耦（`reclaim_`）。
 //!
 //! 模块划分：
 //!
-//! * `builder`——类型状态构建链（`CircularBuffBuilder → ProducerSetBuilder →
-//!   ReadyBuilder`），`build` 在堆上装配核心并产出 [`SpscPair`]（拥有型访问
-//!   模型，无「缓冲聚合体」）；
-//! * `spsc_`——公共半部 [`Producer`](spsc_::Producer) /
-//!   [`Consumer`](spsc_::Consumer)（`Shared<CircCore>` + 异步等待 future）；
-//! * `abs_comp`——端契约（`check` / `react_async` 事件模型，`react_async` 泛化
-//!   段参数、端类型不携带段类型，从而解开类型级循环）与
-//!   [`TrCircBuffCore`](abs_comp::TrCircBuffCore)；
+//! * `builder`——类型状态构建链（`CircularBuffBuilder → ProducerSetBuilder /
+//!   ConsumerSetBuilder → ReadyBuilder`，两端可任意换序，也可 `pipe_between`
+//!   一步同时设置或直接 `build` 双端被动），`build` 在堆上装配核心并产出
+//!   [`SpscPair`]（拥有型访问模型，无「缓冲聚合体」）；
+//! * `spsc_`——公共半部 [`Producer`] /
+//!   [`Consumer`]（`Shared<CircCore>` + 异步等待 future）；
+//! * `abs_comp_`——**内部**端契约模块（私有，不对外暴露）：`check` /
+//!   `react_async` 事件模型（`react_async` 泛化段参数、端类型不携带段类型，
+//!   从而解开类型级循环）与 `TrCircBuffCore`；
+//!   其中的 trait 仅供核心与端类型内部协作使用，调用者不应实现或调用；
 //! * `circ_buff_`——四个端类型（被动 `BuffProducer` / `BuffConsumer`，主动
 //!   `DeviceProducer` / `DeviceConsumer` 携带设备）；
 //! * `core_`——`CircCore<P, C, T, A>`（自有缓冲 + 原子状态机 + 事件分发 +
-//!   同步泵，`pumping` 标志保证泵互斥，无需端锁）；
+//!   同步泵，`pumping` 标志保证泵互斥，无需端锁；**内部**模块，不对外暴露）；
 //! * `reclaim_`——两段式段（`ReclSliceMut` / `ReclSliceRef`）+ 泛型提交器。
 //!
 //! 旧模型文件（`half_` 借用型半部、`segm_` 旧段、`hook_` 擦除 hook、`abs_`
@@ -199,7 +215,7 @@
 //! （内核）两侧的管道；`CircularBuff` 面向**构造期固定模式与设备**、由 hook
 //! 联动的唤醒式缓冲。规划上 `ring_buffer` 将来会被 `CircularBuff` 取代。
 
-pub mod abs_comp;
+mod abs_comp_;
 mod circ_buff_;
 mod core_;
 mod error_;
@@ -208,12 +224,13 @@ mod spsc_;
 
 pub mod builder;
 
-pub use abs_comp::{
-    ConsumerHookEvent, ProducerHookEvent, ReceiverReact,
-    TrCircBuffCore, TrConsumer, TrObserver, TrProducer,
+pub use builder::{
+    BuilderError, CircularBuffBuilder, ConsumerSetBuilder, ProducerSetBuilder,
+    ReadyBuilder,
 };
-pub use builder::{BuilderError, CircularBuffBuilder, ProducerSetBuilder, ReadyBuilder};
-pub use circ_buff_::{BuffConsumer, BuffProducer, DeviceConsumer, DeviceProducer};
+pub use circ_buff_::{
+    BuffConsumer, BuffProducer, DeviceConsumer, DeviceProducer,
+};
 pub use error_::{RxError, TxError};
 pub use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
 pub use reclaim_::{ReclSliceMut, ReclSliceRef};

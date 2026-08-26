@@ -1,6 +1,19 @@
 //! 环形缓冲的抽象组件：核心提交接口（[`TrCircBuffCore`]）、端类型契约
 //! （[`TrProducer`] / [`TrConsumer`]）、事件（[`ProducerHookEvent`] /
-//! [`ConsumerHookEvent`]）与观察者（[`TrObserver`]）。
+//! [`ConsumerHookEvent`]）。
+//!
+//! # 本模块是**内部实现细节**，不对外暴露
+//!
+//! 本模块位于私有模块（`mod abs_comp_;`）中，其中的 trait 与事件**全部是
+//! 环形核心内部使用的契约**：它们被 `CircCore`（泵、事件分发、`react_async`
+//! 驱动）与端类型（`circ_buff_`）之间的内部协作所依赖，**不是**给调用者实现
+//! 或调用的公开 API。调用者只与 [`super::builder`] 产出的
+//! [`Producer`](super::spsc_::Producer) / [`Consumer`](super::spsc_::Consumer)
+//! 半部交互。
+//!
+//! 这里把 trait 声明为（名义上的）`pub`，仅仅是为了满足 Rust 的「公开接口不
+//! 能引用更低可见性类型」检查（私有模块已使这些名字对外不可达，名义可见性
+//! 不影响实际的隐藏效果）；模块私有才是真正的隐藏手段。
 //!
 //! 这些 trait 把「环形核心」与「两端」解耦成两层：
 //!
@@ -22,11 +35,11 @@
 //!
 //! 解法：端类型**不携带**段类型，`react_async` 的段参数由调用方（核心）按
 //! 具体类型传入。段因此可以指名 `CircCore<P, C, T>`（段不在端类型内部，无环）。
-//!
-//! 大部分情况下用户不需要直接使用本模块；公开 API 见 [`super::builder`] 与
-//! `spsc_`。
 
-use abs_buff::{Demand, buffer::{TrBuffSegmMut, TrBuffSegmRef}};
+use abs_buff::{
+    Demand,
+    buffer::{TrBuffSegmMut, TrBuffSegmRef},
+};
 
 /// 环形核心的「段提交」接口：段 drop 时按已消费量推进读写位置。
 ///
@@ -86,7 +99,7 @@ pub enum ReceiverReact {
     /// Receiver has reacted upon the given buffer
     Reacted,
 
-    /// Receiver 
+    /// Receiver
     Continue,
 }
 
@@ -166,19 +179,4 @@ pub trait TrProducer {
     where
         TySegm: TrBuffSegmMut<'f, Self::Data>,
         Self: 'f;
-}
-
-/// 环形缓冲状态的观察者。已由 Producer 和 Consumer 实现。
-/// 保留仅为将来外部扩展用。
-///
-/// 只读查询面：容量、本端可操作量、对端是否关闭——不包含任何写操作。
-pub trait TrObserver {
-    /// 环形缓冲的容量（单元数）。
-    fn capacity(&self) -> usize;
-
-    /// 当前可供本端操作的数据量（生产者视角为可写空间，消费者视角为可读数据）。
-    fn ready(&self) -> usize;
-
-    /// 对端是否已关闭（生产者视角：消费者端关闭；消费者视角：生产者端关闭）。
-    fn is_remote_end_closing(&self) -> bool;
 }

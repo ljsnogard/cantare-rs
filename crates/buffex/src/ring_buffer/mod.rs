@@ -104,6 +104,12 @@
 //! `put_back_recv` before the last reference to the ring is dropped
 //! (asserted in debug builds).
 
+// 遗留模块（规划中被 `CircularBuff` 取代，见 `crate::circular_buff`）：
+// 其中的运行时侧 API 与测试脚手架（iovec 直读、`wait_*`、场景脚本等）目前
+// 只有 `buffex_iroh`（尚未迁移完成）会使用，整体处于「待迁移 / 待删除」状态，
+// 因此统一静默 dead-code 告警，待迁移完成后随模块一并删除。
+#![allow(dead_code)]
+
 mod abs_;
 mod error_;
 mod futures_;

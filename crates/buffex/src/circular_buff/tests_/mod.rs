@@ -2,28 +2,33 @@
 //!
 //! * [`sync_`]——被动 × 被动：读写往返、`Demand` 语义、跨末端环绕、异步等待；
 //! * [`pump_`]——主动模式：输入泵、输出泵、全主动流水线；
-//! * [`hook_`]——关闭 / EOF 事件与被动唤醒。
+//! * [`hook_`]——关闭 / EOF 事件与被动唤醒；
+//! * [`builder_`]——构建器顺序灵活性：两端任意换序、`pipe_between`、
+//!   默认双端被动。
 //!
 //! 本文件提供测试共用的辅助：测试设备（[`TestInput`] / [`TestOutput`]）、
 //! 段操作（[`fill_segm`] / [`take_segm`]）与最小执行器。
 
+mod builder_;
 mod hook_;
 mod pump_;
 mod sync_;
 
+use core::{fmt, mem::MaybeUninit, pin::Pin};
 use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    task::{Context, Poll, Waker, Wake},
+    task::{Context, Poll, Wake, Waker},
     vec::Vec,
 };
 
-use core::{fmt, mem::MaybeUninit, pin::Pin};
-
 use abs_buff::{
-    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrReclaim}, error::{ReadErrTag, TrTaggedError, WriteErrTag}, io::{TrInput, TrOutput}, x_deps::{
+    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrReclaim},
+    error::{ReadErrTag, TrTaggedError, WriteErrTag},
+    io::{TrInput, TrOutput},
+    x_deps::{
         abs_cancel::{TrCancellationToken, TrMayCancel},
         anylr::SomeOf,
     },
@@ -186,15 +191,20 @@ where
         data.len(),
         segm.least_count()
     );
-    let mut staging: Vec<MaybeUninit<u8>> = data.iter().map(|&b| MaybeUninit::new(b)).collect();
+    let mut staging: Vec<MaybeUninit<u8>> =
+        data.iter().map(|&b| MaybeUninit::new(b)).collect();
     // SAFETY: 测试数据为 u8，位拷贝搬入段中，staging 无剩余需 drop 的内容。
-    let moved = unsafe { TrBuffSegmMut::move_items_from_buff(segm, &mut staging) };
+    let moved =
+        unsafe { TrBuffSegmMut::move_items_from_buff(segm, &mut staging) };
     assert_eq!(moved, data.len());
 }
 
 /// 从读段取出 `len` 个单元（经 `move_items_to_buff`）；段 drop 时读位置
 /// 推进 `len`。
-pub(super) fn take_segm<R>(segm: &mut ReclSliceRef<'_, u8, R>, len: usize) -> Vec<u8>
+pub(super) fn take_segm<R>(
+    segm: &mut ReclSliceRef<'_, u8, R>,
+    len: usize,
+) -> Vec<u8>
 where
     R: TrReclaim,
 {

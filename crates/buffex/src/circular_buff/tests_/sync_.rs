@@ -6,17 +6,14 @@ use std::pin::pin;
 use std::{vec, vec::Vec};
 
 use abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite};
-use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
 
 use super::{
-    super::{BuffConsumer, BuffProducer, CircularBuffBuilder, RxError, TxError, SpscPair},
+    super::{CircularBuffBuilder, RxError, TxError, SpscPair},
     fill_segm, poll_once, take_segm, TestWaker,
 };
 
-type MadePair = SpscPair<BuffProducer<u8>, BuffConsumer<u8>, u8, CoreAlloc>;
-
 /// 构建一个容量 `N` 的被动 × 被动半部对（测试辅助）。
-fn make_pair<const N: usize>() -> MadePair {
+fn make_pair<const N: usize>() -> SpscPair {
     CircularBuffBuilder::with_capacity(N)
         .producer_passive()
         .consumer_passive()

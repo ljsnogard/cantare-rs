@@ -4,7 +4,7 @@
 //! 完整的设计与使用思路见 [`crate::circular_buff`] 的模块文档。
 //!
 //! 端类型存放在核心（`CircCore`）内部，实现
-//! [`TrProducer`](super::abs_comp::TrProducer) / [`TrConsumer`](super::abs_comp::TrConsumer)
+//! `TrProducer` / `TrConsumer`
 //! 契约。它们**不对外暴露**——真实的访问入口是构建器产出的
 //! `Producer` / `Consumer`
 //! 半部（借用核心）。主动端（设备驱动）的半部操作返回错误（不对外访问）。
@@ -17,7 +17,7 @@ use abs_buff::{
     io::{TrInput, TrOutput},
 };
 
-use super::abs_comp::{
+use super::abs_comp_::{
     ConsumerHookEvent, ProducerHookEvent, ReceiverReact, TrConsumer, TrProducer,
 };
 
@@ -27,7 +27,7 @@ use super::abs_comp::{
 
 /// 被动生产端的端类型：存放进核心的 `P` 参数。
 ///
-/// 携带**等待者的需求**（[`TrProducer::set_demand`] 登记、`check` 裁决）：
+/// 携带**等待者的需求**（`TrProducer::set_demand` 登记、`check` 裁决）：
 /// 可写空间不足 `demand` 下限时**不唤醒**写者（避免 spurious wake；写者被
 /// 唤醒后仍会重查条件）。唤醒槽位由核心持有（见 `core_` 的 `producer_wake_`）。
 ///

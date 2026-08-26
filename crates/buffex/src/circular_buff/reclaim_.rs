@@ -17,15 +17,15 @@
 //! 旧 `segm_` 的 `WrSegm` / `RdSegm` 是旧设计（提交器直接引用单参数
 //! `CircCore<T>`），已随重构删除；本模块的 `ReclSliceMut` / `ReclSliceRef`
 //! 把提交器泛型化于 `TyCore: TrCircBuffCore`
-//! （[`super::abs_comp::TrCircBuffCore`]），是重构后的替代实现。
+//! （`super::abs_comp_::TrCircBuffCore`），是重构后的替代实现。
 //!
 //! # 设计意图
 //!
 //! 段 = 物理空间（两段式 enum）+ 已消费 offset + 提交器（drop 时回收）。提交器
-//! 只依赖 [`TrCircBuffCore`](super::abs_comp::TrCircBuffCore) 窄接口，因此段
+//! 只依赖 `TrCircBuffCore` 窄接口，因此段
 //! 类型本身**不指名核心的具体类型**——这是本重构解开类型级循环的关键拼图
 //! （循环发生在端类型携带段类型关联时，见
-//! [`super::abs_comp`] 模块文档）。
+//! `abs_comp_` 模块文档）。
 
 use core::{
     mem::MaybeUninit,
@@ -40,7 +40,7 @@ use abs_buff::{
     }
 };
 
-use super::abs_comp::TrCircBuffCore;
+use super::abs_comp_::TrCircBuffCore;
 
 // ---------------------------------------------------------------------------
 // 物理空间的两段式表示
@@ -163,7 +163,7 @@ impl<'a, T> SegmSlicesRef<'a, T> {
 ///
 /// 泛型于 `TyCore: TrCircBuffCore`——通过窄接口提交，**不指名核心的具体类型**
 /// （若指名 `CircCore<P, C, T>` 且该段出现在端类型的关联类型中，就构成类型级
-/// 循环，见 [`super::abs_comp`] 模块文档）。
+/// 循环，见 `abs_comp_` 模块文档）。
 pub struct WriterReclaim<'a, TyCore>
 where
     TyCore: TrCircBuffCore,
