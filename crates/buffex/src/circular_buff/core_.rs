@@ -118,15 +118,17 @@ const RX_CLOSED: usize = 1usize << (usize::BITS - 2);
 const TX_STNDBY: usize = 1usize << (usize::BITS - 3);
 /// 消费端等待唤醒。
 const RX_STNDBY: usize = 1usize << (usize::BITS - 4);
-/// 写入端已跨段标志，即此时 wp <= rp 是合法状态
-const REVERSION: usize = 1usize << (usize::BITS - 5);
+
 /// 待办输入泵标志。
-const INPUT_PENDING: usize = 1usize << (usize::BITS - 6);
+const INPUT_PENDING: usize = 1usize << (usize::BITS - 5);
 /// 待办输出泵标志。
-const OUTPUT_PENDING: usize = 1usize << (usize::BITS - 7);
+const OUTPUT_PENDING: usize = 1usize << (usize::BITS - 6);
+
+/// 写入端已跨段标志，即此时 wp <= rp 是合法状态
+pub(super) const REVERSION: usize = 1usize << (usize::BITS - 7);
 
 /// 状态字全部标志的掩码（位置更新（`update_state`）保留这些位）。
-const FLAG_MASK: usize = TX_CLOSED
+pub(super) const FLAG_MASK: usize = TX_CLOSED
     | RX_CLOSED
     | TX_STNDBY
     | RX_STNDBY
@@ -134,55 +136,116 @@ const FLAG_MASK: usize = TX_CLOSED
     | INPUT_PENDING
     | OUTPUT_PENDING;
 /// 每个位置占用的位数（两个位置共享低位，两个标志占高位）。
-const POS_BITS: u32 = (usize::BITS - RSV_BITS) / 2;
+pub(super) const POS_BITS: u32 = (usize::BITS - RSV_BITS) / 2;
 /// 位置掩码。
-const POS_MASK: usize = (1usize << POS_BITS) - 1;
+pub(super) const POS_MASK: usize = (1usize << POS_BITS) - 1;
 
 pub(super) const MIN_CAPACITY: usize = 2;
 /// 环形缓冲的最大容量（与 `ring_buffer` 的 `MAX_CAPACITY` 同量级）。
 pub(super) const MAX_CAPACITY: usize = POS_MASK;
 
-struct IoPos {
-    /// 与 REVERSION flag 含义一致
+/// 环形位置状态：读者位置 `rp` / 写者位置 `wp`（均为 `[0, capacity_)` 内的
+/// 物理索引）+ 跨末端标志 `rv`（即状态字中的 [`REVERSION`] 位）。
+///
+/// # 位置约定（REVERSION 方案，不再使用「空一槽」）
+///
+/// 读写位置打包进状态字低位（`rp` 占低 `POS_BITS` 位、`wp` 占次 `POS_BITS`
+/// 位），容量**全部可用**——不再刻意保留一个空槽。满 / 空由 `rv` 区分：
+///
+/// * `rv == false`（写者未跨过物理末端）：原始 `wp >= rp`，数据量 = `wp - rp`；
+///   其中 `wp == rp` 表示**空**（data = 0）；
+/// * `rv == true`（写者已跨过物理末端，原始 `wp <= rp`）：数据量 =
+///   `wp + capacity - rp`；其中 `wp == rp` 表示**满**（整环都是数据，
+///   data = capacity）。
+///
+/// `rv` 只随位置推进而置位 / 清除（其余标志位原样保留）：
+///
+/// * [`IoPos::advance_wp`]：写者越过物理末端（`wp + amount >= capacity`）时
+///   置位，且置位后一直保持——写者始终「在读者之后（含追上成满环）」；
+/// * [`IoPos::advance_rp`]：读者越过物理末端（`rp + amount >= capacity`）时
+///   清除——读者跨过末端后，写者的原始位置重新位于读者之前，恢复未跨状态。
+pub(super) struct IoPos {
+    /// 与 REVERSION flag 含义一致：写者是否已越过缓冲区物理末端（此时原始
+    /// `wp <= rp`；`wp == rp` 表示环满）。
     pub rv: bool,
-    /// 读者位置
+    /// 读者位置（物理索引，`[0, capacity_)`）。
     pub rp: usize,
-    /// 写这位置
+    /// 写者位置（物理索引，`[0, capacity_)`）。
     pub wp: usize,
-    /// circular buff 的容量
+    /// circular buff 的容量。
     capacity_: usize,
 }
 
 impl IoPos {
+    pub const MASK: usize = REVERSION | POS_MASK;
+
+    /// 从 `atm_stat_` 的状态字解出位置与保留标志。
     pub fn unpack(state: usize, cap: usize) -> Self {
         let rp = state & POS_MASK;
         let wp = (state >> POS_BITS) & POS_MASK;
         let rv = has_flag(state, REVERSION);
         IoPos { rv, rp, wp, capacity_: cap }
     }
+
+    /// 当前可读数据量（遵循上述约定：空环 = 0、满环 = 容量）。
     #[inline]
     pub fn data_size(&self) -> usize {
-        (self.wp + self.capacity_ - self.rp) % self.capacity_
+        if self.rv && self.wp == self.rp {
+            // 写者跨过末端后恰好追上读者：整环都是数据（满）。
+            self.capacity_
+        } else {
+            // 未跨（wp > rp）或已跨未满（wp < rp）：`(wp - rp) mod capacity`。
+            (self.wp + self.capacity_ - self.rp) % self.capacity_
+        }
     }
+
+    /// 当前可写空间量：`capacity - data_size`（满环 = 0、空环 = 容量）。
     #[inline]
     pub fn free_size(&self) -> usize {
         self.capacity_ - self.data_size()
     }
-    pub fn pack(&self) -> usize {
-        let s = self.rp | (self.wp << POS_BITS);
+
+    /// 打包回完整状态字：位置 + 保留标志 + 按 `rv` 重算的 REVERSION 位。
+    pub fn pack(&self, state: usize) -> usize {
+        let s = self.rp | (self.wp << POS_BITS) | state;
         if self.rv { s | REVERSION } else { s & !REVERSION }
     }
-    /// 推进写者位置，如果写者位置越过缓冲区物理末端，会设置 REVERSION flag。
-    /// 返回值可以直接写在 atm_stat_。
-    pub fn advance_wp(&self, amount: usize) -> usize {
+
+    /// 推进写者位置：`wp += amount`（物理上环绕）；**写者越过缓冲区物理末端
+    /// （`wp + amount >= capacity`）时设置 REVERSION flag**，且一旦置位保持
+    /// 到读者追上来为止。
+    ///
+    /// 前置：`amount <= free_size`（不允许写过头；恰好写满时进入
+    /// `wp == rp && rv` 的满态）。
+    pub fn advance_wp(&self, amount: usize) -> Self {
         debug_assert!(amount <= self.free_size());
-        todo!()
+        let new_wp = self.wp + amount;
+        let rv = new_wp >= self.capacity_;
+        Self {
+            rv,
+            rp: self.rp,
+            wp: new_wp & self.capacity_,
+            capacity_: self.capacity_,
+        }
     }
-    /// 推进读者位置，如果读者位置越过缓冲区物理末端，会清除 REVERSION flag。
-    /// 返回值可以直接写在 atm_stat_。
-    pub fn advance_rp(&self, amount: usize) -> usize {
+
+    /// 推进读者位置：`rp += amount`（物理上环绕）；**读者越过缓冲区物理末端
+    /// （`rp + amount >= capacity`）时清除 REVERSION flag**——读者跨过末端后，
+    /// 写者的原始位置重新位于读者之前，恢复未跨状态。返回值是完整的新状态字，
+    /// 可以直接写回 `atm_stat_`（其余标志位原样保留）。
+    ///
+    /// 前置：`amount <= data_size`（不允许读过头；恰好读空时回到
+    /// `wp == rp && !rv` 的空态）。
+    pub fn advance_rp(&self, amount: usize) -> Self {
         debug_assert!(amount <= self.data_size());
-        todo!()
+        let new_rp = self.rp + amount;
+        let crossed = self.rp + amount >= self.capacity_;
+        Self {
+            rv: self.rv && !crossed,
+            rp: new_rp % self.capacity_,
+            wp: self.wp,
+            capacity_: self.capacity_,
+        }
     }
 }
 
@@ -482,7 +545,7 @@ where
         let cap = self.capacity();
         self.update_pos_(|s| {
             let pos = IoPos::unpack(s, cap);
-            pos.advance_rp(amount)
+            pos.advance_wp(amount).pack(s)
         });
         let ev = if self.is_tx_closed() {
             ConsumerHookEvent::ProducerClose(self.data_size())
@@ -497,7 +560,7 @@ where
         let cap = self.capacity();
         self.update_pos_(|s| {
             let pos = IoPos::unpack(s, cap);
-            pos.advance_rp(amount)
+            pos.advance_rp(amount).pack(s)
         });
         let event = if self.is_rx_closed() {
             ProducerHookEvent::ConsumerClose(self.free_size())

@@ -4,13 +4,15 @@
 //! * [`pump_`]——主动模式：输入泵、输出泵、全主动流水线；
 //! * [`hook_`]——关闭 / EOF 事件与被动唤醒；
 //! * [`builder_`]——构建器顺序灵活性：两端任意换序、`pipe_between`、
-//!   默认双端被动。
+//!   默认双端被动；
+//! * [`pos_tests_`]——`IoPos` 位置状态（REVERSION 约定）的单元测试。
 //!
 //! 本文件提供测试共用的辅助：测试设备（[`TestInput`] / [`TestOutput`]）、
 //! 段操作（[`fill_segm`] / [`take_segm`]）与最小执行器。
 
 mod builder_;
 mod hook_;
+mod pos_tests_;
 mod pump_;
 mod sync_;
 
