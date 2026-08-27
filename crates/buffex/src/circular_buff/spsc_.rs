@@ -422,26 +422,21 @@ where
 ///
 /// 若需要流水线**自动**持续流动且不想持有本 future，请让至少一端保持被动：
 /// 被动端的每次读写都会自动驱动对端的主动泵（见 [`Consumer`] / [`Producer`]）。
-pub struct Pipeline<P, C, B, T, A>
+pub struct Pipeline<I, O, B, T, A>
 where
-    P: TrProducer<Data = T>,
-    C: TrConsumer<Data = T>,
-    B: BorrowMut<[MaybeUninit<T>]>,
+    I: Send + Sync + TrInput<T>,
+    O: Send + Sync + TrOutput<T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     A: TrMalloc + Clone,
 {
-    core_ref_: CoreRef<P, C, B, T, A>,
+    core_ref_: PipeCore<I, O, B, T, A>,
 }
 
 type PipeCore<I, O, B, T, A> =
     CoreRef<DevProducer<I, T>, DevConsumer<O, T>, B, T, A>;
 
-type PipeDev<I, O , B, T, A> = 
-    Pipeline<DevProducer<I, T>, DevConsumer<O, T>, B, T, A>;
-
-impl<I, O, B, T, A> Pipeline<DevProducer<I, T>, DevConsumer<O, T>, B, T, A>
+impl<I, O, B, T, A> Pipeline<I, O, B, T, A>
 where
-    // P: Send + Sync + TrProducer<Data = T>,
-    // C: Send + Sync + TrConsumer<Data = T>,
     I: Send + Sync + TrInput<T>,
     O: Send + Sync + TrOutput<T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
@@ -482,10 +477,8 @@ where
     }
 }
 
-impl<I, O, B, T, A> TrObserver for PipeDev<I, O, B, T, A>
+impl<I, O, B, T, A> TrObserver for Pipeline<I, O, B, T, A>
 where
-    // P: Send + Sync + TrProducer<Data = T>,
-    // C: Send + Sync + TrConsumer<Data = T>,
     I: Send + Sync + TrInput<T>,
     O: Send + Sync + TrOutput<T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
@@ -520,7 +513,7 @@ where
 
 #[gen_may_cancel_future(Pipeline)]
 async fn pipeline_piping_async_<'f, I, O, B, T, A, C>(
-    pipeline: &'f mut PipeDev<I, O, B, T, A>,
+    pipeline: &'f mut Pipeline<I, O, B, T, A>,
     cancel: &'f mut C,
 ) -> Option<PipelineError<usize>>
 where

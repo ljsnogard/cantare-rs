@@ -607,7 +607,7 @@ where
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type Output = Pipeline<DevProducer<I, T>, DevConsumer<O, T>, B, T, A>;
+    type Output = Pipeline<I, O, B, T, A>;
 
     fn assemble(
         core_ref: CoreRef<DevProducer<I, T>, DevConsumer<O, T>, B, T, A>,
