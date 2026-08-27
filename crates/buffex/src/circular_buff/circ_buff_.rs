@@ -251,7 +251,12 @@ impl<T> TrProducer for BufProducer<T> {
         };
         let demand = unsafe { demand_ptr.as_ref() };
         let min = demand.min().copied().unwrap_or(0);
-        free >= min
+        if free >= min {
+            self.wakeslot_.signal();
+            true
+        } else {
+            false
+        }
     }
 
     #[inline]
@@ -287,7 +292,12 @@ impl<T> TrConsumer for BufConsumer<T> {
         };
         let demand = unsafe { demand_ptr.as_ref() };
         let min = demand.min().copied().unwrap_or(0);
-        ready >= min
+        if ready >= min {
+            self.wakeslot_.signal();
+            true
+        } else {
+            false
+        }
     }
 
     #[inline]

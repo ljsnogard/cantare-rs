@@ -5,7 +5,7 @@ use std::pin::pin;
 
 use std::{vec, vec::Vec};
 
-use abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite};
+use abs_buff::{Demand, TrBuffTryRead, TrBuffTryWrite};
 
 use super::{
     super::{RxError, TxError},
@@ -73,7 +73,7 @@ fn try_read_honours_at_least() {
 fn try_write_honours_at_least() {
     let (mut tx, mut _rx) = make_pair::<8>();
 
-    // 写 5 字节（一次借出整个可写区，只提交 5）：容量 8 → 单空槽 → free = 2。
+    // 写 5 字节（一次借出整个可写区，只提交 5）：容量 8 → free = 3。
     let demand = Demand::at_least(1);
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
@@ -81,7 +81,7 @@ fn try_write_honours_at_least() {
     assert!(ws.least_count() >= 5, "可写区应至少 5 格");
     fill_segm(&mut ws, &[0; 5]);
     drop(ws);
-    assert_eq!(tx.free_size(), 2, "写 5 后应剩 2 格可写空间");
+    assert_eq!(tx.free_size(), 3, "写 5 后应剩 3 格可写空间");
 
     let demand = Demand::at_least(4);
     let some = TrBuffTryWrite::try_write(&mut tx, &demand);
@@ -114,11 +114,11 @@ fn wrap_around_two_pieces() {
     drop(rs);
 
     // 再写 3：可写区 = [3,5) 两格 + [0,1) 一格（跨末端，两段式写段）。
-    let demand = Demand::at_least(3);
+    let demand = Demand::at_least(4);
     let some = TrBuffTryWrite::try_write(&mut tx, &demand);
-    let mut ws = some.pick_left().expect("跨末端也应一次借出全部 3 格");
+    let mut ws = some.pick_left().expect("跨末端也应一次借出全部 4 格");
     let slices: Vec<usize> = ws.iter_slices_mut().map(|s| s.len()).collect();
-    assert_eq!(slices, vec![2, 1], "跨末端写段应为两段：[3,5) 与 [0,1)");
+    assert_eq!(slices, vec![2, 2], "跨末端写段应为两段：[3,5) 与 [0,2)");
     fill_segm(&mut ws, &[10, 11, 12]);
     drop(ws);
 
@@ -171,14 +171,14 @@ fn read_async_wakes_on_write() {
 /// 读端读取释放空间，触发生产端 hook，唤醒写者后恢复为 Ready。
 #[test]
 fn write_async_wakes_on_read() {
-    let (mut tx, mut rx) = make_pair::<4>(); // 容量 4 → 最多 3 字节数据
+    let (mut tx, mut rx) = make_pair::<4>(); // 容量 4
 
-    // 写满 3 字节。
-    let demand = Demand::at_least(3);
+    // 写满 4 字节。
+    let demand = Demand::at_least(4);
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
         .unwrap();
-    fill_segm(&mut ws, &[1, 2, 3]);
+    fill_segm(&mut ws, &[1, 2, 3, 4]);
     drop(ws);
     assert_eq!(tx.free_size(), 0, "环应已写满");
 
@@ -193,7 +193,7 @@ fn write_async_wakes_on_read() {
     );
 
     // 读端读走 1 字节 → 释放空间 → 生产端 hook 唤醒写者。
-    let demand = Demand::at_least(1);
+    let demand = Demand::exactly(1);
     let mut rs = TrBuffTryRead::try_read(&mut rx, &demand)
         .pick_left()
         .unwrap();
@@ -205,11 +205,11 @@ fn write_async_wakes_on_read() {
         std::task::Poll::Ready(r) => r.pick_left().expect("写等待应成功"),
         std::task::Poll::Pending => panic!("读取后写者应被唤醒"),
     };
-    // 容量 4：读走 1 格后 free = 1（单空槽方案）。
+    // 容量 4：满环读走 1 格后剩余数据 3、free = 1。
     assert_eq!(ws.least_count(), 1, "读走 1 格后应可写 1 格");
     fill_segm(&mut ws, &[4]);
     drop(ws);
-    assert_eq!(rx.data_size(), 2 + 1, "原有 2 + 新写 1");
+    assert_eq!(rx.data_size(), 4, "读走 1 格后又写回 1 格 → 回到满环");
 }
 
 /// 被动端的 `check` 按等待者的需求下限裁决：写入量不足下限时**不唤醒**读者

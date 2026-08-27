@@ -42,13 +42,6 @@ fn make_pair<const N: usize>() -> Pair {
         .unwrap()
 }
 
-/// 测试收尾：`Producer` / `Consumer` 的 `Drop` 仍是 `todo!()` 桩（`spsc_`，
-/// 与本次 park 逻辑无关），直接 drop 会 panic 并中止进程——用
-/// [`std::mem::forget`] 绕过（测试进程退出时统一回收）。
-fn leak_halves(pair: Pair) {
-    std::mem::forget(pair);
-}
-
 /// # 被测约定
 /// 读侧 park：空环上 `read_async` 无法满足需求（`Drained` 且未关闭），必须
 /// 挂起为 `Pending`——demand 登记进 `BufConsumer`、waker 注册进其唤醒槽位；
@@ -98,7 +91,6 @@ fn read_async_parks_on_empty_and_reparks_after_drop() {
             "drop 后再次读等待仍应能 park（demand 已复位、槽位已注销）"
         );
     }
-    leak_halves((_tx, rx));
 }
 
 /// # 被测约定
@@ -142,5 +134,4 @@ fn write_async_parks_when_space_insufficient_and_reparks_after_drop() {
             "drop 后再次写等待仍应能 park"
         );
     }
-    leak_halves((tx, _rx));
 }

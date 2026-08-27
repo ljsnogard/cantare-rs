@@ -352,6 +352,15 @@ where
     ) -> CorePassiveWriteAsync<'f, C, B, T> {
         CorePassiveWriteAsync(self, demand)
     }
+
+    pub fn on_buf_producer_drop_(&self) {
+        self.clear_flag(TX_STNDBY);
+        let p = unsafe { &*self.producer_.get() };
+        let x = p.try_reset_demand();
+        if let Result::Err(_) = x {
+            // todo: clear existing demand
+        }
+    }
 }
 
 impl<P, B, T> CircCore<P, BufConsumer<T>, B, T>
@@ -375,6 +384,15 @@ where
         demand: &'f Demand<usize>,
     ) -> CorePassiveReadAsync<'f, P, B, T> {
         CorePassiveReadAsync(self, demand)
+    }
+
+    pub fn on_buf_consumer_drop_(&self) {
+        self.clear_flag(RX_STNDBY);
+        let c = unsafe { &*self.consumer_.get() };
+        let x = c.try_reset_demand();
+        if let Result::Err(_) = x {
+            // todo: clear existing demand
+        }
     }
 }
 
@@ -401,29 +419,6 @@ where
             consumer_: UnsafeCell::new(consumer),
             _unuse_t_: PhantomData,
         }
-    }
-
-    // ------------------------------------------------------------------
-    // 端类型访问（UnsafeCell；安全论证见模块文档）
-    // ------------------------------------------------------------------
-
-    /// 生产端共享访问（读 `is_passive` 等）。
-    ///
-    /// # Safety
-    ///
-    /// `&P` 读取与泵的 `&mut P`（[`CircCore::producer_mut`]）不会并发：
-    /// `&mut P` 只发生在 `drive()` 的 `pump_input` 内（`PUMPING` 标志互斥），
-    /// 而所有 `&P` 读取（`fire_producer` / `start` / 半部 guard）都在该侧的
-    /// 泵线程上（SPSC 单线程纪律 + 构建完成后半部才可用），与泵同线程串行。
-    #[inline]
-    fn producer_ref(&self) -> &P {
-        unsafe { &*self.producer_.get() }
-    }
-
-    /// 消费端共享访问。安全论证同 [`CircCore::producer_ref`]。
-    #[inline]
-    fn consumer_ref(&self) -> &C {
-        unsafe { &*self.consumer_.get() }
     }
 
     // ------------------------------------------------------------------
@@ -459,16 +454,6 @@ where
     #[inline]
     pub(super) fn is_rx_closed(&self) -> bool {
         has_flag(self.atm_stat_.value(), RX_CLOSED)
-    }
-
-    #[inline]
-    pub(super) fn producer_is_passive(&self) -> bool {
-        self.producer_ref().is_passive()
-    }
-
-    #[inline]
-    pub(super) fn consumer_is_passive(&self) -> bool {
-        self.consumer_ref().is_passive()
     }
 
     // /// 被动生产端的唤醒槽位（等待写者注册用；主动端无等待者）。
@@ -650,6 +635,12 @@ where
         self.fire_producer(ProducerHookEvent::ConsumerClose(self.free_size()));
     }
 
+    pub fn on_consumer_drop_(&self) {
+        // let c = unsafe { &*self.consumer_.get() };
+        self.clear_flag(RX_STNDBY);
+        // let x = c.try_reset_demand();
+    }
+
     fn update_pos_<F>(&self, f: F)
     where
         F: Fn(usize) -> usize,
@@ -697,7 +688,10 @@ where
     /// `TX_STNDBY=0` 时（无等待者 / 等待者正在登记）直接返回——等待者注册后
     /// 会重查条件，不会丢唤醒。
     fn fire_producer(&self, event: ProducerHookEvent) {
-        todo!()
+        let producer = unsafe { &*self.producer_.get() };
+        if !producer.check(event) || producer.is_passive()  {
+            return;
+        }
     }
 
     /// 触发消费端事件（生产端完成写入 / 关闭后）。与 [`CircCore::fire_producer`]
@@ -705,7 +699,10 @@ where
     /// 触发，其调用点不持有 `&mut C`；被动端的 armed 门控同理经
     /// `RX_STNDBY`）。
     fn fire_consumer(&self, event: ConsumerHookEvent) {
-        todo!()
+        let consumer = unsafe { &*self.consumer_.get() };
+        if !consumer.check(event) || consumer.is_passive()  {
+            return;
+        }
     }
 
     /// 原子地读取并清除一个标志（等价于 `swap(false)` 的原子读-清）。
@@ -910,7 +907,7 @@ where
     if err.err_tag().should_terminate() {
         return x;
     };
-    let consume = core.consumer_ref();
+    let consume = unsafe { &*core.consumer_.get() };
     if !consume.try_set_demand(demand) {
         unreachable!("Concurrent call `core_passive_read_async_`")
     }
@@ -984,7 +981,7 @@ where
     if err.err_tag().should_terminate() {
         return x;
     };
-    let producer = core.producer_ref();
+    let producer = unsafe { &*core.producer_.get() };
     if !producer.try_set_demand(demand) {
         unreachable!("Concurrent call `core_passive_write_async_`")
     };

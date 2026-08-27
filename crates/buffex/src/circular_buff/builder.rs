@@ -192,9 +192,15 @@ where
 
     /// 生产端为被动模式：调用者驱动写入。进入 [`ProducerSetBuilder`]，
     /// 下一步（`consumer_passive` / `pipe_into_output`）定消费端。
+    #[allow(clippy::type_complexity)]
     pub fn producer_passive(
         self,
-    ) -> ProducerSetBuilder<BufProducer<T>, Owned<[MaybeUninit<T>], A>, T, A> {
+    ) -> ProducerSetBuilder<
+            BufProducer<T>,
+            Owned<[MaybeUninit<T>], A>,
+            T, A,
+        >
+    {
         ProducerSetBuilder {
             capacity: self.capacity_,
             producer: BufProducer::new(),
@@ -207,10 +213,15 @@ where
     /// 生产端为主动模式：从输入设备 `input` 自动灌入缓冲（设备 move 进核心）。
     /// 进入 [`ProducerSetBuilder`]，下一步（`consumer_passive` /
     /// `pipe_into_output`）定消费端。
+    #[allow(clippy::type_complexity)]
     pub fn pipe_from_input<I>(
         self,
         input: I,
-    ) -> ProducerSetBuilder<DevProducer<I, T>, Owned<[MaybeUninit<T>], A>, T, A>
+    ) -> ProducerSetBuilder<
+            DevProducer<I, T>,
+            Owned<[MaybeUninit<T>], A>,
+            T, A,
+        >
     where
         I: TrInput<T>,
     {
@@ -225,9 +236,15 @@ where
 
     /// 消费端为被动模式：调用者驱动读取。进入 [`ConsumerSetBuilder`]，
     /// 下一步（`producer_passive` / `pipe_from_input`）定生产端。
+    #[allow(clippy::type_complexity)]
     pub fn consumer_passive(
         self,
-    ) -> ConsumerSetBuilder<BufConsumer<T>, Owned<[MaybeUninit<T>], A>, T, A> {
+    ) -> ConsumerSetBuilder<
+            BufConsumer<T>,
+            Owned<[MaybeUninit<T>], A>,
+            T, A,
+        >
+    {
         ConsumerSetBuilder {
             capacity: self.capacity_,
             consumer: BufConsumer::new(),
@@ -240,10 +257,15 @@ where
     /// 消费端为主动模式：缓冲数据自动搬运到输出设备 `output`（设备 move 进
     /// 核心）。进入 [`ConsumerSetBuilder`]，下一步（`producer_passive` /
     /// `pipe_from_input`）定生产端。
+    #[allow(clippy::type_complexity)]
     pub fn pipe_into_output<O>(
         self,
         output: O,
-    ) -> ConsumerSetBuilder<DevConsumer<O, T>, Owned<[MaybeUninit<T>], A>, T, A>
+    ) -> ConsumerSetBuilder<
+            DevConsumer<O, T>,
+            Owned<[MaybeUninit<T>], A>,
+            T, A,
+        >
     where
         O: TrOutput<T>,
     {
@@ -262,11 +284,17 @@ where
     /// 等价于 `pipe_from_input(input).pipe_into_output(output)` 或
     /// `pipe_into_output(output).pipe_from_input(input)`。直接进入
     /// [`ReadyBuilder`]，下一步即 `build`。
+    #[allow(clippy::type_complexity)]
     pub fn pipe_between<I, O>(
         self,
         input: I,
         output: O,
-    ) -> ReadyBuilder<DevProducer<I, T>, DevConsumer<O, T>, Owned<[MaybeUninit<T>], A>, T, A>
+    ) -> ReadyBuilder<
+            DevProducer<I, T>,
+            DevConsumer<O, T>,
+            Owned<[MaybeUninit<T>], A>,
+            T, A
+        >
     where
         I: TrInput<T>,
         O: TrOutput<T>,
@@ -285,7 +313,10 @@ where
     ///
     /// 等价于 `producer_passive().consumer_passive().build()` 或
     /// `consumer_passive().producer_passive().build()`。
-    pub fn build(self) -> Result<
+    #[allow(clippy::type_complexity)]
+    pub fn build(
+        self,
+    ) -> Result<
         SpscPair<Owned<[MaybeUninit<T>], A>, T, A>,
         BuilderError<usize>,
     >
@@ -450,9 +481,13 @@ where
     /// 补位）；被动生产 × 主动消费 → 仅生产端半部（写入即自动驱动输出泵排空）；
     /// 主动 × 主动 → [`Pipeline`]（流水线 future：交给运行时 spawn 后持续
     /// 由两端设备驱动流动，直到一端出错 / 关闭或调用者请求断开）。
+    #[allow(clippy::type_complexity)]
     pub fn build(
         self,
-    ) -> Result<<() as BuildOutcome<P, C, B, T, A>>::Output, BuilderError<usize>>
+    ) -> Result<
+            <() as BuildOutcome<P, C, B, T, A>>::Output,
+            BuilderError<usize>,
+        >
     where
         (): BuildOutcome<P, C, B, T, A>,
     {
@@ -536,7 +571,7 @@ where
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type Output = Consumer<DevProducer<I, T>, BufConsumer<T>, B, T, A>;
+    type Output = Consumer<DevProducer<I, T>, B, T, A>;
 
     fn assemble(
         core_ref: CoreRef<DevProducer<I, T>, BufConsumer<T>, B, T, A>,
@@ -553,7 +588,7 @@ where
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type Output = Producer<BufProducer<T>, DevConsumer<O, T>, B, T, A>;
+    type Output = Producer<DevConsumer<O, T>, B, T, A>;
 
     fn assemble(
         core_ref: CoreRef<BufProducer<T>, DevConsumer<O, T>, B, T, A>,

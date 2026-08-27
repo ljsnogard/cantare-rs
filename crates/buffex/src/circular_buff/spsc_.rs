@@ -58,13 +58,11 @@ pub type CoreRef<P, C, B, T = u8, A = CoreAlloc> =
 /// 构建器产出的半部对：`(Producer, Consumer)`。使用者可持有两者或其一。
 pub type SpscPair<B, T = u8, A = CoreAlloc> = (
     Producer<
-        BufProducer<T>,
         BufConsumer<T>,
         B, T, A,
     >,
     Consumer<
         BufProducer<T>,
-        BufConsumer<T>,
         B, T, A,
     >,
 );
@@ -81,43 +79,45 @@ pub type SpscPair<B, T = u8, A = CoreAlloc> = (
 /// **主动端不产出半部**：若生产端为主动模式（`P = DeviceProducer`），构建器
 /// 不会把它交给调用者（见 [`super::builder::BuildOutcome`]）——本半部只代表
 /// 被动生产端。
-pub struct Producer<P, C, B, T, A>
+pub struct Producer<C, B, T, A>
 where
-    P: TrProducer<Data = T>,
-    C: TrConsumer<Data = T>,
-    B: BorrowMut<[MaybeUninit<T>]>,
+    // P: TrProducer<Data = T>,
+    C: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
     A: TrMalloc + Clone,
 {
-    core_ref_: CoreRef<P, C, B, T, A>,
+    core_ref_: CoreRef<BufProducer<T>, C, B, T, A>,
 }
 
 /// 消费端半部：与 [`Producer`] 对称（读路径）。
 ///
 /// **主动端不产出半部**：若消费端为主动模式（`C = DeviceConsumer`），构建器
 /// 不会把它交给调用者——本半部只代表被动消费端。
-pub struct Consumer<P, C, B, T, A>
+pub struct Consumer<P, B, T, A>
 where
-    P: TrProducer<Data = T>,
-    C: TrConsumer<Data = T>,
-    B: BorrowMut<[MaybeUninit<T>]>,
+    P: Send + Sync + TrProducer<Data = T>,
+    // C: TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
     A: TrMalloc + Clone,
 {
-    core_ref_: CoreRef<P, C, B, T, A>,
+    core_ref_: CoreRef<P, BufConsumer<T>, B, T, A>,
 }
 
 /// 半部的公共借用约束：段类型（[`ReclSliceMut`] / [`ReclSliceRef`]）要求
 /// 核心实现 `TrCircBuffCore`（其超类
 /// `Send + Sync`），故两端与元素类型必须 `Send + Sync`。此约束由各 impl 的
 /// where 子句直接表达。
-impl<P, C, B, T, A> Producer<P, C, B, T, A>
+impl<C, B, T, A> Producer<C, B, T, A>
 where
-    P: Send + Sync + TrProducer<Data = T>,
+    // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    pub(super) fn new(core_ref: CoreRef<P, C, B, T, A>) -> Self {
+    pub(super) fn new(core_ref: CoreRef<BufProducer<T>, C, B, T, A>) -> Self {
         Producer { core_ref_: core_ref }
     }
 
@@ -152,7 +152,7 @@ where
     }
 }
 
-impl<C, B, T, A> Producer<BufProducer<T>, C, B, T, A>
+impl<C, B, T, A> Producer<C, B, T, A>
 where
     // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
@@ -179,9 +179,9 @@ where
     }
 }
 
-impl<P, C, B, T, A> TrObserver for Producer<P, C, B, T, A>
+impl<C, B, T, A> TrObserver for Producer<C, B, T, A>
 where
-    P: Send + Sync + TrProducer<Data = T>,
+    // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
@@ -213,21 +213,22 @@ where
     }
 }
 
-impl<P, C, B, T, A> Drop for Producer<P, C, B, T, A>
+impl<C, B, T, A> Drop for Producer<C, B, T, A>
 where
-    P: TrProducer<Data = T>,
-    C: TrConsumer<Data = T>,
-    B: BorrowMut<[MaybeUninit<T>]>,
+    // P: TrProducer<Data = T>,
+    C: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
     A: TrMalloc + Clone,
 {
     fn drop(&mut self) {
-        todo!()
+        self.core_ref_.on_buf_producer_drop_();
     }
 }
 
 #[gen_may_cancel_future(ProducerWrite)]
 async fn producer_write_async_<'f, K, B, T, A, C>(
-    producer: &'f mut Producer<BufProducer<T>, K, B, T, A>,
+    producer: &'f mut Producer<K, B, T, A>,
     demand: &'f Demand<usize>,
     cancel: &'f mut C,
 ) -> SomeOf<
@@ -252,15 +253,15 @@ async fn producer_write_async_<'f, K, B, T, A, C>(
 // Consumer impl
 // -- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
-impl<P, C, B, T, A> Consumer<P, C, B, T, A>
+impl<P, B, T, A> Consumer<P, B, T, A>
 where
     P: Send + Sync + TrProducer<Data = T>,
-    C: Send + Sync + TrConsumer<Data = T>,
+    // C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    pub(super) fn new(core_ref_: CoreRef<P, C, B, T, A>) -> Self {
+    pub(super) fn new(core_ref_: CoreRef<P, BufConsumer<T>, B, T, A>) -> Self {
         Consumer { core_ref_ }
     }
 
@@ -295,7 +296,7 @@ where
     }
 }
 
-impl<P, B, T, A> Consumer<P, BufConsumer<T>, B, T, A>
+impl<P, B, T, A> Consumer<P, B, T, A>
 where
     P: Send + Sync + TrProducer<Data = T>,
     // C: Send + Sync + TrConsumer<Data = T>,
@@ -322,10 +323,10 @@ where
     }
 }
 
-impl<P, C, B, T, A> TrObserver for Consumer<P, C, B, T, A>
+impl<P, B, T, A> TrObserver for Consumer<P, B, T, A>
 where
     P: Send + Sync + TrProducer<Data = T>,
-    C: Send + Sync + TrConsumer<Data = T>,
+    // C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
@@ -356,21 +357,22 @@ where
     }
 }
 
-impl<P, C, B, T, A> Drop for Consumer<P, C, B, T, A>
+impl<P, B, T, A> Drop for Consumer<P, B, T, A>
 where
-    P: TrProducer<Data = T>,
-    C: TrConsumer<Data = T>,
-    B: BorrowMut<[MaybeUninit<T>]>,
+    P: Send + Sync + TrProducer<Data = T>,
+    // C: TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
     A: TrMalloc + Clone,
 {
     fn drop(&mut self) {
-        todo!()
+        self.core_ref_.on_buf_consumer_drop_()
     }
 }
 
 #[gen_may_cancel_future(ConsumerRead)]
 async fn consumer_read_async_<'f, P, B, T, A, C>(
-    consumer: &'f mut Consumer<P, BufConsumer<T>, B, T, A>,
+    consumer: &'f mut Consumer<P, B, T, A>,
     demand: &'f Demand<usize>,
     cancel: &'f mut C,
 ) -> SomeOf<ReclSliceRef<'f, T, 
@@ -536,7 +538,7 @@ where
 // abs_buff 读写 trait
 // ---------------------------------------------------------------------------
 
-impl<C, B, T, A> TrBuffWrite<T> for Producer<BufProducer<T>, C, B, T, A>
+impl<C, B, T, A> TrBuffWrite<T> for Producer<C, B, T, A>
 where
     // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
@@ -566,7 +568,7 @@ where
     }
 }
 
-impl<C, B, T, A> TrBuffTryWrite<T> for Producer<BufProducer<T>, C, B, T, A>
+impl<C, B, T, A> TrBuffTryWrite<T> for Producer<C, B, T, A>
 where
     // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
@@ -583,7 +585,7 @@ where
     }
 }
 
-impl<P, B, T, A> TrBuffRead<T> for Consumer<P, BufConsumer<T>, B, T, A>
+impl<P, B, T, A> TrBuffRead<T> for Consumer<P, B, T, A>
 where
     P: Send + Sync + TrProducer<Data = T>,
     // C: Send + Sync + TrConsumer<Data = T>,
@@ -613,7 +615,7 @@ where
     }
 }
 
-impl<P, B, T, A> TrBuffTryRead<T> for Consumer<P, BufConsumer<T>, B, T, A>
+impl<P, B, T, A> TrBuffTryRead<T> for Consumer<P, B, T, A>
 where
     P: Send + Sync + TrProducer<Data = T>,
     // C: Send + Sync + TrConsumer<Data = T>,
@@ -634,16 +636,16 @@ where
 // 等待（park）辅助
 // ---------------------------------------------------------------------------
 
-/// 把 `[min, max]` 区间重新构造为 `Demand`（处理 0 / `usize::MAX` 边界，
-/// 避免 `Demand::between(a, a)` 的 panic）。
-fn demand_of(min: usize, max: usize) -> Demand<usize> {
-    match (min, max) {
-        (0, usize::MAX) => Demand::at_least(1),
-        (0, m) => Demand::less_than(m),
-        (n, usize::MAX) => Demand::at_least(n),
-        (n, m) => Demand::between(n, m),
-    }
-}
+// /// 把 `[min, max]` 区间重新构造为 `Demand`（处理 0 / `usize::MAX` 边界，
+// /// 避免 `Demand::between(a, a)` 的 panic）。
+// fn demand_of(min: usize, max: usize) -> Demand<usize> {
+//     match (min, max) {
+//         (0, usize::MAX) => Demand::at_least(1),
+//         (0, m) => Demand::less_than(m),
+//         (n, usize::MAX) => Demand::at_least(n),
+//         (n, m) => Demand::between(n, m),
+//     }
+// }
 
 /// 等待辅助：把 waker 注册进核心的被动唤醒槽位；条件满足或关闭时返回
 /// `Ready`，否则 `Pending`。注册后**重新检查条件**，以关闭丢失唤醒窗口
