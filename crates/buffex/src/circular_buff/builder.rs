@@ -504,6 +504,10 @@ where
             self.buffer,
         );
         let shared = Shared::new(core, self.alloc.clone());
+        // 构建期初始泵：一端主动一端被动时，主动端先泵一轮（生产端把输入
+        // 设备的数据填满缓冲 / 消费端把缓冲排空到输出），双端被动 / 双主动
+        // 时按内部门控为 no-op。
+        shared.start();
         Ok(<() as BuildOutcome<P, C, B, T, A>>::assemble(
             shared, self.alloc,
         ))

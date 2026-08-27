@@ -13,6 +13,7 @@ use std::{pin::{pin, Pin}, sync::atomic::Ordering, vec, vec::Vec};
 
 use abs_buff::{
     Demand, TrBuffTryRead, TrBuffTryWrite,
+    io::{TrInput, TrOutput},
     x_deps::{
         abs_cancel::{TrCancellationToken, TrMayCancel},
         anylr::SomeOf,
@@ -21,8 +22,8 @@ use abs_buff::{
 
 use super::{
     super::{RxError, TxError},
-    DefaultBuilder, TestErr, TestInput, TestOutput, TestWaker, fill_segm, poll_once,
-    take_segm,
+    DefaultBuilder, ReadySegm, TestErr, TestInput, TestOutput, TestWaker, fill_segm,
+    poll_once, take_segm,
 };
 
 /// 主动生产 × 被动消费：构造即从 `TrInput` 泵入；消费端每读取一次，
@@ -42,9 +43,9 @@ fn pipe_from_input_fills_and_refills() {
         .build()
         .unwrap();
 
-    // 构造完成即已泵入：容量 8 → 单空槽 → 最多 7 格数据。
-    assert_eq!(rx.data_size(), 7);
-    assert_eq!(pos.load(Ordering::Relaxed), 7, "输入设备已被读走 7 字节");
+    // 构造完成即已泵入：容量 8 全部可用（REVERSION 约定，不再空一槽）→ 填满 8 格。
+    assert_eq!(rx.data_size(), 8);
+    assert_eq!(pos.load(Ordering::Relaxed), 8, "输入设备已被读走 8 字节");
 
     // 边读边补：读空当前数据 → hook 立即从输入设备拉取下一批。
     let mut total = Vec::new();
@@ -62,7 +63,7 @@ fn pipe_from_input_fills_and_refills() {
         // 读取后（输入未耗尽时）应立即补满。
         let p = pos.load(Ordering::Relaxed);
         if p < 20 {
-            assert_eq!(rx.data_size(), 7, "读取后应立即补满可写空间");
+            assert_eq!(rx.data_size(), 8, "读取后应立即补满可写空间");
         }
     }
     assert_eq!(total, (0..20).collect::<Vec<_>>(), "读回全部输入");
@@ -451,4 +452,272 @@ fn close_tx_drains_remaining_output() {
 
     tx.close();
     assert_eq!(*out_data.lock().unwrap(), vec![1, 2, 3, 4, 5, 6, 7]);
+}
+
+/// 主动生产 × 被动消费的**异步读等待**：空缓冲时 `read_async` 挂起（park），
+/// 每次轮询自动驱动一轮输入泵；设备数据「迟到」（门打开）后，下一次 poll
+/// 即由 park 内的泵拉到数据 → `Ready`——无需任何显式 drive。
+#[test]
+fn read_async_auto_drives_active_producer() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize},
+    };
+
+    let gate = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let input = GatedInput {
+        data: vec![7, 8, 9],
+        pos: 0,
+        gate: gate.clone(),
+        calls: calls.clone(),
+    };
+
+    let mut rx = DefaultBuilder::with_capacity(8)
+        .unwrap()
+        .pipe_from_input(input)
+        .consumer_passive()
+        .build()
+        .unwrap();
+
+    // 构造期 start() 泵了一轮，但门未开 → 缓冲为空。
+    assert_eq!(rx.data_size(), 0);
+
+    // 异步读等待：空 → Pending（park 每次轮询会驱动输入泵，但门未开仍无数据）。
+    let demand = Demand::at_least(3);
+    let fut = rx.read_async(&demand);
+    let mut fut = pin!(fut.into_future());
+    let (waker, _flag) = TestWaker::make_waker_tuple();
+    assert!(
+        poll_once(fut.as_mut(), &waker).is_pending(),
+        "门未开时读等待必须 pending（泵无数据可拉）"
+    );
+
+    // 门打开：下一次 poll 即由 park 内的泵拉到数据 → Ready。
+    gate.store(true, Ordering::Release);
+    let res = poll_once(fut.as_mut(), &waker);
+    let mut rs = match res {
+        std::task::Poll::Ready(r) => r.pick_left().expect("读等待应成功"),
+        std::task::Poll::Pending => panic!("门开后读等待应被泵驱动就绪"),
+    };
+    assert_eq!(rs.least_count(), 3);
+    assert_eq!(take_segm(&mut rs, 3), vec![7, 8, 9]);
+    assert!(
+        calls.load(Ordering::Relaxed) >= 2,
+        "park 轮询应自动驱动输入泵"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 双头测试设备：同时实现 TrInput 与 TrOutput，观察真实数据流动
+// ---------------------------------------------------------------------------
+
+/// 双头测试设备：**同时实现 [`TrInput`] 与 [`TrOutput`]**，可被两个管道
+/// （`pipe_async`）分别接到两个其他设备，充当「中间人」，让测试在设备内部
+/// 观察到真实的数据流动。
+///
+/// * 作为 `TrOutput`（上游 pipe 的消费端）：把收到的数据追加进 `seen_in`
+///   （流入记录），并**转发**到 `out_buf`（供 `TrInput` 侧读取），同时唤醒
+///   等待中的读者——模拟「收到数据 → 有数据可读」的真实语义；
+/// * 作为 `TrInput`（下游 pipe 的生产端）：从 `out_buf` 供数（追加进
+///   `seen_out` 流出记录）；`out_buf` 为空时返回 `Pending` 并注册 waker
+///   （**阻塞式设备语义**，与真实连接如 iroh 一致：无数据即挂起，而非空转）。
+///
+/// 内部状态全部经 `Arc` 共享，因此 `Clone` 后可同时放入两个管道。
+#[derive(Clone)]
+struct DualHeadDevice {
+    /// 作为 `TrOutput` 收到的全部数据（上游流入本设备的记录）。
+    seen_in: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    /// 作为 `TrInput` 供出的全部数据（本设备转交给下游的记录）。
+    seen_out: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    /// 转发缓冲：`TrOutput` 收到的数据追加于此，`TrInput` 从这里读取。
+    out_buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    /// `TrInput` 侧的读取位置。
+    out_pos: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// 等待中的读者（`TrInput` 侧）——`out_buf` 从空变有数据时被唤醒。
+    reader_waker: std::sync::Arc<std::sync::Mutex<Option<std::task::Waker>>>,
+}
+
+impl DualHeadDevice {
+    fn new() -> Self {
+        DualHeadDevice {
+            seen_in: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            seen_out: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            out_buf: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            out_pos: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            reader_waker: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
+/// 双头设备作为 `TrInput` 的读 future：`out_buf` 有数据即拷贝并推进读取位置；
+/// 为空则注册 waker 并挂起（阻塞式设备语义）。
+struct DualHeadRead<'f> {
+    dev: &'f mut DualHeadDevice,
+    target: &'f mut [core::mem::MaybeUninit<u8>],
+}
+
+impl core::future::Future for DualHeadRead<'_> {
+    type Output = SomeOf<usize, TestErr>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        let this = &mut *self;
+        let buf = this.dev.out_buf.lock().unwrap();
+        let pos = this.dev.out_pos.load(Ordering::Relaxed);
+        let avail = buf.len().saturating_sub(pos);
+        if avail == 0 {
+            // 暂无数据：注册 waker 挂起；`TrOutput` 写入时唤醒。
+            *this.dev.reader_waker.lock().unwrap() = Some(cx.waker().clone());
+            return core::task::Poll::Pending;
+        }
+        let n = core::cmp::min(this.target.len(), avail);
+        for (i, slot) in this.target[..n].iter_mut().enumerate() {
+            *slot = core::mem::MaybeUninit::new(buf[pos + i]);
+        }
+        this.dev.out_pos.store(pos + n, Ordering::Relaxed);
+        this.dev
+            .seen_out
+            .lock()
+            .unwrap()
+            .extend_from_slice(&buf[pos..pos + n]);
+        core::task::Poll::Ready(SomeOf::new_left(n))
+    }
+}
+
+impl<'f> TrMayCancel<'f> for DualHeadRead<'f> {
+    type MayCancelFuture<'g, C> = DualHeadRead<'f>
+    where
+        Self: 'g,
+        C: TrCancellationToken + Clone,
+        C: 'f,
+        C: 'g,
+        'g: 'f;
+    type MayCancelOutput = SomeOf<usize, TestErr>;
+
+    fn may_cancel_with<'g, C>(
+        self,
+        _cancel: &'g mut C,
+    ) -> Self::MayCancelFuture<'g, C>
+    where
+        Self: 'g,
+        'g: 'f,
+        C: TrCancellationToken + Clone,
+    {
+        self
+    }
+}
+
+impl TrInput<u8> for DualHeadDevice {
+    type ReadAsync<'f> = DualHeadRead<'f> where Self: 'f;
+    type Err = TestErr;
+
+    fn read_async<'f>(
+        &'f mut self,
+        target: &'f mut [core::mem::MaybeUninit<u8>],
+    ) -> Self::ReadAsync<'f> {
+        DualHeadRead { dev: self, target }
+    }
+}
+
+impl TrOutput<u8> for DualHeadDevice {
+    type WriteAsync<'f> = ReadySegm<usize, TestErr> where Self: 'f;
+    type Err = TestErr;
+
+    fn write_async<'f>(
+        &'f mut self,
+        source: &'f [core::mem::MaybeUninit<u8>],
+    ) -> Self::WriteAsync<'f> {
+        let n = source.len();
+        let mut chunk: Vec<u8> = source
+            .iter()
+            .map(|m| unsafe { m.assume_init_read() })
+            .collect();
+        self.seen_in.lock().unwrap().extend_from_slice(&chunk);
+        self.out_buf.lock().unwrap().append(&mut chunk);
+        // 收到数据 → 有数据可读：唤醒等待中的读者（下游 pipe 的输入等待）。
+        if let Some(w) = self.reader_waker.lock().unwrap().take() {
+            w.wake();
+        }
+        ReadySegm::new(SomeOf::new_left(n))
+    }
+}
+
+/// # 被测约定
+/// 双主动流水线（`pipe_async`）**由两端设备驱动**：数据真实地在
+/// 「源设备 → 双头设备 → 终端设备」之间流动，且双头设备（同时实现
+/// `TrInput` 与 `TrOutput`）内部可观察到流经的数据（`seen_in` / `seen_out`）。
+/// 上游 pipe 把数据写入双头设备的 `TrOutput` 侧，双头设备**转发**到
+/// `out_buf` 并唤醒读者；下游 pipe 从双头设备的 `TrInput` 侧读取并转交终端。
+///
+/// # 构造
+/// `source`（`TestInput`，20 字节）经 `pipe1` 接到双头设备的 `TrOutput` 侧；
+/// 双头设备的 `TrInput` 侧经 `pipe2` 接到 `sink`（`TestOutput`）。两个 pipe
+/// 的 future 用 [`poll_once`] 手动驱动（阻塞式双头设备：无数据时挂起并注册
+/// waker，模拟真实连接）。
+///
+/// # 判定
+/// (1) 先 poll `pipe2`：双头设备尚无数据 → **挂起**（非空转，验证 await 设备
+/// 而非 `block_on` 自旋）；(2) poll `pipe1` 一次：源数据全部流入双头设备
+/// （`seen_in == 0..20`）；(3) 再 poll `pipe2`：数据经双头设备转交终端
+/// （`sink.data == 0..20`、`seen_out == 0..20`）——三处断言共同证明数据真的
+/// 流经双头设备，而非停留在任一管道内部。
+#[test]
+fn dual_head_device_observes_cross_pipe_flow() {
+    let source = TestInput::new((0..20).collect());
+    let sink = TestOutput::new();
+    let out_data = sink.data.clone(); // sink 将 move 进 pipe2，观察侧保留 Arc
+    let dual = DualHeadDevice::new();
+
+    // pipe1：source（TrInput）→ dual（TrOutput）——数据流入双头设备。
+    let mut pipe1 = DefaultBuilder::with_capacity(8)
+        .unwrap()
+        .pipe_from_input(source)
+        .pipe_into_output(dual.clone())
+        .build()
+        .unwrap();
+    // pipe2：dual（TrInput）→ sink（TrOutput）——数据从双头设备流出。
+    let mut pipe2 = DefaultBuilder::with_capacity(8)
+        .unwrap()
+        .pipe_from_input(dual.clone())
+        .pipe_into_output(sink)
+        .build()
+        .unwrap();
+
+    let (waker, _flag) = TestWaker::make_waker_tuple();
+    let mut f1 = pipe1.pipe_async().into_future();
+    let mut p1 = pin!(f1);
+    let mut f2 = pipe2.pipe_async().into_future();
+    let mut p2 = pin!(f2);
+
+    // (1) 先 poll pipe2：双头设备尚无数据 → 输入侧挂起（阻塞式设备语义，
+    //     注册 waker；这正是真实连接的行为——无数据即 Pending，而非空转）。
+    assert!(
+        poll_once(p2.as_mut(), &waker).is_pending(),
+        "pipe2 输入（双头设备）暂无数据时应挂起"
+    );
+
+    // (2) poll pipe1：源数据全部流入双头设备（source 非阻塞，单次 poll 流完；
+    //     双头设备 TrOutput 记录 seen_in、转发 out_buf 并唤醒 pipe2 的读者）。
+    let _ = poll_once(p1.as_mut(), &waker);
+    assert_eq!(
+        *dual.seen_in.lock().unwrap(),
+        (0..20).collect::<Vec<_>>(),
+        "pipe1 的数据应全部流入双头设备（seen_in 可观察）"
+    );
+
+    // (3) 再次 poll pipe2：双头设备把收到的数据转交终端设备。
+    let _ = poll_once(p2.as_mut(), &waker);
+    assert_eq!(
+        *out_data.lock().unwrap(),
+        (0..20).collect::<Vec<_>>(),
+        "pipe2 的数据应全部流到终端设备"
+    );
+    assert_eq!(
+        *dual.seen_out.lock().unwrap(),
+        (0..20).collect::<Vec<_>>(),
+        "双头设备已转交全部数据（seen_out 可观察）"
+    );
 }
