@@ -524,7 +524,31 @@ where
     A: Send + Sync + TrMalloc + Clone,
     C: TrCancellationToken + Clone,
 {
-    Option::None
+    // 泵循环：**由两端设备驱动**——每次 `await` 设备的 `read_async` /
+    // `write_async`，设备就绪即流动、阻塞即挂起（executor 在设备 waker
+    // 就绪时重新轮询本 future）。设备错误视为「该方向无进展」（本流水线
+    // 不感知具体错误，见模块文档「设备错误传播」待定项）。
+    let core = &*pipeline.core_ref_;
+    loop {
+        if cancel.is_cancelled()
+            || (core.is_tx_closed() && core.is_rx_closed())
+        {
+            return None;
+        }
+        let in_moved = core.pipe_input_once().await;
+        let out_moved = core.pipe_output_once().await;
+        if in_moved == 0 && out_moved == 0 {
+            // 本轮无进展：
+            // - 阻塞设备：上面的 await 已挂起（Pending），不会到达这里；
+            // - 非阻塞设备（立即返回 0）：输入已关闭且缓冲已排空 → 流水线
+            //   结束；否则**停驻**（不再流动、也不会空转），等待外部唤醒 /
+            //   drop——非阻塞设备没有可注册的「有新数据」waker。
+            if core.is_tx_closed() && core.data_size() == 0 {
+                return None;
+            }
+            core::future::pending::<()>().await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -200,6 +200,13 @@ where
             _use_t: PhantomData,
         }
     }
+
+    /// 访问输入设备（双主动流水线 `pipe_async` 直接 await 设备的 `read_async`，
+    /// 不经 `react_async`——避免段内滞留半截数据）。
+    #[inline]
+    pub(super) fn input_mut(&mut self) -> &mut TyInput {
+        &mut self.input_
+    }
 }
 
 /// 主动消费端的端类型：携带输出设备的**实际类型**（`TyOutput`），与
@@ -224,6 +231,12 @@ where
             output_: output,
             _use_t_: PhantomData,
         }
+    }
+
+    /// 访问输出设备（双主动流水线 `pipe_async` 直接 await 设备的 `write_async`）。
+    #[inline]
+    pub(super) fn output_mut(&mut self) -> &mut TyOutput {
+        &mut self.output_
     }
 }
 

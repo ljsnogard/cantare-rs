@@ -89,11 +89,12 @@ use core::{
 
 use abs_buff::{
     Demand,
+    io::{TrInput, TrOutput},
     error::{ReadErrTag, WriteErrTag, TrTaggedError, TrErrTag},
     gen_may_cancel_future,
     x_deps::{anylr, abs_cancel},
 };
-use abs_cancel::{TrCancellationToken, TrMayCancel};
+use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use abs_mm::mem_alloc::{CoreAlloc, TrMalloc};
 use abs_sync::ok_or::XtOkOr;
 
@@ -874,6 +875,89 @@ where
     }
 }
 
+impl<I, O, B, T> CircCore<DevProducer<I, T>, DevConsumer<O, T>, B, T>
+where
+    I: Send + Sync + TrInput<T>,
+    O: Send + Sync + TrOutput<T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
+{
+    // ------------------------------------------------------------------
+    // 双主动流水线泵（`Pipeline::pipe_async`）：await 设备，阻塞即挂起
+    // ------------------------------------------------------------------
+
+    /// 流水线的一轮输入泵（异步）：从输入设备读**一次**（`await`，设备阻塞
+    /// 即挂起、由 executor 驱动其 waker），直接写入缓冲的一段**物理连续**
+    /// 可写区，随后立即提交（`advance_write`）。返回本轮搬入字节数。
+    ///
+    /// 与同步泵 [`CircCore::pump_input`] 的两个关键区别：
+    ///
+    /// 1. **await 设备 future 而非 `block_on` 自旋**——真实设备（如 iroh
+    ///    连接）可能长时间 `Pending`，自旋永远等不到数据；
+    /// 2. **每次读取后立即提交**，不在段中滞留半截数据——若设备中途阻塞，
+    ///    已读部分仍会提交并流向输出泵（`react_async` 的段内循环会把已读
+    ///    半截数据滞留到设备再次就绪）。
+    pub(super) async fn pipe_input_once(&self) -> usize {
+        let state = self.atm_stat_.value();
+        if has_flag(state, TX_CLOSED) || has_flag(state, RX_CLOSED) {
+            return 0;
+        }
+        let cap = self.capacity();
+        let pos = IoPos::unpack(state, cap);
+        let free = pos.free_size();
+        if free == 0 {
+            return 0;
+        }
+        // 一段物理连续的可写区（跨末端时本轮先取一段，下一轮再取另一段）。
+        let take = core::cmp::min(free, cap - pos.wp);
+        // SAFETY: 流水线独占驱动（双主动无其他访问者）；区域不与活段重叠。
+        let dst = &mut self.buffer_view_mut()[pos.wp..pos.wp + take];
+        let producer = unsafe { &mut *self.producer_.get() };
+        let x = producer
+            .input_mut()
+            .read_async(dst)
+            .may_cancel_with(NonCancellableToken::shared_mut())
+            .await;
+        let n = x.pick_left().unwrap_or(0);
+        if n == 0 {
+            return 0; // 设备暂无数据 / 错误
+        }
+        self.advance_write(n);
+        n
+    }
+
+    /// 流水线的一轮输出泵（异步）：把缓冲的一段**物理连续**可读区写**一次**
+    /// 到输出设备（`await`，设备阻塞即挂起），随后立即提交（`advance_read`）。
+    /// 返回本轮搬出字节数。语义同 [`CircCore::pipe_input_once`]。
+    pub(super) async fn pipe_output_once(&self) -> usize {
+        let state = self.atm_stat_.value();
+        if has_flag(state, RX_CLOSED) {
+            return 0;
+        }
+        let cap = self.capacity();
+        let pos = IoPos::unpack(state, cap);
+        let data = pos.data_size();
+        if data == 0 {
+            return 0;
+        }
+        let take = core::cmp::min(data, cap - pos.rp);
+        let src = &self.buffer_view_mut()[pos.rp..pos.rp + take];
+        let consumer = unsafe { &mut *self.consumer_.get() };
+        let x = consumer
+            .output_mut()
+            .write_async(src)
+            .may_cancel_with(NonCancellableToken::shared_mut())
+            .await;
+        let n = x.pick_left().unwrap_or(0);
+        if n == 0 {
+            return 0; // 设备暂不能接收 / 错误
+        }
+        self.advance_read(n);
+        n
+    }
+
+}
+
 // ---------------------------------------------------------------------------
 // TrCircBuffCore（段提交接口）
 // ---------------------------------------------------------------------------
@@ -1029,7 +1113,7 @@ impl<E> Drop for WaitGuard<'_, E> {
     }
 }
 
-use super::circ_buff_::{BufConsumer, BufProducer};
+use super::circ_buff_::{BufConsumer, BufProducer, DevConsumer, DevProducer};
 
 #[gen_may_cancel_future(CorePassiveRead)]
 async fn core_passive_read_async_<'f, P, B, T, C>(
@@ -1085,6 +1169,13 @@ where
             Ok(_) => true,
             Err(e) => e.err_tag().should_terminate(),
         };
+        if can_stop() {
+            return Poll::Ready(());
+        }
+        // 对端（生产端）为主动：每次轮询先同步驱动一轮输入泵，再重查——
+        // 设备就绪后数据自动补位（无后台任务模型下「等待即驱动」；内部门控
+        // 保证仅一端主动一端被动时实际泵入）。
+        core.pump_input();
         if can_stop() {
             return Poll::Ready(());
         }
@@ -1151,6 +1242,12 @@ where
             Ok(_) => true,
             Err(e) => e.err_tag().should_terminate(),
         };
+        if can_stop() {
+            return Poll::Ready(());
+        }
+        // 对端（消费端）为主动：每次轮询先同步驱动一轮输出泵，再重查——
+        // 读取释放空间后自动排空（内部门控：仅一端主动一端被动时泵出）。
+        core.pump_output();
         if can_stop() {
             return Poll::Ready(());
         }
