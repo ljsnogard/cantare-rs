@@ -16,34 +16,40 @@
 //!   [`IrohReader::take_error`] 取回）。
 
 use std::{
-    future::Future,
-    pin::Pin,
+    mem::MaybeUninit,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    task::{Context, Poll},
 };
+
+use iroh::endpoint::RecvStream;
 
 use abs_buff::{
-    Demand, TrBuffRead, TrBuffTryRead,
-    x_deps::abs_cancel::TrMayCancel,
+    Demand, TrBuffRead, TrBuffTryRead, gen_may_cancel_future,
 };
+// `abs_buff` 及其底层依赖（`abs_cancel`）经 `abs_buff_tokio_adapt::x_deps`
+// 再导出，无需在 Cargo.toml 重复声明；`buffex` 是直接依赖。
+use abs_buff_tokio_adapt::x_deps::abs_buff;
+use abs_cancel::{TrCancellationToken, TrMayCancel};
 use anylr::SomeOf;
-use buffex::circular_buff::{
-    BuffConsumer, CircularBuffBuilder, Consumer, CoreAlloc, DeviceProducer, RxError,
+use buffex::{
+    circular_buff::{
+        CircularBuffBuilder, Consumer, CoreAlloc, DevProducer, RxError},
+    x_deps::{abs_cancel, mm_ptr},
 };
-use iroh::endpoint::{ReadError, RecvStream};
+use mm_ptr::Owned;
 
-use super::{common::sanitize_capacity, device::StreamInput};
+use super::{
+    common::sanitize_capacity,
+    device::{StreamInput, StreamInputErr},
+};
 
 /// 内部缓冲的消费端半部（被动消费端 = 调用者驱动）。
 type Inner = Consumer<
-    DeviceProducer<StreamInput, u8>,
-    BuffConsumer<u8>,
-    u8,
-    CoreAlloc,
->;
+    DevProducer<StreamInput, u8>,
+    Owned<[MaybeUninit<u8>], CoreAlloc>,
+    u8, CoreAlloc>;
 
 /// 读半部（读端适配器）of a buffered iroh stream。
 ///
@@ -54,7 +60,7 @@ pub struct IrohReader {
     /// 输入设备是否已到 EOF（或出错）：之后缓冲读空即合成 `Closing`。
     eof: Arc<AtomicBool>,
     /// 最近一次网络读错误（经 [`IrohReader::take_error`] 取回）。
-    err: Arc<Mutex<Option<ReadError>>>,
+    err: Arc<Mutex<Option<StreamInputErr>>>,
 }
 
 impl IrohReader {
@@ -62,20 +68,23 @@ impl IrohReader {
     ///
     /// 构造即 `drive()` 拉一轮（有数据则入缓冲，无则立即返回，不阻塞）。
     /// 不 spawn 任何任务。
-    pub fn new(stream: RecvStream, cap: usize) -> Self {
+    pub fn try_new(stream: RecvStream, cap: usize) -> Result<Self, usize> {
         let eof = Arc::new(AtomicBool::new(false));
         let err = Arc::new(Mutex::new(None));
         let input = StreamInput::new(stream, eof.clone(), err.clone());
-        let (_tx, rx) = CircularBuffBuilder::with_capacity(sanitize_capacity(cap))
+        let Result::Ok(builder) = CircularBuffBuilder::with_capacity(cap) else {
+            return Result::Err(cap);
+        };
+        let rx = builder
             .pipe_from_input(input)
             .consumer_passive()
             .build()
             .expect("valid iroh buffer capacity");
-        Self { rx, eof, err }
+        Result::Ok(Self { rx, eof, err })
     }
 
     /// Report the last network read error, if any.
-    pub fn take_error(&self) -> Option<ReadError> {
+    pub fn take_error(&self) -> Option<StreamInputErr> {
         self.err.lock().ok().and_then(|mut guard| guard.take())
     }
 
@@ -83,6 +92,29 @@ impl IrohReader {
     /// `Closing`（EOF）或 `Drained`。
     pub async fn shutdown(mut self) {
         self.rx.close();
+    }
+
+    pub fn read_async<'f>(
+        &'f mut self,
+        demand: &'f Demand<usize>,
+    ) -> IrohReadAsync<'f> {
+        IrohReadAsync(self, demand)
+    }
+
+    pub fn try_read<'f>(
+        &'f mut self,
+        demand: &'f Demand<usize>,
+    ) -> SomeOf<<Inner as TrBuffRead<u8>>::SegmRef<'f>, <Inner as TrBuffRead<u8>>::Err> {
+        // 底层半部在对端（生产端）为主动时已自动 drive 拉一轮（try-once、
+        // 非阻塞）——适配器无需手动驱动。
+        let some = self.rx.try_read(demand);
+        // EOF 合成：空 + 设备已 EOF → Closing（错误详情经 take_error 取回）。
+        if let Some(RxError::Drained(_)) = some.as_ref().pick_right() {
+            if self.eof.load(Ordering::Acquire) {
+                return SomeOf::new_right(RxError::Closing);
+            }
+        }
+        some
     }
 
     /// EOF 已到且缓冲已空：之后读取应报 `Closing`。
@@ -97,149 +129,50 @@ impl Drop for IrohReader {
     }
 }
 
-/// 把 `[min, max]` 重构为 `Demand`（处理 0 / `usize::MAX` 边界）。
-fn demand_of(min: Option<usize>, max: Option<usize>) -> Demand<usize> {
-    match (min, max) {
-        (None, None) => Demand::at_least(1),
-        (None, Some(m)) => Demand::less_than(m),
-        (Some(n), None) => Demand::at_least(n),
-        (Some(n), Some(m)) => Demand::between(n, m),
-    }
-}
-
 impl TrBuffRead<u8> for IrohReader {
     type ReadAsync<'f> = IrohReadAsync<'f> where Self: 'f;
+
     type SegmRef<'f> = <Inner as TrBuffRead<u8>>::SegmRef<'f> where Self: 'f;
+
     type Err = <Inner as TrBuffRead<u8>>::Err;
 
     fn is_drained_closing(&self) -> bool {
         self.rx.is_drained_closing() || self.eof_drained()
     }
 
+    #[inline]
     fn read_async<'f>(
         &'f mut self,
-        demand: &Demand<usize>,
+        demand: &'f Demand<usize>,
     ) -> Self::ReadAsync<'f> {
-        IrohReadAsync {
-            reader: self,
-            min: demand.min().copied(),
-            max: demand.max().copied(),
-            state: State::Try,
-        }
+        IrohReader::read_async(self, demand)
     }
 }
 
 impl TrBuffTryRead<u8> for IrohReader {
+    #[inline]
     fn try_read<'f>(
         &'f mut self,
-        demand: &Demand<usize>,
+        demand: &'f Demand<usize>,
     ) -> SomeOf<Self::SegmRef<'f>, Self::Err> {
-        // 底层半部在对端（生产端）为主动时已自动 drive 拉一轮（try-once、
-        // 非阻塞）——适配器无需手动驱动。
-        let some = self.rx.try_read(demand);
-        // EOF 合成：空 + 设备已 EOF → Closing（错误详情经 take_error 取回）。
-        if let Some(RxError::Drained(_)) = some.as_ref().pick_right() {
-            if self.eof.load(Ordering::Acquire) {
-                return SomeOf::new_right(RxError::Closing);
-            }
-        }
-        some
+        IrohReader::try_read(self, demand)
     }
 }
 
-// ---------------------------------------------------------------------------
-// read_async 的循环 future：drive + 尝试，数据未到则 yield
-// ---------------------------------------------------------------------------
-
-/// 循环驱动的读等待 future：反复「拉网络数据 → 尝试借段」，直到有数据 /
-/// EOF / 错误。不 spawn——等待发生在调用者的任务里（`yield` 让出）。
-///
-/// 持有**共享** `&'f IrohReader`（共享引用可 Copy，借出的段才能绑定到结构体
-/// 自身的 `'f`；读路径经 [`Consumer::try_read_shared`] 以 `&self` 完成）。
-pub struct IrohReadAsync<'f> {
-    reader: &'f IrohReader,
-    min: Option<usize>,
-    max: Option<usize>,
-    state: State,
-}
-
-enum State {
-    /// 下一轮：拉网络 + 尝试借段。
-    Try,
-    /// 数据未到：让出运行时（tokio 定时器零延时），之后回到 `Try`。
-    Yield(tokio::time::Sleep),
-}
-
-impl<'f> Future for IrohReadAsync<'f> {
-    type Output = SomeOf<<IrohReader as TrBuffRead<u8>>::SegmRef<'f>, RxError<usize>>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // 本 future 无自引用字段（`Sleep` 只在原地轮询、从不移动），
-        // 故 get_unchecked_mut 与对 `Sleep` 的 new_unchecked 均安全。
-        let this = unsafe { self.get_unchecked_mut() };
-        loop {
-            match &mut this.state {
-                State::Try => {
-                    // 底层 `try_read_shared` 在对端（生产端）为主动时已自动
-                    // drive 拉一轮——适配器无需手动驱动。
-                    let demand = demand_of(this.min, this.max);
-                    let some = this.reader.rx.try_read_shared(&demand);
-                    if some.as_ref().pick_left().is_some() {
-                        return Poll::Ready(SomeOf::new_left(
-                            some.pick_left().expect("checked above"),
-                        ));
-                    }
-                    match some.pick_right() {
-                        Some(RxError::Drained(_)) => {
-                            if this.reader.eof.load(Ordering::Acquire) {
-                                // 空 + 设备已 EOF：合成 Closing。
-                                return Poll::Ready(SomeOf::new_right(RxError::Closing));
-                            }
-                            // 暂无数据：让出运行时处理网络，下轮再拉。
-                            this.state =
-                                State::Yield(tokio::time::sleep(core::time::Duration::ZERO));
-                        }
-                        Some(err) => return Poll::Ready(SomeOf::new_right(err)),
-                        None => unreachable!("SomeOf has no both variant here"),
-                    }
-                }
-                State::Yield(sleep) => {
-                    // SAFETY: `sleep` 位于被 pin 的本 future 内部，原地轮询、
-                    // 不移动。
-                    let fut = unsafe { Pin::new_unchecked(sleep) };
-                    if fut.poll(cx).is_pending() {
-                        return Poll::Pending;
-                    }
-                    this.state = State::Try;
-                }
-            }
-        }
-    }
-}
-
-impl<'f> TrMayCancel<'f> for IrohReadAsync<'f>
+#[gen_may_cancel_future(IrohRead)]
+async fn iroh_read_async_<'f, C>(
+    reader: &'f mut IrohReader,
+    demand: &'f Demand<usize>,
+    cancel: &'f mut C,
+) -> SomeOf<
+    <Inner as TrBuffRead<u8>>::SegmRef<'f>,
+    <Inner as TrBuffRead<u8>>::Err,
+>
 where
-    Self: 'f,
+    C: TrCancellationToken + Clone,
 {
-    type MayCancelFuture<'g, C> = IrohReadAsync<'f>
-    where
-        Self: 'g,
-        C: abs_buff::x_deps::abs_cancel::TrCancellationToken + Clone,
-        C: 'f,
-        C: 'g,
-        'g: 'f;
-    type MayCancelOutput = <Self as Future>::Output;
-
-    fn may_cancel_with<'g, C>(
-        self,
-        _cancel: &'g mut C,
-    ) -> Self::MayCancelFuture<'g, C>
-    where
-        Self: 'g,
-        'g: 'f,
-        C: abs_buff::x_deps::abs_cancel::TrCancellationToken + Clone,
-    {
-        // 当前不支持取消：忽略 token（与立即就绪型 future 的处理一致）。
-        self
-    }
+    reader.rx
+        .read_async(demand)
+        .may_cancel_with(cancel)
+        .await
 }

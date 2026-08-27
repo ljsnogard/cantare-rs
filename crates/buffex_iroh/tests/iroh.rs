@@ -1,6 +1,8 @@
 //! Real iroh connection tests for the buffered stream adapters.
 
-use abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite};
+use abs_buff_tokio_adapt::x_deps::abs_buff::{
+    Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
+};
 use buffex_iroh::{IrohReader, IrohWriter};
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 
@@ -11,10 +13,8 @@ const RESPONSE: &[u8] = b"hello from server through ring buffer";
 async fn write_all(writer: &mut IrohWriter, data: &[u8]) {
     let mut off = 0usize;
     while off < data.len() {
-        let Some(mut segm) = TrBuffWrite::write_async(
-            writer,
-            &Demand::less_than(data.len() - off),
-        )
+        let demand = Demand::less_than(data.len() - off);
+        let Some(mut segm) = TrBuffWrite::write_async(writer, &demand)
         .await
         .pick_left() else {
             panic!("writer returned an error");
@@ -38,9 +38,8 @@ async fn write_all(writer: &mut IrohWriter, data: &[u8]) {
 async fn read_exact(reader: &mut IrohReader, len: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(len);
     while out.len() < len {
-        let res =
-            TrBuffRead::read_async(reader, &Demand::less_than(len - out.len()))
-                .await;
+        let demand = Demand::less_than(len - out.len());
+        let res = TrBuffRead::read_async(reader, &demand).await;
         let right = res.as_ref().pick_right().map(|err| format!("{err:?}"));
         let Some(mut segm) = res.pick_left() else {
             panic!(
@@ -89,13 +88,13 @@ async fn buffered_streams_roundtrip_over_real_iroh_connection() {
             .expect("server should accept the bidirectional stream");
 
         // Receive the client payload through TrBuffRead.
-        let mut reader = IrohReader::new(server_recv, 32);
+        let mut reader = IrohReader::try_new(server_recv, 32).unwrap();
         let got = read_exact(&mut reader, PAYLOAD.len()).await;
         assert_eq!(got, PAYLOAD);
         reader.shutdown().await;
 
         // Send the response through TrBuffWrite.
-        let mut writer = IrohWriter::new(server_send, 32);
+        let mut writer = IrohWriter::try_new(server_send, 32).unwrap();
         write_all(&mut writer, RESPONSE).await;
         writer.shutdown().await;
 
@@ -121,12 +120,12 @@ async fn buffered_streams_roundtrip_over_real_iroh_connection() {
         .expect("client should open a bidirectional stream");
 
     // Send the payload through TrBuffWrite.
-    let mut writer = IrohWriter::new(client_send, 32);
+    let mut writer = IrohWriter::try_new(client_send, 32).unwrap();
     write_all(&mut writer, PAYLOAD).await;
     writer.shutdown().await;
 
     // Receive the response through TrBuffRead.
-    let mut reader = IrohReader::new(client_recv, 32);
+    let mut reader = IrohReader::try_new(client_recv, 32).unwrap();
     let got = read_exact(&mut reader, RESPONSE.len()).await;
     assert_eq!(got, RESPONSE);
     reader.shutdown().await;
@@ -140,7 +139,6 @@ async fn buffered_streams_roundtrip_over_real_iroh_connection() {
 /// （多段、多次泵），全程不 spawn——验证无后台任务模型下 try 接口的正确性。
 #[tokio::test(flavor = "multi_thread")]
 async fn try_interface_moves_data_without_spawn() {
-
     let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
     let server_payload = payload.clone();
 
@@ -161,7 +159,7 @@ async fn try_interface_moves_data_without_spawn() {
             conn.accept_bi().await.expect("accept bidirectional stream");
 
         // 读侧：try_read 循环（内部每次先 drive 拉网络，非阻塞）。
-        let mut reader = IrohReader::new(server_recv, 32);
+        let mut reader = IrohReader::try_new(server_recv, 32).unwrap();
         let mut got = Vec::new();
         while got.len() < payload.len() {
             if let Some(mut segm) = TrBuffTryRead::try_read(
@@ -171,13 +169,18 @@ async fn try_interface_moves_data_without_spawn() {
             .pick_left()
             {
                 let n = segm.least_count();
-                let mut staging: Vec<std::mem::MaybeUninit<u8>> = Vec::with_capacity(n);
+                let mut staging: Vec<std::mem::MaybeUninit<u8>> =
+                    Vec::with_capacity(n);
                 staging.resize_with(n, std::mem::MaybeUninit::uninit);
                 // SAFETY: u8 位拷贝。
                 unsafe {
                     segm.move_items_to_buff(&mut staging);
                 }
-                got.extend(staging.into_iter().map(|m| unsafe { m.assume_init_read() }));
+                got.extend(
+                    staging
+                        .into_iter()
+                        .map(|m| unsafe { m.assume_init_read() }),
+                );
                 drop(segm);
             } else {
                 // 暂无数据：让运行时处理网络。
@@ -188,7 +191,7 @@ async fn try_interface_moves_data_without_spawn() {
         reader.shutdown().await;
 
         // 写侧：try_write 循环（段 drop 时泵同步阻塞写）。
-        let mut writer = IrohWriter::new(server_send, 32);
+        let mut writer = IrohWriter::try_new(server_send, 32).unwrap();
         let mut off = 0usize;
         while off < payload.len() {
             if let Some(mut segm) = TrBuffTryWrite::try_write(
@@ -198,8 +201,11 @@ async fn try_interface_moves_data_without_spawn() {
             .pick_left()
             {
                 let n = segm.least_count();
-                let mut staging: Vec<std::mem::MaybeUninit<u8>> =
-                    payload[off..off + n].iter().map(|&b| std::mem::MaybeUninit::new(b)).collect();
+                let mut staging: Vec<std::mem::MaybeUninit<u8>> = payload
+                    [off..off + n]
+                    .iter()
+                    .map(|&b| std::mem::MaybeUninit::new(b))
+                    .collect();
                 // SAFETY: u8 位拷贝。
                 unsafe {
                     segm.move_items_from_buff(&mut staging);
@@ -225,10 +231,11 @@ async fn try_interface_moves_data_without_spawn() {
         .connect(server_addr, ALPN)
         .await
         .expect("client connects");
-    let (client_send, client_recv) = conn.open_bi().await.expect("open bidirectional stream");
+    let (client_send, client_recv) =
+        conn.open_bi().await.expect("open bidirectional stream");
 
     // 客户端：先写（try_write 循环），再读（try_read 循环）。
-    let mut writer = IrohWriter::new(client_send, 32);
+    let mut writer = IrohWriter::try_new(client_send, 32).unwrap();
     let mut off = 0usize;
     while off < payload.len() {
         if let Some(mut segm) = TrBuffTryWrite::try_write(
@@ -238,8 +245,11 @@ async fn try_interface_moves_data_without_spawn() {
         .pick_left()
         {
             let n = segm.least_count();
-            let mut staging: Vec<std::mem::MaybeUninit<u8>> =
-                payload[off..off + n].iter().map(|&b| std::mem::MaybeUninit::new(b)).collect();
+            let mut staging: Vec<std::mem::MaybeUninit<u8>> = payload
+                [off..off + n]
+                .iter()
+                .map(|&b| std::mem::MaybeUninit::new(b))
+                .collect();
             // SAFETY: u8 位拷贝。
             unsafe {
                 segm.move_items_from_buff(&mut staging);
@@ -252,7 +262,7 @@ async fn try_interface_moves_data_without_spawn() {
     }
     writer.shutdown().await;
 
-    let mut reader = IrohReader::new(client_recv, 32);
+    let mut reader = IrohReader::try_new(client_recv, 32).unwrap();
     let mut got = Vec::new();
     while got.len() < payload.len() {
         if let Some(mut segm) = TrBuffTryRead::try_read(
@@ -262,13 +272,16 @@ async fn try_interface_moves_data_without_spawn() {
         .pick_left()
         {
             let n = segm.least_count();
-            let mut staging: Vec<std::mem::MaybeUninit<u8>> = Vec::with_capacity(n);
+            let mut staging: Vec<std::mem::MaybeUninit<u8>> =
+                Vec::with_capacity(n);
             staging.resize_with(n, std::mem::MaybeUninit::uninit);
             // SAFETY: u8 位拷贝。
             unsafe {
                 segm.move_items_to_buff(&mut staging);
             }
-            got.extend(staging.into_iter().map(|m| unsafe { m.assume_init_read() }));
+            got.extend(
+                staging.into_iter().map(|m| unsafe { m.assume_init_read() }),
+            );
             drop(segm);
         } else {
             tokio::task::yield_now().await;

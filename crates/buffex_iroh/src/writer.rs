@@ -10,23 +10,36 @@
 //! hook 同步泵把数据写进 QUIC 流（阻塞写保证送达）。`shutdown` 关闭写端
 //! （触发泵冲刷剩余数据）后取回流执行 `finish()`（对端读侧由此看到 EOF）。
 
-use std::sync::{Arc, Mutex};
-
-use abs_buff::{Demand, TrBuffTryWrite, TrBuffWrite};
-use anylr::SomeOf;
-use buffex::circular_buff::{
-    BuffProducer, CircularBuffBuilder, CoreAlloc, DeviceConsumer, Producer,
+use std::{
+    mem::MaybeUninit,
+    sync::{Arc, Mutex},
 };
-use iroh::endpoint::{SendStream, WriteError};
 
-use super::{common::sanitize_capacity, device::StreamOutput};
+use iroh::endpoint::SendStream;
+
+use abs_buff::{
+    Demand, TrBuffWrite, TrBuffTryWrite, gen_may_cancel_future,
+};
+// `abs_buff` 及其底层依赖（`abs_cancel`）经 `abs_buff_tokio_adapt::x_deps`
+// 再导出，无需在 Cargo.toml 重复声明；`buffex` 是直接依赖。
+use abs_buff_tokio_adapt::x_deps::abs_buff;
+use abs_cancel::{TrCancellationToken, TrMayCancel};
+use anylr::SomeOf;
+use buffex::{
+    circular_buff::{CircularBuffBuilder, CoreAlloc, DevConsumer, Producer},
+    x_deps::{abs_cancel, mm_ptr},
+};
+use mm_ptr::Owned;
+
+use super::{
+    device::{StreamOutput, StreamOutputErr},
+};
 
 /// 内部缓冲的生产端半部（被动生产端 = 调用者驱动）。
 type Inner = Producer<
-    BuffProducer<u8>,
-    DeviceConsumer<StreamOutput, u8>,
-    u8,
-    CoreAlloc,
+    DevConsumer<StreamOutput, u8>,
+    Owned<[MaybeUninit<u8>], CoreAlloc>,
+    u8, CoreAlloc,
 >;
 
 /// 写半部（写端适配器）of a buffered iroh stream。
@@ -38,27 +51,31 @@ pub struct IrohWriter {
     /// 共享的输出流：`shutdown` 时取回执行 `finish()`。
     stream: Arc<Mutex<Option<SendStream>>>,
     /// 最近一次网络写错误（经 [`IrohWriter::take_error`] 取回）。
-    err: Arc<Mutex<Option<WriteError>>>,
+    err: Arc<Mutex<Option<StreamOutputErr>>>,
 }
 
 impl IrohWriter {
     /// 把一个 QUIC 发送流包装成 `cap` 字节的缓冲写端。
     ///
     /// 不 spawn 任何任务；写入的数据在段 drop 时被同步泵搬运到流。
-    pub fn new(stream: SendStream, cap: usize) -> Self {
+    pub fn try_new(stream: SendStream, cap: usize) -> Result<Self, usize> {
         let stream = Arc::new(Mutex::new(Some(stream)));
         let err = Arc::new(Mutex::new(None));
         let output = StreamOutput::new(stream.clone(), err.clone());
-        let (tx, _rx) = CircularBuffBuilder::with_capacity(sanitize_capacity(cap))
+        let Result::Ok(builder) = CircularBuffBuilder::with_capacity(cap)
+        else {
+            return Result::Err(cap);
+        };
+        let tx = builder
             .producer_passive()
             .pipe_into_output(output)
             .build()
             .expect("valid iroh buffer capacity");
-        Self { tx, stream, err }
+        Result::Ok(Self { tx, stream, err })
     }
 
     /// Report the last network write error, if any.
-    pub fn take_error(&self) -> Option<WriteError> {
+    pub fn take_error(&self) -> Option<StreamOutputErr> {
         self.err.lock().ok().and_then(|mut guard| guard.take())
     }
 
@@ -85,8 +102,13 @@ impl Drop for IrohWriter {
 }
 
 impl TrBuffWrite<u8> for IrohWriter {
-    type WriteAsync<'f> = <Inner as TrBuffWrite<u8>>::WriteAsync<'f> where Self: 'f;
-    type SegmMut<'f> = <Inner as TrBuffWrite<u8>>::SegmMut<'f> where Self: 'f;
+    type WriteAsync<'f> = <Inner as TrBuffWrite<u8>>::WriteAsync<'f>
+    where
+        Self: 'f;
+    type SegmMut<'f>
+        = <Inner as TrBuffWrite<u8>>::SegmMut<'f>
+    where
+        Self: 'f;
     type Err = <Inner as TrBuffWrite<u8>>::Err;
 
     fn is_stuffed_closing(&self) -> bool {
@@ -95,7 +117,7 @@ impl TrBuffWrite<u8> for IrohWriter {
 
     fn write_async<'f>(
         &'f mut self,
-        demand: &Demand<usize>,
+        demand: &'f Demand<usize>,
     ) -> Self::WriteAsync<'f> {
         <Inner as TrBuffWrite<u8>>::write_async(&mut self.tx, demand)
     }
@@ -104,7 +126,7 @@ impl TrBuffWrite<u8> for IrohWriter {
 impl TrBuffTryWrite<u8> for IrohWriter {
     fn try_write<'f>(
         &'f mut self,
-        demand: &Demand<usize>,
+        demand: &'f Demand<usize>,
     ) -> SomeOf<Self::SegmMut<'f>, Self::Err> {
         <Inner as TrBuffTryWrite<u8>>::try_write(&mut self.tx, demand)
     }

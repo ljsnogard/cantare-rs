@@ -26,6 +26,8 @@
 //! 的固有语义，见 `buffex::circular_buff::core_` 的文档）；构造与操作必须在
 //! 一个活跃的 tokio 运行时上下文内（QUIC 流的收发包由运行时驱动）。
 
+#![feature(impl_trait_in_assoc_type)]
+
 mod common;
 pub mod device;
 mod reader;
