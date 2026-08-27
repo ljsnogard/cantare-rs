@@ -34,7 +34,21 @@ use abs_buff::{
     },
 };
 
-use super::{ReclSliceMut, ReclSliceRef};
+use mm_ptr::Owned;
+
+use super::{
+    CircularBuffBuilder, CoreAlloc, ReclSliceMut, ReclSliceRef, SpscPair,
+};
+
+/// 被动 × 被动 `build` 产出的半部对（元素 `u8`、分配器 `CoreAlloc` 的具体类型）。
+pub(super) type Pair = SpscPair<Owned<[MaybeUninit<u8>], CoreAlloc>>;
+
+/// 测试用构建器：默认缓冲（`Owned`）+ 默认分配器（`CoreAlloc`）、元素 `u8`。
+///
+/// 显式给出缓冲类型参数 `B`，避免 `CircularBuffBuilder::with_capacity` 的
+/// 类型推断在半部链（`producer_passive` / `consumer_passive`）上无法确定 `B`。
+pub(super) type DefaultBuilder =
+    CircularBuffBuilder<Owned<[MaybeUninit<u8>], CoreAlloc>>;
 
 // ---------------------------------------------------------------------------
 // 测试设备（TrInput / TrOutput）

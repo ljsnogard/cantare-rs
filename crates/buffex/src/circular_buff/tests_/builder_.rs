@@ -10,21 +10,24 @@
 //! 等价性断言建立在 `pump_` / `sync_` 已有行为之上——换序与 `pipe_between`
 //! 必须产生与原有链完全一致的结果。
 
-use std::{pin::Pin, sync::atomic::Ordering, vec, vec::Vec};
+use std::{pin::pin, sync::atomic::Ordering, vec, vec::Vec};
 
 use abs_buff::{Demand, TrBuffTryRead, TrBuffTryWrite};
-use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
 
 use crate::circular_buff::{
-    BuilderError, CircularBuffBuilder, SpscPair,
-    tests_::{TestInput, TestOutput, TestWaker, fill_segm, poll_once, take_segm},
+    BuilderError,
+    tests_::{
+        DefaultBuilder, Pair, TestInput, TestOutput, TestWaker, fill_segm,
+        poll_once, take_segm,
+    },
 };
 
 /// 默认双端被动：不 pipe 任何设备，`with_capacity(...).build()` 直接得到
 /// 一对可用的 Producer / Consumer（经典手动管道）。
 #[test]
 fn build_without_pipe_defaults_to_passive_pair() {
-    let pair: SpscPair = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let pair: Pair = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .build()
         .unwrap();
 
@@ -32,14 +35,16 @@ fn build_without_pipe_defaults_to_passive_pair() {
     assert_eq!(tx.capacity(), 8);
 
     // 写 3 字节 → 读回同样的 3 字节（被动 × 被动语义完整）。
-    let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(3))
+    let demand = Demand::at_least(3);
+    let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
         .unwrap();
     fill_segm(&mut ws, &[1, 2, 3]);
     drop(ws);
     assert_eq!(rx.data_size(), 3);
 
-    let mut rs = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(3))
+    let demand = Demand::at_least(3);
+    let mut rs = TrBuffTryRead::try_read(&mut rx, &demand)
         .pick_left()
         .unwrap();
     assert_eq!(take_segm(&mut rs, 3), vec![1, 2, 3]);
@@ -51,19 +56,22 @@ fn build_without_pipe_defaults_to_passive_pair() {
 /// `producer_passive().consumer_passive()` 顺序对调）。
 #[test]
 fn consumer_first_then_producer_passive() {
-    let pair: SpscPair = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let pair: Pair = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .consumer_passive()
         .producer_passive()
         .build()
         .unwrap();
     let (mut tx, mut rx) = pair;
 
-    let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(2))
+    let demand = Demand::at_least(2);
+    let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
         .unwrap();
     fill_segm(&mut ws, &[7, 8]);
     drop(ws);
-    let mut rs = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(2))
+    let demand = Demand::at_least(2);
+    let mut rs = TrBuffTryRead::try_read(&mut rx, &demand)
         .pick_left()
         .unwrap();
     assert_eq!(take_segm(&mut rs, 2), vec![7, 8]);
@@ -80,14 +88,16 @@ fn pipe_into_output_then_pipe_from_input() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut pipeline = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let mut pipeline = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .pipe_into_output(output)
         .pipe_from_input(input)
         .build()
         .unwrap();
 
     let (waker, _wake_flag) = TestWaker::make_waker_tuple();
-    let mut pinned = Pin::new(&mut pipeline);
+    let fut = pipeline.pipe_async().into_future();
+    let mut pinned = pin!(fut);
     let _ = poll_once(pinned.as_mut(), &waker);
 
     assert_eq!(*out_data.lock().unwrap(), (0..20).collect::<Vec<_>>());
@@ -103,13 +113,15 @@ fn pipe_between_builds_active_pipeline() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut pipeline = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let mut pipeline = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .pipe_between(input, output)
         .build()
         .unwrap();
 
     let (waker, _wake_flag) = TestWaker::make_waker_tuple();
-    let mut pinned = Pin::new(&mut pipeline);
+    let fut = pipeline.pipe_async().into_future();
+    let mut pinned = pin!(fut);
     let _ = poll_once(pinned.as_mut(), &waker);
 
     assert_eq!(*out_data.lock().unwrap(), (0..20).collect::<Vec<_>>());
@@ -124,13 +136,15 @@ fn pipe_into_output_then_passive_producer() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut tx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let mut tx = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .pipe_into_output(output)
         .producer_passive()
         .build()
         .unwrap();
 
-    let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(3))
+    let demand = Demand::at_least(3);
+    let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
         .unwrap();
     fill_segm(&mut ws, &[1, 2, 3]);
@@ -147,7 +161,8 @@ fn consumer_passive_then_pipe_from_input() {
     let input = TestInput::new((0..10).collect());
     let pos = input.pos.clone();
 
-    let mut rx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let mut rx = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .consumer_passive()
         .pipe_from_input(input)
         .build()
@@ -159,7 +174,8 @@ fn consumer_passive_then_pipe_from_input() {
 
     let mut total = Vec::new();
     loop {
-        let some = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(1));
+        let demand = Demand::at_least(1);
+        let some = TrBuffTryRead::try_read(&mut rx, &demand);
         let mut rs = match some.pick_left() {
             Some(s) => s,
             None => break,
@@ -172,20 +188,19 @@ fn consumer_passive_then_pipe_from_input() {
     assert_eq!(pos.load(Ordering::Relaxed), 10);
 }
 
-/// 容量校验仍然生效：直接 `build()`（默认双端被动）同样执行容量区间检查
-/// （`MIN_CAPACITY` = 2 ..= `MAX_CAPACITY` = `(1 << 28) - 1`）。
+/// 容量校验仍然生效：`with_capacity` 立即执行容量区间检查
+/// （`MIN_CAPACITY` = 2 ..= `MAX_CAPACITY` = `(1 << 28) - 1`），越界返回
+/// [`BuilderError`]。
 #[test]
 fn build_default_still_validates_capacity() {
-    type Built = Result<SpscPair, BuilderError<usize>>;
-
-    let r0: Built = CircularBuffBuilder::with_capacity(0).build();
+    let r0 = DefaultBuilder::with_capacity(0);
     assert!(matches!(r0, Err(BuilderError::SizeTooSmall(0))));
 
-    let r1: Built = CircularBuffBuilder::with_capacity(1).build();
+    let r1 = DefaultBuilder::with_capacity(1);
     assert!(matches!(r1, Err(BuilderError::SizeTooSmall(1))));
 
     let too_big = 1usize << 28; // 超出 POS_MASK
-    let rb: Built = CircularBuffBuilder::with_capacity(too_big).build();
+    let rb = DefaultBuilder::with_capacity(too_big);
     assert!(matches!(
         rb,
         Err(BuilderError::SizeTooBig(c)) if c == too_big

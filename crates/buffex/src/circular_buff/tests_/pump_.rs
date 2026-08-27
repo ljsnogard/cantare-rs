@@ -9,7 +9,7 @@
 //!
 //! 设备 move 进核心后测试无法直接访问，经 `Arc` 观察其内部状态。
 
-use std::{pin::Pin, sync::atomic::Ordering, vec, vec::Vec};
+use std::{pin::{pin, Pin}, sync::atomic::Ordering, vec, vec::Vec};
 
 use abs_buff::{
     Demand, TrBuffTryRead, TrBuffTryWrite,
@@ -18,11 +18,11 @@ use abs_buff::{
         anylr::SomeOf,
     },
 };
-use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
 
 use super::{
-    super::{CircularBuffBuilder, RxError, TxError},
-    TestErr, TestInput, TestOutput, TestWaker, fill_segm, poll_once, take_segm,
+    super::{RxError, TxError},
+    DefaultBuilder, TestErr, TestInput, TestOutput, TestWaker, fill_segm, poll_once,
+    take_segm,
 };
 
 /// 主动生产 × 被动消费：构造即从 `TrInput` 泵入；消费端每读取一次，
@@ -35,7 +35,8 @@ fn pipe_from_input_fills_and_refills() {
     let data = input.data.clone();
     let pos = input.pos.clone();
 
-    let mut rx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let mut rx = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .pipe_from_input(input)
         .consumer_passive()
         .build()
@@ -48,7 +49,8 @@ fn pipe_from_input_fills_and_refills() {
     // 边读边补：读空当前数据 → hook 立即从输入设备拉取下一批。
     let mut total = Vec::new();
     loop {
-        let some = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(1));
+        let demand = Demand::at_least(1);
+        let some = TrBuffTryRead::try_read(&mut rx, &demand);
         let mut rs = match some.pick_left() {
             Some(s) => s,
             None => break, // 输入已耗尽且缓冲已空
@@ -77,14 +79,16 @@ fn pipe_into_output_drains_on_write() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut tx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let mut tx = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .producer_passive()
         .pipe_into_output(output)
         .build()
         .unwrap();
 
     // 写 3 字节 → 写段 drop 提交 → 消费端 hook 立即泵出。
-    let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(3))
+    let demand = Demand::at_least(3);
+    let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
         .unwrap();
     fill_segm(&mut ws, &[1, 2, 3]);
@@ -98,7 +102,8 @@ fn pipe_into_output_drains_on_write() {
 
     // 连续多次写入：每次都即时泵出。
     for chunk in 0..3u8 {
-        let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(2))
+        let demand = Demand::at_least(2);
+        let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
             .pick_left()
             .unwrap();
         fill_segm(&mut ws, &[chunk * 10 + 1, chunk * 10 + 2]);
@@ -119,7 +124,8 @@ fn pipe_both_active_pipeline() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut pipeline = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let mut pipeline = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .pipe_from_input(input)
         .pipe_into_output(output)
         .build()
@@ -127,7 +133,8 @@ fn pipe_both_active_pipeline() {
 
     // 首个 poll：输入泵 + 输出泵跑完整个流水线（非阻塞设备立即就绪）。
     let (waker, _wake_flag) = TestWaker::make_waker_tuple();
-    let mut pinned = Pin::new(&mut pipeline);
+    let fut = pipeline.pipe_async().into_future();
+    let mut pinned = pin!(fut);
     let _ = poll_once(pinned.as_mut(), &waker);
 
     assert_eq!(*out_data.lock().unwrap(), (0..20).collect::<Vec<_>>());
@@ -231,27 +238,26 @@ impl abs_buff::io::TrInput<u8> for BlockingInput {
 }
 
 /// 双端全主动：数据流动**由两端设备驱动**——`Pipeline` future 存活期间持续
-/// 搬运，直到调用者请求断开。
+/// 搬运（`pipeline.pipe_async()` 交出由设备驱动的流水线 future）。
 ///
 /// 1. 输入设备无数据 → 流水线挂起（await 输入设备的 `read_async`，Pending）；
 /// 2. 压入数据并唤醒 → 流水线自动把数据流到输出（无需任何显式 drive）；
-/// 3. 再次压入 → 再次流动；
-/// 4. `disconnect_handle().request()` → 流水线关闭两端并结束（future 返回）。
+/// 3. 再次压入 → 再次流动。
 #[test]
-fn pipeline_flows_driven_by_devices_until_disconnect() {
+fn pipeline_flows_driven_by_devices() {
     let (input, in_data, in_waker) = BlockingInput::new();
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let pipeline = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let mut pipeline = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .pipe_between(input, output)
         .build()
         .unwrap();
-    let disconnect = pipeline.disconnect_handle();
 
     let (waker, _wake_flag) = TestWaker::make_waker_tuple();
-    let mut pipeline = pipeline;
-    let mut pinned = Pin::new(&mut pipeline);
+    let fut = pipeline.pipe_async().into_future();
+    let mut pinned = pin!(fut);
 
     // 输入设备无数据：流水线挂起，等待输入设备唤醒。
     assert!(
@@ -279,11 +285,6 @@ fn pipeline_flows_driven_by_devices_until_disconnect() {
     }
     assert!(poll_once(pinned.as_mut(), &waker).is_pending());
     assert_eq!(*out_data.lock().unwrap(), vec![1, 2, 3, 4, 5]);
-
-    // 请求断开：流水线关闭两端、排空残留并结束。
-    disconnect.request();
-    assert!(poll_once(pinned.as_mut(), &waker).is_ready());
-    assert_eq!(*out_data.lock().unwrap(), vec![1, 2, 3, 4, 5]);
 }
 
 /// 主动生产端在输入耗尽后停止泵入；再次消费时不再有数据。
@@ -292,7 +293,8 @@ fn pipe_from_input_stops_when_exhausted() {
     let input = TestInput::new(vec![1, 2, 3]);
     let pos = input.pos.clone();
 
-    let mut rx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let mut rx = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .pipe_from_input(input)
         .consumer_passive()
         .build()
@@ -300,7 +302,8 @@ fn pipe_from_input_stops_when_exhausted() {
 
     let mut total = Vec::new();
     loop {
-        let some = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(1));
+        let demand = Demand::at_least(1);
+        let some = TrBuffTryRead::try_read(&mut rx, &demand);
         let mut rs = match some.pick_left() {
             Some(s) => s,
             None => break,
@@ -376,7 +379,8 @@ fn try_read_auto_drives_active_producer() {
         calls: calls.clone(),
     };
 
-    let mut rx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let mut rx = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .pipe_from_input(input)
         .consumer_passive()
         .build()
@@ -388,7 +392,8 @@ fn try_read_auto_drives_active_producer() {
 
     // 数据「迟到」：门打开后，单次 try_read 自动驱动输入泵并读到数据。
     gate.store(true, Ordering::Release);
-    let some = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(3));
+    let demand = Demand::at_least(3);
+    let some = TrBuffTryRead::try_read(&mut rx, &demand);
     let mut rs = some.pick_left().expect("try_read 应自动拉到数据");
     assert_eq!(rs.least_count(), 3);
     assert_eq!(take_segm(&mut rs, 3), vec![7, 8, 9]);
@@ -399,7 +404,8 @@ fn try_read_auto_drives_active_producer() {
         calls.load(Ordering::Relaxed) >= 3,
         "try_read 应自动驱动输入泵"
     );
-    let some = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(1));
+    let demand = Demand::at_least(1);
+    let some = TrBuffTryRead::try_read(&mut rx, &demand);
     assert!(
         matches!(some.pick_right(), Some(RxError::Drained(_))),
         "设备无更多数据时 try_read 返回 Drained"
@@ -413,14 +419,16 @@ fn close_tx_drains_remaining_output() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut tx = CircularBuffBuilder::<u8, CoreAlloc>::with_capacity(8)
+    let mut tx = DefaultBuilder::with_capacity(8)
+        .unwrap()
         .producer_passive()
         .pipe_into_output(output)
         .build()
         .unwrap();
 
     // 写 5 字节（一次借出可写区，全部写入并提交）。
-    let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(5))
+    let demand = Demand::at_least(5);
+    let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
         .expect("应有 5 格可写空间");
     fill_segm(&mut ws, &[1, 2, 3, 4, 5]);
@@ -433,7 +441,8 @@ fn close_tx_drains_remaining_output() {
 
     // 再写 2 字节后立即 close：残留数据必须在 close 的 ProducerClose 事件
     // 驱动下被排空（check 对 ProducerClose 感兴趣）。
-    let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(2))
+    let demand = Demand::at_least(2);
+    let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
         .expect("应有 2 格可写空间");
     fill_segm(&mut ws, &[6, 7]);

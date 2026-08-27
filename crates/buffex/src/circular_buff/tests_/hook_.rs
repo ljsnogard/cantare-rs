@@ -10,13 +10,14 @@ use std::{pin::pin, vec};
 use abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite};
 
 use super::{
-    super::{CircularBuffBuilder, RxError, SpscPair},
-    fill_segm, poll_once, take_segm, TestWaker,
+    super::RxError,
+    DefaultBuilder, fill_segm, poll_once, take_segm, Pair, TestWaker,
 };
 
 /// 构建被动 × 被动半部对（测试辅助，见 [`super::sync_`] 的说明）。
-fn make_pair<const N: usize>() -> SpscPair {
-    CircularBuffBuilder::with_capacity(N)
+fn make_pair<const N: usize>() -> Pair {
+    DefaultBuilder::with_capacity(N)
+        .unwrap()
         .producer_passive()
         .consumer_passive()
         .build()
@@ -30,7 +31,8 @@ fn producer_close_gives_eof() {
     let (mut tx, mut rx) = make_pair::<8>();
 
     // 写 2 字节后关闭写端。
-    let mut ws = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(2))
+    let demand = Demand::at_least(2);
+    let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
         .unwrap();
     fill_segm(&mut ws, &[5, 6]);
@@ -39,14 +41,16 @@ fn producer_close_gives_eof() {
     assert!(rx.is_producer_closed(), "读者应感知生产者关闭（EOF）");
 
     // EOF 例外：数据不足下限（2 < 5）也返回剩余部分，而不是等待。
-    let some = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(5));
+    let demand = Demand::at_least(5);
+    let some = TrBuffTryRead::try_read(&mut rx, &demand);
     let mut rs = some.pick_left().expect("关闭后应返回剩余部分（EOF）");
     assert_eq!(rs.least_count(), 2);
     assert_eq!(take_segm(&mut rs, 2), vec![5, 6]);
     drop(rs);
 
     // 读空后：空 + 关闭 → Closing。
-    let some = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(1));
+    let demand = Demand::at_least(1);
+    let some = TrBuffTryRead::try_read(&mut rx, &demand);
     assert!(
         matches!(some.pick_right(), Some(RxError::Closing)),
         "读空且写端已关闭时应返回 Closing"
@@ -63,7 +67,8 @@ fn consumer_close_fires_event() {
     assert!(tx.is_consumer_closed(), "写者应感知消费者关闭");
 
     // 关闭后写者仍可写（直到写满）。
-    let some = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(2));
+    let demand = Demand::at_least(2);
+    let some = TrBuffTryWrite::try_write(&mut tx, &demand);
     assert!(some.pick_left().is_some(), "消费者关闭后写者仍可写入");
 }
 
@@ -73,7 +78,8 @@ fn read_async_returns_closing_on_eof() {
     let (mut tx, mut rx) = make_pair::<8>();
 
     // 读者等 3 字节：当前为空 → Pending（已注册 waker）。
-    let fut = rx.read_async(&Demand::at_least(3));
+    let demand = Demand::at_least(3);
+    let fut = rx.read_async(&demand);
     let mut fut = pin!(fut.into_future());
     let (waker, _flag) = TestWaker::make_waker_tuple();
     assert!(poll_once(fut.as_mut(), &waker).is_pending());

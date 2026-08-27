@@ -433,7 +433,10 @@ impl<W: TrBuffWrite<u8>> TrBuffWrite<u8> for ConservativeTx<W> {
         false // 故意保守：永不提前退出，强制走 write_async 的等待路径
     }
 
-    fn write_async<'f>(&'f mut self, demand: &Demand<usize>) -> Self::WriteAsync<'f> {
+    fn write_async<'f>(
+        &'f mut self,
+        demand: &'f Demand<usize>,
+    ) -> Self::WriteAsync<'f> {
         self.0.write_async(demand)
     }
 }
@@ -441,7 +444,7 @@ impl<W: TrBuffWrite<u8>> TrBuffWrite<u8> for ConservativeTx<W> {
 impl<W: TrBuffTryWrite<u8>> TrBuffTryWrite<u8> for ConservativeTx<W> {
     fn try_write<'f>(
         &'f mut self,
-        demand: &Demand<usize>,
+        demand: &'f Demand<usize>,
     ) -> SomeOf<Self::SegmMut<'f>, Self::Err> {
         self.0.try_write(demand)
     }

@@ -137,11 +137,11 @@ async fn real_tcp_roundtrip_with_adapters() {
         let mut client = TcpStream::connect(addr).await.expect("connect");
 
         // 发送请求：SegmRef -> WriteAsOutput
-        let mut payload = b"ping".to_vec();
+        let payload = b"ping".to_vec();
         let payload_len = payload.len();
         let mut send_consumed = 0usize;
         let mut send_segm = SegmRef::new(
-            &mut payload[..],
+            &payload[..],
             SegmReclaim::new(Pin::new(&mut send_consumed)),
         );
         let mut send_output = WriteAsOutput::new(&mut client);

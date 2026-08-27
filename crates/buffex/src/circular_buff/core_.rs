@@ -143,9 +143,13 @@ pub(super) const MIN_CAPACITY: usize = 2;
 pub(super) const MAX_CAPACITY: usize = POS_MASK;
 
 struct IoPos {
+    /// 与 REVERSION flag 含义一致
     pub rv: bool,
+    /// 读者位置
     pub rp: usize,
+    /// 写这位置
     pub wp: usize,
+    /// circular buff 的容量
     capacity_: usize,
 }
 
@@ -168,10 +172,14 @@ impl IoPos {
         let s = self.rp | (self.wp << POS_BITS);
         if self.rv { s | REVERSION } else { s & !REVERSION }
     }
+    /// 推进写者位置，如果写者位置越过缓冲区物理末端，会设置 REVERSION flag。
+    /// 返回值可以直接写在 atm_stat_。
     pub fn advance_wp(&self, amount: usize) -> usize {
         debug_assert!(amount <= self.free_size());
         todo!()
     }
+    /// 推进读者位置，如果读者位置越过缓冲区物理末端，会清除 REVERSION flag。
+    /// 返回值可以直接写在 atm_stat_。
     pub fn advance_rp(&self, amount: usize) -> usize {
         debug_assert!(amount <= self.data_size());
         todo!()
@@ -285,23 +293,6 @@ where
     #[inline]
     fn consumer_ref(&self) -> &C {
         unsafe { &*self.consumer_.get() }
-    }
-
-    /// 生产端可变访问（泵专用）。
-    ///
-    /// # Safety
-    ///
-    /// 泵（`drive`）由 `PUMPING` 标志互斥：至多一个线程同时执行
-    /// `pump_input`，且与 [`CircCore::producer_ref`] 的读取同线程串行。
-    #[inline]
-    fn producer_mut(&self) -> &mut P {
-        unsafe { &mut *self.producer_.get() }
-    }
-
-    /// 消费端可变访问（泵专用）。安全论证同 [`CircCore::producer_mut`]。
-    #[inline]
-    fn consumer_mut(&self) -> &mut C {
-        unsafe { &mut *self.consumer_.get() }
     }
 
     // ------------------------------------------------------------------

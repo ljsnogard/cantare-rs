@@ -15,11 +15,13 @@ readme = "README.md"
 # -- core (async-runtime agnostic, no_std) --
 atomic_sync = { path = "../atomic_sync" }
 # `segm-tests` 仅在测试中启用 abs_buff 的泛型段测试模块（编译时无运行时开销）。
-abs_buff = { path = "../abs_buff", features = ["segm-tests"] }
+abs_buff = { path = "../abs_buff" }
 mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.1.3" }
 
 
 [dev-dependencies]
+abs_buff = { path = "../abs_buff", features = ["segm-tests"] }
+
 env_logger = { workspace = true }
 log = { workspace = true }
 rand = { version = "0.8.*" }

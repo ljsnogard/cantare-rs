@@ -249,7 +249,8 @@ fn try_read_honours_at_least() {
     drop(ws);
 
     // 2 < 4 → 必须报 Drained，而不是给一个 2 字节的段；
-    let some = TrBuffTryRead::try_read(&mut rx, &Demand::at_least(4));
+    let demand = Demand::at_least(4);
+    let some = TrBuffTryRead::try_read(&mut rx, &demand);
     assert!(
         matches!(some.pick_right(), Option::Some(RxError::Drained(_))),
         "数量不足下限时必须返回 Drained"
@@ -991,9 +992,9 @@ fn move_data_between_u8_slice_and_maybe_uninit_slice_rings() {
     // Move every byte from the `[u8]`-backed ring into the `[MaybeUninit<u8>]`-backed ring.
     let mut copied = 0usize;
     while copied < expected.len() {
+        let demand = Demand::less_than(expected.len() - copied);
         let Some(mut rseg) =
-            TrBuffTryRead::try_read(&mut src_rx, &Demand::less_than(expected.len() - copied))
-                .pick_left()
+            TrBuffTryRead::try_read(&mut src_rx, &demand).pick_left()
         else {
             panic!("source read failed");
         };
@@ -1032,9 +1033,9 @@ fn move_data_between_u8_slice_and_maybe_uninit_slice_rings() {
     // Read back from the destination ring and verify the data arrived intact.
     let mut got = Vec::new();
     while got.len() < expected.len() {
+        let demand = Demand::less_than(expected.len() - got.len());
         let Some(mut segm) =
-            TrBuffTryRead::try_read(&mut dst_rx, &Demand::less_than(expected.len() - got.len()))
-                .pick_left()
+            TrBuffTryRead::try_read(&mut dst_rx, &demand).pick_left()
         else {
             panic!("destination read failed");
         };

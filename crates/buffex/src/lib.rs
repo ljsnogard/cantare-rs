@@ -21,4 +21,7 @@ pub mod x_deps {
     pub use atomic_sync;
     pub use atomic_sync::x_deps::{abs_sync, atomex};
     pub use atomex::x_deps::funty;
+
+    pub use mm_ptr;
+    pub use mm_ptr::x_deps::abs_mm;
 }
