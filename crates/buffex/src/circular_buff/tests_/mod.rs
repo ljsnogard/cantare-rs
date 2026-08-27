@@ -12,6 +12,7 @@
 
 mod builder_;
 mod hook_;
+mod park_tests_;
 mod pos_tests_;
 mod pump_;
 mod sync_;

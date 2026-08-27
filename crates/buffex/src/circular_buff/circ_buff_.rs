@@ -120,6 +120,12 @@ impl<T> BufProducer<T> {
     ) -> Result<ptr::NonNull<Demand<usize>>, *mut Demand<usize>> {
         self.buf_obsv_.try_reset_demand()
     }
+
+    /// 被动等待者注册 / 注销 waker 的唤醒槽位（`core_` 的等待 future 使用）。
+    #[inline]
+    pub(super) fn wakeslot(&self) -> &WakeSlot {
+        &self.wakeslot_
+    }
 }
 
 /// 被动消费端的端类型：与 [`BuffProducer`] 对称，存放进核心的 `C` 参数。
@@ -151,6 +157,12 @@ impl<T> BufConsumer<T> {
         &self,
     ) -> Result<ptr::NonNull<Demand<usize>>, *mut Demand<usize>> {
         self.buf_obsv_.try_reset_demand()
+    }
+
+    /// 被动等待者注册 / 注销 waker 的唤醒槽位（`core_` 的等待 future 使用）。
+    #[inline]
+    pub(super) fn wakeslot(&self) -> &WakeSlot {
+        &self.wakeslot_
     }
 }
 
@@ -231,12 +243,15 @@ impl<T> TrProducer for BufProducer<T> {
         let ProducerHookEvent::Available(free) = event else {
             return true;
         };
+        if free == 0 {
+            return false;
+        }
         let Option::Some(demand_ptr) = self.buf_obsv_.demand_.load() else {
             return false;
         };
         let demand = unsafe { demand_ptr.as_ref() };
         let min = demand.min().copied().unwrap_or(0);
-        free > min
+        free >= min
     }
 
     #[inline]
@@ -261,15 +276,18 @@ impl<T> TrConsumer for BufConsumer<T> {
     }
 
     fn check(&self, event: ConsumerHookEvent) -> bool {
-        let ConsumerHookEvent::Available(free) = event else {
+        let ConsumerHookEvent::Available(ready) = event else {
             return true;
         };
+        if ready == 0 {
+            return false;
+        }
         let Option::Some(demand_ptr) = self.buf_obsv_.demand_.load() else {
             return false;
         };
         let demand = unsafe { demand_ptr.as_ref() };
         let min = demand.min().copied().unwrap_or(0);
-        free > min
+        ready >= min
     }
 
     #[inline]

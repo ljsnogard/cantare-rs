@@ -15,6 +15,8 @@ pub enum TxError<S> {
     Stuffed(S),
     /// 写端已关闭，不再接受数据。
     Closing,
+    /// 调用者主动取消
+    Cancelled,
     /// 本端为主动模式（设备驱动），不对外提供写访问。
     Unavailable,
     /// 参数非法（例如 `Demand` 区间非法）。
@@ -24,10 +26,11 @@ pub enum TxError<S> {
 impl<S: fmt::Debug> fmt::Display for TxError<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TxError::Stuffed(wp) => write!(f, "环形缓冲已满（写位置 {wp:?}）"),
-            TxError::Closing => write!(f, "写端已关闭"),
-            TxError::Unavailable => write!(f, "主动生产端不对外提供写访问"),
-            TxError::Argument => write!(f, "参数非法"),
+            TxError::Stuffed(p) => write!(f, "TxError::Stuffed(at: {p:?})"),
+            TxError::Closing => write!(f, "TxError::Closing"),
+            TxError::Cancelled => write!(f, "TxError::Cancelled"),
+            TxError::Unavailable => write!(f, "TxError::Unavailable"),
+            TxError::Argument => write!(f, "TxError::Argument"),
         }
     }
 }
@@ -37,7 +40,7 @@ impl<S: fmt::Debug> core::error::Error for TxError<S> {}
 impl<S: fmt::Debug> TrTaggedError<WriteErrTag> for TxError<S> {
     fn err_tag(&self) -> WriteErrTag {
         match self {
-            TxError::Closing | TxError::Unavailable
+            TxError::Closing | TxError::Cancelled | TxError::Unavailable
                 => WriteErrTag::Closing,
             TxError::Argument => WriteErrTag::Unknown,
             TxError::Stuffed(_) => WriteErrTag::Stuffed,
@@ -52,6 +55,8 @@ pub enum RxError<S> {
     Drained(S),
     /// 读端已关闭，不再有数据。
     Closing,
+    /// 调用者主动取消
+    Cancelled,
     /// 本端为主动模式（设备驱动），不对外提供读访问。
     Unavailable,
     /// 参数非法。
@@ -61,10 +66,11 @@ pub enum RxError<S> {
 impl<S: fmt::Debug> fmt::Display for RxError<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RxError::Drained(rp) => write!(f, "环形缓冲已空（读位置 {rp:?}）"),
-            RxError::Closing => write!(f, "读端已关闭"),
-            RxError::Unavailable => write!(f, "主动消费端不对外提供读访问"),
-            RxError::Argument => write!(f, "参数非法"),
+            RxError::Drained(p) => write!(f, "RxError::Drained(at: {p:?})"),
+            RxError::Closing => write!(f, "RxError::Closing"),
+            RxError::Cancelled => write!(f, "RxError::Cancelled"),
+            RxError::Unavailable => write!(f, "RxError::Unavailable"),
+            RxError::Argument => write!(f, "RxError::Argument"),
         }
     }
 }
@@ -74,7 +80,7 @@ impl<S: fmt::Debug> core::error::Error for RxError<S> {}
 impl<S: fmt::Debug> TrTaggedError<ReadErrTag> for RxError<S> {
     fn err_tag(&self) -> ReadErrTag {
         match self {
-            RxError::Closing | RxError::Unavailable
+            RxError::Closing | RxError::Cancelled | RxError::Unavailable
                 => ReadErrTag::Closing,
             RxError::Argument => ReadErrTag::Unknown,
             RxError::Drained(_) => ReadErrTag::Drained,

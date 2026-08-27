@@ -95,9 +95,11 @@ use abs_buff::{
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mm::mem_alloc::{CoreAlloc, TrMalloc};
+use abs_sync::ok_or::XtOkOr;
+
 use anylr::SomeOf;
 use atomex::{AtomicFlags, CmpxchResult};
-use atomic_sync::x_deps::atomex;
+use atomic_sync::x_deps::{abs_sync, atomex};
 use mm_ptr::{Owned, x_deps::abs_mm,};
 
 use super::{
@@ -841,6 +843,47 @@ impl WakeSlot {
     }
 }
 
+/// 被动等待（park）的守卫：持有注册进唤醒槽位的 [`Waiter`]，并保证等待
+/// future 在**任何退出路径**上完成收尾。
+///
+/// 注册进槽位的 `Waiter` 由槽位以**裸指针**持有（`WakeSlot::register`），
+/// 因此等待 future 在未完成时被 drop（取消 / 被对端抢占）也必须注销槽位，
+/// 否则槽位会留下指向已销毁 `Waiter` 的悬垂指针——下一个等待者的
+/// `WakeSlot::register` 会因此自旋（`register` 的文档：「等待者在完成或 drop
+/// 时必然注销，因此自旋必然终止」）。同时，park 期间登记的 demand 也必须
+/// 复位，否则下一次 `try_set_demand`（CAS null → 非空）会失败并触发
+/// 「并发调用」断言。
+///
+/// 因此本守卫的 [`Drop`] 统一执行两件事：
+///
+/// 1. 若仍注册在槽位中，则注销（`unregister`）；
+/// 2. 复位 demand（`reset_demand`）。
+///
+/// 正常完成路径上（需求满足 / 终止错误），守卫随 `poll_fn` future 在
+/// `.await` 结束时被 drop，同样执行复位——与取消路径共用同一份收尾逻辑。
+struct WaitGuard<'a, E> {
+    /// 被等待的被动端（`BufProducer` / `BufConsumer`）。
+    end: &'a E,
+    /// 注册进 `end.wakeslot()` 的等待者（槽位以裸指针引用它，注册期间不得
+    /// 移动——它活在 `poll_fn` future 内，而该 future 被 async 状态机钉住）。
+    waiter: Waiter,
+    /// 当前是否已注册进槽位。
+    registered: bool,
+    /// 注销槽位：`end.wakeslot().deregister(&waiter)`。
+    unregister: fn(&E, &Waiter),
+    /// 复位需求：`end.try_reset_demand()`。
+    reset_demand: fn(&E),
+}
+
+impl<E> Drop for WaitGuard<'_, E> {
+    fn drop(&mut self) {
+        if self.registered {
+            (self.unregister)(self.end, &self.waiter);
+        }
+        (self.reset_demand)(self.end);
+    }
+}
+
 use super::circ_buff_::{BufConsumer, BufProducer};
 
 #[gen_may_cancel_future(CorePassiveRead)]
@@ -871,11 +914,50 @@ where
     if !consume.try_set_demand(demand) {
         unreachable!("Concurrent call `core_passive_read_async_`")
     }
-    // Safety:
-    // - this is guaranteed by `read_async_` should only be called by 
-    //   Consumer<> which is behand a mut reference. 
-    let consumer = unsafe { &mut *core.consumer_.get() };
-    SomeOf::new_right(RxError::Unavailable)
+    // —— 等待（park）——
+    //
+    // demand 已登记进 `BufConsumer`（对端提交路径的 `fire_consumer` 会经
+    // `check` 裁决是否唤醒本等待者）。此后循环直到需求满足（或出现终止错误）：
+    //
+    // 1. 重查 `try_read_at`：满足 / 终止 → `Ready`（收尾由守卫的 Drop 完成：
+    //    注销槽位 + 复位 demand）；
+    // 2. 否则把 waker 注册进 `BufConsumer` 的唤醒槽位，返回 `Pending`——对端
+    //    写入提交触发 `fire_consumer` → `signal` 唤醒本等待者；
+    // 3. **注册后重查一次**：关闭「检查与注册之间对端恰好完成提交」的丢失
+    //    唤醒窗口（`signal` 只唤醒已注册的等待者，不会重查条件；注册前的
+    //    那次提交若已发生，重查能立刻发现而不必等下一次事件）。
+    let mut guard = WaitGuard {
+        end: consume,
+        waiter: Waiter::new(),
+        registered: false,
+        unregister: |end, waiter| end.wakeslot().deregister(waiter),
+        reset_demand: |end| {
+            let _ = end.try_reset_demand();
+        },
+    };
+    let res = core::future::poll_fn(|cx| {
+        let can_stop = || match core.try_read_at(demand) {
+            Ok(_) => true,
+            Err(e) => e.err_tag().should_terminate(),
+        };
+        if can_stop() {
+            return Poll::Ready(());
+        }
+        guard.waiter.waker = Some(cx.waker().clone());
+        guard.end.wakeslot().register(&guard.waiter);
+        guard.registered = true;
+        if can_stop() {
+            return Poll::Ready(());
+        }
+        Poll::Pending
+    });
+    // 守卫在此已被 drop：槽位注销、demand 复位。重新尝试——等待期间可读数据
+    // 只增不减（SPSC：只有本消费者读），结果必为可读段或终止错误。
+    if res.ok_or(cancel.cancellation()).await.is_ok() {
+        core.try_read_(demand)
+    } else {
+        SomeOf::new_right(RxError::Cancelled)
+    }
 }
 
 #[gen_may_cancel_future(CorePassiveWrite)]
@@ -906,10 +988,40 @@ where
     if !producer.try_set_demand(demand) {
         unreachable!("Concurrent call `core_passive_write_async_`")
     };
-    // Safety:
-    // - this is guaranteed by `read_async_` should only be called by 
-    //   Consumer<> which is behand a mut reference. 
-    let producer = unsafe { &mut *core.producer_.get() };
-
-    SomeOf::new_right(TxError::Unavailable)
+    // —— 等待（park）——与读侧（`core_passive_read_async_`）对称：
+    // demand 已登记进 `BufProducer`；循环直到可写空间满足需求（或出现终止
+    // 错误），否则把 waker 注册进 `BufProducer` 的唤醒槽位等待对端读取提交
+    // 触发 `fire_producer` → `signal` 唤醒；注册后重查一次关闭丢失唤醒窗口。
+    let mut guard = WaitGuard {
+        end: producer,
+        waiter: Waiter::new(),
+        registered: false,
+        unregister: |end, waiter| end.wakeslot().deregister(waiter),
+        reset_demand: |end| {
+            let _ = end.try_reset_demand();
+        },
+    };
+    let res = core::future::poll_fn(|cx| {
+        let can_stop = || match core.try_write_at(demand) {
+            Ok(_) => true,
+            Err(e) => e.err_tag().should_terminate(),
+        };
+        if can_stop() {
+            return Poll::Ready(());
+        }
+        guard.waiter.waker = Some(cx.waker().clone());
+        guard.end.wakeslot().register(&guard.waiter);
+        guard.registered = true;
+        if can_stop() {
+            return Poll::Ready(());
+        }
+        Poll::Pending
+    });
+    // 守卫在此已被 drop：槽位注销、demand 复位。重新尝试——等待期间可写
+    // 空间只增不减（SPSC：只有本生产者写），结果必为可写段或终止错误。
+    if res.ok_or(cancel.cancellation()).await.is_ok() {
+        core.try_write_(demand)
+    } else {
+        SomeOf::new_right(TxError::Cancelled)
+    }
 }
