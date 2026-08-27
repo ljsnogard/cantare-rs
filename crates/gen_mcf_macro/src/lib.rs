@@ -348,27 +348,27 @@ pub fn gen_may_cancel_future(
         impl<#generic_params_future_no_cancel> abs_cancel::TrMayCancel<#last_lt> for #async_struct<#generic_params_async_no_cancel>
         #where_clause_no_cancel_no_lt
         {
-            type MayCancelFuture<'cancel_, C> =
-                #future_struct<#generic_params_future_no_cancel, C>
+            type MayCancelFuture<'cancel_, TyCancelTok_GenMcf_> =
+                #future_struct<#generic_params_future_no_cancel, TyCancelTok_GenMcf_>
             where
                 Self: 'cancel_,
-                C: abs_cancel::TrCancellationToken + Clone,
-                C: #last_lt,
-                C: 'cancel_,
+                TyCancelTok_GenMcf_: abs_cancel::TrCancellationToken + Clone,
+                TyCancelTok_GenMcf_: #last_lt,
+                TyCancelTok_GenMcf_: 'cancel_,
                 'cancel_: #last_lt;
             type MayCancelOutput = #output_ty_transformed;
 
-            fn may_cancel_with<'cancel_, C>(
+            fn may_cancel_with<'cancel_, TyCancelTok_GenMcf_>(
                 self,
-                cancel: &'cancel_ mut C,
-            ) -> Self::MayCancelFuture<'cancel_, C>
+                cancel: &'cancel_ mut TyCancelTok_GenMcf_,
+            ) -> Self::MayCancelFuture<'cancel_, TyCancelTok_GenMcf_>
             where
                 Self: 'cancel_,
                 // 与 `abs_cancel::TrMayCancel::may_cancel_with` 的 `'f: 'a` 约束对应：
                 // cancel token 的借用必须存活不短于数据生命周期 `last_lt`，
                 // 否则无法以 `&#last_lt mut C` 的形式保存到生成的 future 里。
                 'cancel_: #last_lt,
-                C: abs_cancel::TrCancellationToken + Clone,
+                TyCancelTok_GenMcf_: abs_cancel::TrCancellationToken + Clone,
             {
                 #future_struct {
                     params_: ::core::mem::MaybeUninit::new(self),
