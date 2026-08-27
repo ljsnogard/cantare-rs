@@ -9,22 +9,50 @@
 //! `Producer` / `Consumer`
 //! 半部（借用核心）。主动端（设备驱动）的半部操作返回错误（不对外访问）。
 
-use core::marker::PhantomData;
+use core::{
+    marker::PhantomData,
+    ptr,
+    sync::atomic::AtomicPtr,
+};
 
 use abs_buff::{
     Demand,
     buffer::{TrBuffSegmMut, TrBuffSegmRef},
     io::{TrInput, TrOutput},
-    x_deps::abs_cancel::{NonCancellableToken, TrMayCancel},
+    // x_deps::abs_cancel,
 };
+// use abs_cancel::{NonCancellableToken, TrMayCancel};
+use atomex::AtomexPtrOwned;
+use atomic_sync::x_deps::atomex;
 
-use super::abs_comp_::{
-    ConsumerHookEvent, ProducerHookEvent, ReceiverReact, TrConsumer, TrProducer,
+use super::{
+    abs_comp_::{
+        ConsumerHookEvent, ProducerHookEvent, ReceiverReact,
+        TrConsumer, TrProducer,
+    },
+    core_::WakeSlot,
 };
 
 // ---------------------------------------------------------------------------
 // 端类型
 // ---------------------------------------------------------------------------
+
+struct BuffObsv {
+    demand_: AtomexPtrOwned<Option<Demand<usize>>>,
+}
+
+impl BuffObsv {
+    pub const fn new() -> Self {
+        BuffObsv {
+            demand_: AtomexPtrOwned::new(AtomicPtr::new(ptr::null_mut())),
+        }
+    }
+
+    pub fn set_demand(&self, demand: &Option<Demand<usize>>) {
+        let p = demand as *const _ as *mut Option<Demand<usize>>;
+        self.demand_.store(p);
+    }
+}
 
 /// 被动生产端的端类型：存放进核心的 `P` 参数。
 ///
@@ -51,16 +79,17 @@ use super::abs_comp_::{
 /// 清 demand）。因为 `demand` 只在态 3 被 fire 读取、写入先于 armed 置位、
 /// 清除后于 armed 清位，它是**普通字段**（无需原子）。
 pub struct BuffProducer<T> {
-    /// 等待写者的需求（`None` = 无等待者；仅 armed 期间有效）。
-    demand: Option<Demand<usize>>,
-    _use_t_: PhantomData<fn() -> T>,
+    buf_obsv_: BuffObsv,
+    wakeslot_: WakeSlot,
+    _unuse_t_: PhantomData<fn() -> T>,
 }
 
 impl<T> BuffProducer<T> {
     pub(super) const fn new() -> Self {
         BuffProducer {
-            demand: None,
-            _use_t_: PhantomData,
+            buf_obsv_: BuffObsv::new(),
+            wakeslot_: WakeSlot::new(),
+            _unuse_t_: PhantomData,
         }
     }
 }
@@ -70,16 +99,17 @@ impl<T> BuffProducer<T> {
 /// 三态生命周期同 [`BuffProducer`]（armed 位为 `RX_STNDBY`）：fire 仅在
 /// **等待中**（态 3）访问 `demand` 判断兴趣。
 pub struct BuffConsumer<T> {
-    /// 等待读者的需求（`None` = 无等待者；仅 armed 期间有效）。
-    demand: Option<Demand<usize>>,
-    _use_t_: PhantomData<fn() -> T>,
+    buf_obsv_: BuffObsv,
+    wakeslot_: WakeSlot,
+    _unuse_t_: PhantomData<fn() -> T>,
 }
 
 impl<T> BuffConsumer<T> {
     pub(super) const fn new() -> Self {
         BuffConsumer {
-            demand: None,
-            _use_t_: PhantomData,
+            buf_obsv_: BuffObsv::new(),
+            wakeslot_: WakeSlot::new(),
+            _unuse_t_: PhantomData,
         }
     }
 }
@@ -158,28 +188,30 @@ impl<T> TrProducer for BuffProducer<T> {
     }
 
     #[inline]
-    fn check(&mut self, event: ProducerHookEvent) -> bool {
-        match event {
-            ProducerHookEvent::Available(free) => {
-                // 按等待者的需求下限裁决：不足下限不唤醒（等待者会由后续
-                // 提交继续唤醒；spurious 唤醒被避免）。本方法仅在 armed
-                // （TX_STNDBY=1）时被 fire 调用，demand 必然已写入。
-                let Some(demand) = &self.demand else { return false; };
-                let min = demand.min().copied().unwrap_or(1);
-                free >= min
-            }
-            // 对端关闭：总是值得唤醒（写者感知 ConsumerClose）。
-            ProducerHookEvent::ConsumerClose(_) => true,
-        }
+    fn set_demand(&self, demand: &Option<Demand<usize>>) {
+        self.buf_obsv_.set_demand(demand);
+    }
+
+    fn check(&self, event: ProducerHookEvent) -> bool {
+        let ProducerHookEvent::Available(free) = event else {
+            return true;
+        };
+        let Option::Some(demand_ptr) = self.buf_obsv_.demand_.load() else {
+            return false;
+        };
+        let opt_demand = unsafe { demand_ptr.as_ref() };
+        let Option::Some(demand) = opt_demand else {
+            return false;
+        };
+        let min = demand.min().copied().unwrap_or(0);
+        free > min
     }
 
     #[inline]
-    fn set_demand(&mut self, demand: Option<Demand<usize>>) {
-        self.demand = demand;
-    }
-
-    #[inline]
-    async fn react_async<'f, TySegm>(&mut self, _segm: &mut TySegm) -> ReceiverReact
+    async fn react_async<'f, TySegm>(
+        &mut self,
+        _segm: &mut TySegm,
+    ) -> ReceiverReact
     where
         TySegm: TrBuffSegmMut<'f, T>,
     {
@@ -197,21 +229,23 @@ impl<T> TrConsumer for BuffConsumer<T> {
     }
 
     #[inline]
-    fn check(&mut self, event: ConsumerHookEvent) -> bool {
-        match event {
-            ConsumerHookEvent::Available(data) => {
-                let Some(demand) = &self.demand else { return false; };
-                let min = demand.min().copied().unwrap_or(1);
-                data >= min
-            }
-            // 生产者关闭（EOF）：总是值得唤醒（读者感知 Closing）。
-            ConsumerHookEvent::ProducerClose(_) => true,
-        }
+    fn set_demand(&self, demand: &Option<Demand<usize>>) {
+        self.buf_obsv_.set_demand(demand);
     }
 
-    #[inline]
-    fn set_demand(&mut self, demand: Option<Demand<usize>>) {
-        self.demand = demand;
+    fn check(&self, event: ConsumerHookEvent) -> bool {
+        let ConsumerHookEvent::Available(free) = event else {
+            return true;
+        };
+        let Option::Some(demand_ptr) = self.buf_obsv_.demand_.load() else {
+            return false;
+        };
+        let opt_demand = unsafe { demand_ptr.as_ref() };
+        let Option::Some(demand) = opt_demand else {
+            return false;
+        };
+        let min = demand.min().copied().unwrap_or(0);
+        free > min
     }
 
     #[inline]
@@ -235,12 +269,15 @@ where
     }
 
     #[inline]
-    fn check(&mut self, event: ProducerHookEvent) -> bool {
+    fn check(&self, event: ProducerHookEvent) -> bool {
         // 有可写空间即值得泵一轮（参考值；泵循环还会重查状态）。
         matches!(event, ProducerHookEvent::Available(size) if size > 0)
     }
 
-    async fn react_async<'f, TySegm>(&mut self, segm: &mut TySegm) -> ReceiverReact
+    async fn react_async<'f, TySegm>(
+        &mut self,
+        segm: &mut TySegm,
+    ) -> ReceiverReact
     where
         TySegm: TrBuffSegmMut<'f, T>,
     {
@@ -267,28 +304,6 @@ where
             ReceiverReact::Continue
         }
     }
-
-    /// 单次读入：一次 `read_async` 到 `target`（供全主动流水线的异步输入泵）。
-    ///
-    /// 与 [`DeviceProducer::react_async`]（循环搬满整段）不同：本方法只读一次，
-    /// 设备阻塞时干净挂起（无部分写入滞留段内）。
-    fn read_once_async<'f>(
-        &'f mut self,
-        target: &'f mut [core::mem::MaybeUninit<T>],
-    ) -> impl Future<Output = usize> + 'f
-    where
-        Self: 'f,
-    {
-        async move {
-            let x = self
-                .input_
-                .read_async(target)
-                .may_cancel_with(NonCancellableToken::shared_mut())
-                .await;
-            // 设备错误：视为 0。
-            x.pick_left().unwrap_or(0)
-        }
-    }
 }
 
 impl<TyOutput, T> TrConsumer for DeviceConsumer<TyOutput, T>
@@ -303,7 +318,7 @@ where
     }
 
     #[inline]
-    fn check(&mut self, event: ConsumerHookEvent) -> bool {
+    fn check(&self, event: ConsumerHookEvent) -> bool {
         // 有数据即值得泵一轮；**ProducerClose 也感兴趣**——写端关闭后必须
         // 把残留数据排空（泵循环会一直搬到空为止）。
         matches!(

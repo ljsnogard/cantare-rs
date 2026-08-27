@@ -28,13 +28,13 @@ pub trait TrBuffWrite<T = u8> {
     /// items is specified by the parameter `demand`.
     fn write_async<'f>(
         &'f mut self,
-        demand: &Demand<usize>,
+        demand: &'f Demand<usize>,
     ) -> Self::WriteAsync<'f>;
 }
 
 pub trait TrBuffTryWrite<T = u8>: TrBuffWrite<T> {
     fn try_write<'f>(
         &'f mut self,
-        demand: &Demand<usize>,
+        demand: &'f Demand<usize>,
     ) -> SomeOf<Self::SegmMut<'f>, Self::Err>;
 }

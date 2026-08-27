@@ -6,7 +6,7 @@
 
 use core::fmt;
 
-use abs_buff::error::{ReadErrTag, TrTaggedError, WriteErrTag};
+use abs_buff::error::{IoErrTag, ReadErrTag, TrTaggedError, WriteErrTag};
 
 /// 写（生产）端错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +78,32 @@ impl<S: fmt::Debug> TrTaggedError<ReadErrTag> for RxError<S> {
                 => ReadErrTag::Closing,
             RxError::Argument => ReadErrTag::Unknown,
             RxError::Drained(_) => ReadErrTag::Drained,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineError<S> {
+    Tx(TxError<S>),
+    Rx(RxError<S>),
+}
+
+impl<S: fmt::Debug> fmt::Display for PipelineError<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PipelineError::Tx(tx_err) => tx_err.fmt(f),
+            PipelineError::Rx(rx_err) => rx_err.fmt(f),
+        }
+    }
+}
+
+impl<S: fmt::Debug> core::error::Error for PipelineError<S> {}
+
+impl<S: fmt::Debug> TrTaggedError<IoErrTag> for PipelineError<S> {
+    fn err_tag(&self) -> IoErrTag {
+        match self {
+            PipelineError::Tx(tx_err) => IoErrTag::Write(tx_err.err_tag()),
+            PipelineError::Rx(rx_err) => IoErrTag::Read(rx_err.err_tag()),
         }
     }
 }

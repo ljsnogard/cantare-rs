@@ -132,7 +132,7 @@ pub trait TrConsumer {
     /// 完整需求（`demand.min()`）裁决——不足下限不唤醒，避免 spurious wake；
     /// 关闭事件例外——EOF 总是值得唤醒；主动端由设备裁决。`&mut self`——端
     /// 类型可在裁决时更新内部状态。
-    fn check(&mut self, event: ConsumerHookEvent) -> bool;
+    fn check(&self, event: ConsumerHookEvent) -> bool;
 
     /// 登记 / 清除等待者的完整需求（被动端实现；主动端无等待者，默认无操作）。
     ///
@@ -141,7 +141,7 @@ pub trait TrConsumer {
     /// armed 时访问 `demand`（三态协议，见 `circ_buff_` 的端类型文档），经
     /// 状态字 Acquire 读与置位 CAS 建立 happens-before（见 `core_` 的
     /// `fire_*`）。`check` 以 `demand.min()` 判兴趣。
-    fn set_demand(&mut self, _demand: Option<Demand<usize>>) {}
+    fn set_demand(&self, _demand: &Option<Demand<usize>>) {}
 
     /// 对事件作出反应：把 `segm` 中的可读数据搬给本端（设备）。
     ///
@@ -167,10 +167,10 @@ pub trait TrProducer {
     /// 本端对 `event`（携带当前可写量）是否感兴趣。语义同
     /// [`TrConsumer::check`]（被动端按 [`TrProducer::set_demand`] 登记的完整
     /// 需求裁决）。
-    fn check(&mut self, event: ProducerHookEvent) -> bool;
+    fn check(&self, event: ProducerHookEvent) -> bool;
 
     /// 登记 / 清除等待者的完整需求。语义同 [`TrConsumer::set_demand`]。
-    fn set_demand(&mut self, _demand: Option<Demand<usize>>) {}
+    fn set_demand(&self, _demand: &Option<Demand<usize>>) {}
 
     fn react_async<'f, TySegm>(
         &mut self,
@@ -179,21 +179,16 @@ pub trait TrProducer {
     where
         TySegm: TrBuffSegmMut<'f, Self::Data>,
         Self: 'f;
+}
 
-    /// **单次读入**：一次 `read_async` 到 `target`，返回读到的数量（设备错误
-    /// 返回 0）。
-    ///
-    /// 供全主动流水线的异步输入泵使用：`react_async` 会循环搬满整段，若设备在
-    /// 段中途挂起，已写部分会滞留段内、直到 future 被 drop 才提交——流水线
-    /// 无法在同一轮 poll 里排空它。本方法只读一次：读不到就干净挂起（段提交
-    /// 0），读到就提交并返回，流水线随即排空输出。被动端无设备，默认返回 0。
-    fn read_once_async<'f>(
-        &'f mut self,
-        _target: &'f mut [core::mem::MaybeUninit<Self::Data>],
-    ) -> impl Future<Output = usize> + 'f
-    where
-        Self: 'f,
-    {
-        async move { 0 }
-    }
+pub trait TrObserver {
+    fn capacity(&self) -> usize;
+
+    fn data_size(&self) -> usize;
+
+    fn free_size(&self) -> usize;
+
+    fn is_producer_closed(&self) -> bool;
+
+    fn is_consumer_closed(&self) -> bool;
 }

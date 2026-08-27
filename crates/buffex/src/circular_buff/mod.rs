@@ -247,7 +247,7 @@ pub use circ_buff_::{
 pub use error_::{RxError, TxError};
 pub use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
 pub use reclaim_::{ReclSliceMut, ReclSliceRef};
-pub use spsc_::{Consumer, Pipeline, PipelineDisconnect, Producer, SpscPair};
+pub use spsc_::{Consumer, Producer, Pipeline, SpscPair};
 
 #[cfg(test)]
 mod tests_;

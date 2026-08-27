@@ -46,6 +46,12 @@ where
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum IoErrTag {
+    Read(ReadErrTag),
+    Write(WriteErrTag),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ReadErrTag {
     /// No more data availale and the read end is closed
     Closing,
@@ -85,6 +91,24 @@ pub enum WriteErrTag {
 
     /// There is data to read but cannot satisfy the demand.
     Unsatisfied,
+}
+
+impl IoErrTag {
+    pub const fn should_terminate(&self) -> bool {
+        match self {
+            IoErrTag::Read(r) => r.should_terminate(),
+            IoErrTag::Write(w) => w.should_terminate(),
+        }
+    }
+}
+impl TrErrTag for IoErrTag {}
+impl core::fmt::Display for IoErrTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IoErrTag::Read(r) => r.fmt(f),
+            IoErrTag::Write(w) => w.fmt(f),
+        }
+    }
 }
 
 impl ReadErrTag {

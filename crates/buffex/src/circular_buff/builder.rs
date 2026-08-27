@@ -77,11 +77,15 @@
 //!
 //! 缓冲容量在 `build` 时校验（`core_::MIN_CAPACITY` ..= `core_::MAX_CAPACITY`）。
 
-use core::marker::PhantomData;
+use core::{
+    borrow::BorrowMut,
+    marker::PhantomData,
+    mem::MaybeUninit,
+};
 
 use abs_buff::io::{TrInput, TrOutput};
 use mm_ptr::{
-    Shared,
+    Owned, Shared,
     x_deps::abs_mm::mem_alloc::{CoreAlloc, TrMalloc},
 };
 
@@ -111,44 +115,91 @@ pub enum BuilderError<T> {
 ///   再进入 [`ConsumerSetBuilder`] 定生产端；
 /// * 一步同时定两端（[`Self::pipe_between`]）；
 /// * 两端都不定，直接 [`Self::build`]——默认双端被动（经典手动管道）。
-pub struct CircularBuffBuilder<T = u8, A = CoreAlloc>
+pub struct CircularBuffBuilder<B, T = u8, A = CoreAlloc>
 where
-    A: TrMalloc + Clone + Default,
+    B: BorrowMut<[MaybeUninit<T>]>,
+    A: TrMalloc + Clone,
 {
-    capacity: usize,
-    alloc: A,
+    capacity_: usize,
+    buffer_: B,
+    alloc_: A,
     _use_t_: PhantomData<fn() -> T>,
 }
 
-impl<T, A> CircularBuffBuilder<T, A>
+impl<B, T, A> CircularBuffBuilder<B, T, A>
+where
+    B: BorrowMut<[MaybeUninit<T>]>,
+    A: TrMalloc + Clone,
+{
+    pub fn try_with_buffer(
+        buffer: B,
+        alloc: A,
+    ) -> Result<Self, BuilderError<usize>> {
+        let size = buffer.borrow().len();
+        if size > core_::MAX_CAPACITY {
+            return Result::Err(BuilderError::SizeTooBig(size));
+        };
+        if size < core_::MIN_CAPACITY {
+            return Result::Err(BuilderError::SizeTooSmall(size))
+        };
+        Result::Ok(Self {
+            capacity_: size,
+            buffer_: buffer,
+            alloc_: alloc,
+            _use_t_: PhantomData,
+        })
+    }
+
+    pub fn try_capacity(capacity: usize) -> Result<usize, BuilderError<usize>> {
+        if capacity > core_::MAX_CAPACITY {
+            return Result::Err(BuilderError::SizeTooBig(capacity));
+        };
+        if capacity < core_::MIN_CAPACITY {
+            return Result::Err(BuilderError::SizeTooSmall(capacity))
+        };
+        Result::Ok(capacity)
+    }
+}
+
+impl<T, A> CircularBuffBuilder<Owned<[MaybeUninit<T>], A>, T, A>
 where
     A: TrMalloc + Clone + Default,
 {
     /// 以默认分配器（[`CoreAlloc`]）构造，容量在 `build` 时校验。
-    pub fn with_capacity(capacity: usize) -> Self {
-        CircularBuffBuilder {
-            capacity,
-            alloc: A::default(),
-            _use_t_: PhantomData,
-        }
+    pub fn with_capacity(capacity: usize) -> Result<Self, BuilderError<usize>> {
+        Self::with_allocator(capacity, A::default())
     }
+}
 
+impl<T, A> CircularBuffBuilder<Owned<[MaybeUninit<T>], A>, T, A>
+where
+    A: TrMalloc + Clone,
+{
     /// 以自定义分配器构造。
-    pub fn with_allocator(capacity: usize, alloc: A) -> Self {
-        CircularBuffBuilder {
-            capacity,
-            alloc,
+    pub fn with_allocator(
+        capacity: usize,
+        alloc: A,
+    ) -> Result<Self, BuilderError<usize>> {
+        let cap = Self::try_capacity(capacity)?;
+        let buff = Owned::new_uninit_slice(cap, alloc.clone());
+        Result::Ok(CircularBuffBuilder {
+            capacity_: cap,
+            buffer_: buff,
+            alloc_: alloc,
             _use_t_: PhantomData,
-        }
+        })
     }
 
     /// 生产端为被动模式：调用者驱动写入。进入 [`ProducerSetBuilder`]，
     /// 下一步（`consumer_passive` / `pipe_into_output`）定消费端。
-    pub fn producer_passive(self) -> ProducerSetBuilder<BuffProducer<T>, T, A> {
+    pub fn producer_passive(
+        self,
+    ) -> ProducerSetBuilder<BuffProducer<T>, Owned<[MaybeUninit<T>], A>, T, A> {
         ProducerSetBuilder {
-            capacity: self.capacity,
+            capacity: self.capacity_,
             producer: BuffProducer::new(),
-            alloc: self.alloc,
+            buffer_: self.buffer_,
+            alloc: self.alloc_,
             _use_t_: PhantomData,
         }
     }
@@ -159,25 +210,29 @@ where
     pub fn pipe_from_input<I>(
         self,
         input: I,
-    ) -> ProducerSetBuilder<DeviceProducer<I, T>, T, A>
+    ) -> ProducerSetBuilder<DeviceProducer<I, T>, Owned<[MaybeUninit<T>], A>, T, A>
     where
         I: TrInput<T>,
     {
         ProducerSetBuilder {
-            capacity: self.capacity,
+            capacity: self.capacity_,
             producer: DeviceProducer::new(input),
-            alloc: self.alloc,
+            buffer_: self.buffer_,
+            alloc: self.alloc_,
             _use_t_: PhantomData,
         }
     }
 
     /// 消费端为被动模式：调用者驱动读取。进入 [`ConsumerSetBuilder`]，
     /// 下一步（`producer_passive` / `pipe_from_input`）定生产端。
-    pub fn consumer_passive(self) -> ConsumerSetBuilder<BuffConsumer<T>, T, A> {
+    pub fn consumer_passive(
+        self,
+    ) -> ConsumerSetBuilder<BuffConsumer<T>, Owned<[MaybeUninit<T>], A>, T, A> {
         ConsumerSetBuilder {
-            capacity: self.capacity,
+            capacity: self.capacity_,
             consumer: BuffConsumer::new(),
-            alloc: self.alloc,
+            buffer_: self.buffer_,
+            alloc: self.alloc_,
             _use_t_: PhantomData,
         }
     }
@@ -188,14 +243,15 @@ where
     pub fn pipe_into_output<O>(
         self,
         output: O,
-    ) -> ConsumerSetBuilder<DeviceConsumer<O, T>, T, A>
+    ) -> ConsumerSetBuilder<DeviceConsumer<O, T>, Owned<[MaybeUninit<T>], A>, T, A>
     where
         O: TrOutput<T>,
     {
         ConsumerSetBuilder {
-            capacity: self.capacity,
+            capacity: self.capacity_,
             consumer: DeviceConsumer::new(output),
-            alloc: self.alloc,
+            buffer_: self.buffer_,
+            alloc: self.alloc_,
             _use_t_: PhantomData,
         }
     }
@@ -210,16 +266,17 @@ where
         self,
         input: I,
         output: O,
-    ) -> ReadyBuilder<DeviceProducer<I, T>, DeviceConsumer<O, T>, T, A>
+    ) -> ReadyBuilder<DeviceProducer<I, T>, DeviceConsumer<O, T>, Owned<[MaybeUninit<T>], A>, T, A>
     where
         I: TrInput<T>,
         O: TrOutput<T>,
     {
         ReadyBuilder {
-            capacity: self.capacity,
+            capacity: self.capacity_,
             producer: DeviceProducer::new(input),
             consumer: DeviceConsumer::new(output),
-            alloc: self.alloc,
+            buffer: self.buffer_,
+            alloc: self.alloc_,
             _use_t_: PhantomData,
         }
     }
@@ -228,16 +285,20 @@ where
     ///
     /// 等价于 `producer_passive().consumer_passive().build()` 或
     /// `consumer_passive().producer_passive().build()`。
-    pub fn build(self) -> Result<SpscPair<T, A>, BuilderError<usize>>
+    pub fn build(self) -> Result<
+        SpscPair<Owned<[MaybeUninit<T>], A>, T, A>,
+        BuilderError<usize>,
+    >
     where
         T: Send + Sync,
         A: Send + Sync + TrMalloc + Clone,
     {
         ReadyBuilder {
-            capacity: self.capacity,
+            capacity: self.capacity_,
             producer: BuffProducer::new(),
             consumer: BuffConsumer::new(),
-            alloc: self.alloc,
+            buffer: self.buffer_,
+            alloc: self.alloc_,
             _use_t_: PhantomData,
         }
         .build()
@@ -248,28 +309,32 @@ where
 ///
 /// 由 [`CircularBuffBuilder::producer_passive`] / [`CircularBuffBuilder::pipe_from_input`]
 /// 进入；下一步（`consumer_passive` / `pipe_into_output`）定消费端。
-pub struct ProducerSetBuilder<P, T = u8, A = CoreAlloc>
+pub struct ProducerSetBuilder<P, B, T = u8, A = CoreAlloc>
 where
     P: TrProducer<Data = T>,
+    B: BorrowMut<[MaybeUninit<T>]>,
     A: TrMalloc + Clone,
 {
     capacity: usize,
     producer: P,
+    buffer_: B,
     alloc: A,
     _use_t_: PhantomData<fn() -> T>,
 }
 
-impl<P, T, A> ProducerSetBuilder<P, T, A>
+impl<P, B, T, A> ProducerSetBuilder<P, B, T, A>
 where
     P: TrProducer<Data = T>,
+    B: BorrowMut<[MaybeUninit<T>]>,
     A: TrMalloc + Clone,
 {
     /// 消费端为被动模式：调用者驱动读取。
-    pub fn consumer_passive(self) -> ReadyBuilder<P, BuffConsumer<T>, T, A> {
+    pub fn consumer_passive(self) -> ReadyBuilder<P, BuffConsumer<T>, B, T, A> {
         ReadyBuilder {
             capacity: self.capacity,
             producer: self.producer,
             consumer: BuffConsumer::new(),
+            buffer: self.buffer_,
             alloc: self.alloc,
             _use_t_: PhantomData,
         }
@@ -279,7 +344,7 @@ where
     pub fn pipe_into_output<O>(
         self,
         output: O,
-    ) -> ReadyBuilder<P, DeviceConsumer<O, T>, T, A>
+    ) -> ReadyBuilder<P, DeviceConsumer<O, T>, B, T, A>
     where
         O: TrOutput<T>,
     {
@@ -287,6 +352,7 @@ where
             capacity: self.capacity,
             producer: self.producer,
             consumer: DeviceConsumer::new(output),
+            buffer: self.buffer_,
             alloc: self.alloc,
             _use_t_: PhantomData,
         }
@@ -299,28 +365,32 @@ where
 /// [`CircularBuffBuilder::consumer_passive`] / [`CircularBuffBuilder::pipe_into_output`]
 /// 进入（「先设消费端、再设生产端」的顺序）；下一步（`producer_passive` /
 /// `pipe_from_input`）定生产端。
-pub struct ConsumerSetBuilder<C, T = u8, A = CoreAlloc>
+pub struct ConsumerSetBuilder<C, B, T = u8, A = CoreAlloc>
 where
     C: TrConsumer<Data = T>,
+    B: BorrowMut<[MaybeUninit<T>]>,
     A: TrMalloc + Clone,
 {
     capacity: usize,
     consumer: C,
+    buffer_: B,
     alloc: A,
     _use_t_: PhantomData<fn() -> T>,
 }
 
-impl<C, T, A> ConsumerSetBuilder<C, T, A>
+impl<C, B, T, A> ConsumerSetBuilder<C, B, T, A>
 where
     C: TrConsumer<Data = T>,
+    B: BorrowMut<[MaybeUninit<T>]>,
     A: TrMalloc + Clone,
 {
     /// 生产端为被动模式：调用者驱动写入。
-    pub fn producer_passive(self) -> ReadyBuilder<BuffProducer<T>, C, T, A> {
+    pub fn producer_passive(self) -> ReadyBuilder<BuffProducer<T>, C, B, T, A> {
         ReadyBuilder {
             capacity: self.capacity,
             producer: BuffProducer::new(),
             consumer: self.consumer,
+            buffer: self.buffer_,
             alloc: self.alloc,
             _use_t_: PhantomData,
         }
@@ -330,7 +400,7 @@ where
     pub fn pipe_from_input<I>(
         self,
         input: I,
-    ) -> ReadyBuilder<DeviceProducer<I, T>, C, T, A>
+    ) -> ReadyBuilder<DeviceProducer<I, T>, C, B, T, A>
     where
         I: TrInput<T>,
     {
@@ -338,6 +408,7 @@ where
             capacity: self.capacity,
             producer: DeviceProducer::new(input),
             consumer: self.consumer,
+            buffer: self.buffer_,
             alloc: self.alloc,
             _use_t_: PhantomData,
         }
@@ -345,23 +416,26 @@ where
 }
 
 /// 构建链终点：两端模式均已决定，可以 `build`。
-pub struct ReadyBuilder<P, C, T = u8, A = CoreAlloc>
+pub struct ReadyBuilder<P, C, B, T = u8, A = CoreAlloc>
 where
     P: TrProducer<Data = T>,
     C: TrConsumer<Data = T>,
+    B: BorrowMut<[MaybeUninit<T>]>,
     A: TrMalloc + Clone,
 {
     capacity: usize,
     producer: P,
     consumer: C,
+    buffer: B,
     alloc: A,
     _use_t_: PhantomData<fn() -> T>,
 }
 
-impl<P, C, T, A> ReadyBuilder<P, C, T, A>
+impl<P, C, B, T, A> ReadyBuilder<P, C, B, T, A>
 where
     P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
@@ -378,9 +452,9 @@ where
     /// 由两端设备驱动流动，直到一端出错 / 关闭或调用者请求断开）。
     pub fn build(
         self,
-    ) -> Result<<() as BuildOutcome<P, C, T, A>>::Output, BuilderError<usize>>
+    ) -> Result<<() as BuildOutcome<P, C, B, T, A>>::Output, BuilderError<usize>>
     where
-        (): BuildOutcome<P, C, T, A>,
+        (): BuildOutcome<P, C, B, T, A>,
     {
         let cap = self.capacity;
         if cap < core_::MIN_CAPACITY {
@@ -390,19 +464,12 @@ where
             return Err(BuilderError::SizeTooBig(cap));
         }
         let core = CircCore::new(
-            cap,
             self.producer,
             self.consumer,
-            self.alloc.clone(),
+            self.buffer,
         );
         let shared = Shared::new(core, self.alloc.clone());
-        // 构建期初始驱动：除「全主动流水线」外，主动端先各自泵一轮（被动端为
-        // 无操作）。全主动的驱动交给 `Pipeline` future（首个 poll），避免阻塞
-        // 式输入设备在 build 期间自旋挂死。
-        if <() as BuildOutcome<P, C, T, A>>::DRIVE_ON_BUILD {
-            shared.start();
-        }
-        Ok(<() as BuildOutcome<P, C, T, A>>::assemble(
+        Ok(<() as BuildOutcome<P, C, B, T, A>>::assemble(
             shared, self.alloc,
         ))
     }
@@ -426,19 +493,17 @@ where
 /// `BuffConsumer` / `DeviceProducer` / `DeviceConsumer`），下面的四个实现
 /// 覆盖全部组合；密封（`sealed::Sealed`）保证调用者无法为其它类型实现。
 #[doc(hidden)]
-pub trait BuildOutcome<P, C, T, A>: sealed::Sealed
+pub trait BuildOutcome<P, C, B, T, A>: sealed::Sealed
 where
     P: TrProducer<Data = T>,
     C: TrConsumer<Data = T>,
+    B: BorrowMut<[MaybeUninit<T>]>,
     A: TrMalloc + Clone,
 {
     type Output;
 
-    /// 构建期是否需要初始 drive（全主动不需要——由 `Pipeline` future 驱动）。
-    const DRIVE_ON_BUILD: bool;
-
     /// 装配构建产物。`alloc` 是构建器的分配器（`Pipeline` 需要它分配断开标志）。
-    fn assemble(core_ref: CoreRef<P, C, T, A>, alloc: A) -> Self::Output;
+    fn assemble(core_ref: CoreRef<P, C, B, T, A>, alloc: A) -> Self::Output;
 }
 
 mod sealed {
@@ -448,77 +513,71 @@ mod sealed {
 
 impl sealed::Sealed for () {}
 
-impl<T, A> BuildOutcome<BuffProducer<T>, BuffConsumer<T>, T, A> for ()
+impl<B, T, A> BuildOutcome<BuffProducer<T>, BuffConsumer<T>, B, T, A> for ()
 where
+    B: Send + Sync +BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type Output = SpscPair<T, A>;
-
-    const DRIVE_ON_BUILD: bool = true;
+    type Output = SpscPair<B, T, A>;
 
     fn assemble(
-        core_ref: CoreRef<BuffProducer<T>, BuffConsumer<T>, T, A>,
+        core_ref: CoreRef<BuffProducer<T>, BuffConsumer<T>, B, T, A>,
         _alloc: A,
-    ) -> SpscPair<T, A> {
+    ) -> SpscPair<B, T, A> {
         (Producer::new(core_ref.clone()), Consumer::new(core_ref))
     }
 }
 
-impl<I, T, A> BuildOutcome<DeviceProducer<I, T>, BuffConsumer<T>, T, A> for ()
+impl<I, B, T, A> BuildOutcome<DeviceProducer<I, T>, BuffConsumer<T>, B, T, A> for ()
 where
     I: Send + Sync + TrInput<T>,
+    B: Send + Sync +BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type Output = Consumer<DeviceProducer<I, T>, BuffConsumer<T>, T, A>;
-
-    const DRIVE_ON_BUILD: bool = true;
+    type Output = Consumer<DeviceProducer<I, T>, BuffConsumer<T>, B, T, A>;
 
     fn assemble(
-        core_ref: CoreRef<DeviceProducer<I, T>, BuffConsumer<T>, T, A>,
+        core_ref: CoreRef<DeviceProducer<I, T>, BuffConsumer<T>, B, T, A>,
         _alloc: A,
     ) -> Self::Output {
         Consumer::new(core_ref)
     }
 }
 
-impl<O, T, A> BuildOutcome<BuffProducer<T>, DeviceConsumer<O, T>, T, A> for ()
+impl<O, B, T, A> BuildOutcome<BuffProducer<T>, DeviceConsumer<O, T>, B, T, A> for ()
 where
     O: Send + Sync + TrOutput<T>,
+    B: Send + Sync +BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type Output = Producer<BuffProducer<T>, DeviceConsumer<O, T>, T, A>;
-
-    const DRIVE_ON_BUILD: bool = true;
+    type Output = Producer<BuffProducer<T>, DeviceConsumer<O, T>, B, T, A>;
 
     fn assemble(
-        core_ref: CoreRef<BuffProducer<T>, DeviceConsumer<O, T>, T, A>,
+        core_ref: CoreRef<BuffProducer<T>, DeviceConsumer<O, T>, B, T, A>,
         _alloc: A,
     ) -> Self::Output {
         Producer::new(core_ref)
     }
 }
 
-impl<I, O, T, A> BuildOutcome<DeviceProducer<I, T>, DeviceConsumer<O, T>, T, A>
+impl<I, O, B, T, A> BuildOutcome<DeviceProducer<I, T>, DeviceConsumer<O, T>, B, T, A>
     for ()
 where
     I: Send + Sync + TrInput<T>,
     O: Send + Sync + TrOutput<T>,
+    B: Send + Sync +BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type Output = Pipeline<DeviceProducer<I, T>, DeviceConsumer<O, T>, T, A>;
-
-    /// 全主动流水线不在此处驱动——驱动交给 `Pipeline` future 的首个 poll
-    /// （build 期间驱动会阻塞在阻塞式设备的 `read_async` 上）。
-    const DRIVE_ON_BUILD: bool = false;
+    type Output = Pipeline<DeviceProducer<I, T>, DeviceConsumer<O, T>, B, T, A>;
 
     fn assemble(
-        core_ref: CoreRef<DeviceProducer<I, T>, DeviceConsumer<O, T>, T, A>,
-        alloc: A,
+        core_ref: CoreRef<DeviceProducer<I, T>, DeviceConsumer<O, T>, B, T, A>,
+        _alloc: A,
     ) -> Self::Output {
-        Pipeline::new(core_ref, alloc)
+        Pipeline::new(core_ref)
     }
 }

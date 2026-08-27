@@ -274,7 +274,8 @@ fn try_write_honours_at_least() {
     }
     assert_eq!(tx.free_size(), 3);
 
-    let some = TrBuffTryWrite::try_write(&mut tx, &Demand::at_least(4));
+    let demand = Demand::at_least(4);
+    let some = TrBuffTryWrite::try_write(&mut tx, &demand);
     assert!(
         matches!(some.pick_right(), Option::Some(TxError::Stuffed(_))),
         "可写空间不足下限时必须返回 Stuffed"
@@ -957,8 +958,9 @@ fn move_data_between_u8_slice_and_maybe_uninit_slice_rings() {
     // Fill the source ring.
     let mut off = 0usize;
     while off < expected.len() {
+        let demand = Demand::less_than(expected.len() - off);
         let write_res =
-            TrBuffTryWrite::try_write(&mut src_tx, &Demand::less_than(expected.len() - off));
+            TrBuffTryWrite::try_write(&mut src_tx, &demand);
         let write_err = write_res
             .as_ref()
             .pick_right()
@@ -1007,8 +1009,9 @@ fn move_data_between_u8_slice_and_maybe_uninit_slice_rings() {
             .map(|m| unsafe { m.assume_init_read() })
             .collect();
 
+        let demand = Demand::less_than(n);
         let Some(mut wseg) =
-            TrBuffTryWrite::try_write(&mut dst_tx, &Demand::less_than(n)).pick_left()
+            TrBuffTryWrite::try_write(&mut dst_tx, &demand).pick_left()
         else {
             panic!("destination write failed");
         };

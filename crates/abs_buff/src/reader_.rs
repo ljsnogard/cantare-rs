@@ -32,13 +32,13 @@ pub trait TrBuffRead<T = u8> {
     /// can be specified by the parameter `demand`.
     fn read_async<'f>(
         &'f mut self,
-        demand: &Demand<usize>,
+        demand: &'f Demand<usize>,
     ) -> Self::ReadAsync<'f>;
 }
 
 pub trait TrBuffTryRead<T = u8>: TrBuffRead<T> {
-    fn try_read<'a>(
-        &'a mut self,
-        demand: &Demand<usize>,
-    ) -> SomeOf<Self::SegmRef<'a>, Self::Err>;
+    fn try_read<'f>(
+        &'f mut self,
+        demand: &'f Demand<usize>,
+    ) -> SomeOf<Self::SegmRef<'f>, Self::Err>;
 }

@@ -135,8 +135,8 @@ where
     }
 }
 
-pub type AtomexPtrMut<'a, T, O> = AtomexPtr<T, &'a mut AtomicPtr<T>, O>;
-pub type AtomexPtrOwned<T, O> = AtomexPtr<T, AtomicPtr<T>, O>;
+pub type AtomexPtrMut<'a, T, O = StrictOrderings> = AtomexPtr<T, &'a mut AtomicPtr<T>, O>;
+pub type AtomexPtrOwned<T, O = StrictOrderings> = AtomexPtr<T, AtomicPtr<T>, O>;
 
 impl<T, B, O> TrAtomicFlags<*mut T, O> for AtomexPtr<T, B, O>
 where

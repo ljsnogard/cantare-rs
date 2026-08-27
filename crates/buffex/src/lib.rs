@@ -1,3 +1,9 @@
+#![allow(unused_features)]
+// to enable no hand-written poll
+#![feature(async_fn_traits)]
+#![feature(impl_trait_in_assoc_type)]
+#![feature(unboxed_closures)]
+
 #![no_std]
 #![cfg_attr(test, feature(try_trait_v2))]
 

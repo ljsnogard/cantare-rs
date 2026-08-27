@@ -33,6 +33,7 @@ pub trait TrMutexSignal<V: Copy> {
     fn make_released(val: V) -> V;
 }
 
+/// 升级方向，可以设置某一个 bit 作为 flag
 #[derive(Debug)]
 pub struct MsbAsMutexSignal<V: Unsigned>(PhantomData<V>);
 

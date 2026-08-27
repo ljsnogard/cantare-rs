@@ -551,8 +551,9 @@ mod tests_ {
     fn read_borrowed_slice_advances_like_std() {
         let mut data: &[u8] = b"hello";
 
+        let demand = Demand::less_than(5);
         let mut segm = data
-            .try_read(&Demand::less_than(5))
+            .try_read(&demand)
             .pick_left()
             .expect("read should return a segment");
         let mut child = segm.as_segm_ref();
@@ -571,8 +572,9 @@ mod tests_ {
         let mut storage = [1u8, 2, 3, 4];
         let mut data: &mut [u8] = &mut storage;
 
+        let demand = Demand::less_than(4);
         let mut segm = data
-            .try_read(&Demand::less_than(4))
+            .try_read(&demand)
             .pick_left()
             .expect("read should return a segment");
         let mut child = segm.as_segm_ref();
@@ -590,9 +592,9 @@ mod tests_ {
         let mut storage = [0u8; 5];
         {
             let mut data: &mut [u8] = &mut storage;
-
+            let demand = Demand::less_than(5);
             let mut segm = data
-                .try_write(&Demand::less_than(5))
+                .try_write(&demand)
                 .pick_left()
                 .expect("write should return a segment");
             let mut child = segm.as_segm_mut();
