@@ -104,7 +104,7 @@ use mm_ptr::{Owned, x_deps::abs_mm,};
 
 use super::{
     abs_comp_::{
-        ConsumerHookEvent, ProducerHookEvent,
+        ConsumerHookEvent, ProducerHookEvent, ReceiverReact,
         TrCircBuffCore, TrConsumer, TrProducer,
     },
     error_::{RxError, TxError},
@@ -272,6 +272,23 @@ fn has_flag(state: usize, flag: usize) -> bool {
     state & flag != 0
 }
 
+/// 微型 `block_on`：用 `Waker::noop()` 自旋驱动单个 future 到完成。
+///
+/// 主动端的「搬运」在 hook 内部**同步**完成（不 spawn、无运行时）：设备
+/// `read_async` / `write_async` 返回的 future 在此被轮询到 `Ready`。若设备在
+/// 暂无数据 / 空间时返回 `Pending`，这里会自旋等待（无任务模型下「自动搬运」
+/// 的固有语义；非阻塞设备立即 `Ready`，不会空转）。
+fn block_on<F: Future>(fut: F) -> F::Output {
+    let mut fut = pin!(fut);
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+            return v;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 环形核心
 // ---------------------------------------------------------------------------
@@ -341,6 +358,24 @@ where
         &'f self,
         demand: &'f Demand<usize>,
     ) -> SomeOf<ReclSliceMut<'f, T, WriterReclaim<'f, Self>>, TxError<usize>> {
+        let x: SomeOf<
+            ReclSliceMut<'_, T, WriterReclaim<'_, Self>>,
+            TxError<usize>,
+        > = self
+            .try_write_at(demand)
+            .map(|(start, take)| self.write_segm(start, take))
+            .into();
+        if x.contains_left() {
+            return x;
+        };
+        let err = x.as_ref().pick_right().expect("");
+        if err.err_tag().should_terminate() {
+            return x;
+        };
+        // 未终止（Stuffed）：对端（消费端）为主动 → 同步泵出一轮释放空间后
+        // 重试（无后台任务模型下「操作即事件」；`pump_output` 内部门控保证
+        // 仅一端主动一端被动时实际泵出，双被动时原样返回）。
+        self.pump_output();
         self.try_write_at(demand)
             .map(|(start, take)| self.write_segm(start, take))
             .into()
@@ -374,6 +409,25 @@ where
         &'f self,
         demand: &'f Demand<usize>,
     ) -> SomeOf<ReclSliceRef<'f, T, ReaderReclaim<'f, Self>>, RxError<usize>> {
+        // #[allow(clippy::type_complexity)]
+        let x: SomeOf<
+            ReclSliceRef<'_, T, ReaderReclaim<'_, Self>>,
+            RxError<usize>,
+        > = self
+            .try_read_at(demand)
+            .map(|(start, take)| self.read_segm(start, take))
+            .into();
+        if x.contains_left() {
+            return x;
+        };
+        let err = x.as_ref().pick_right().expect("");
+        if err.err_tag().should_terminate() {
+            return x;
+        };
+        // 未终止（Drained）：对端（生产端）为主动 → 同步泵入一轮补位后重试
+        // （`try_read` 自动驱动输入泵；`pump_input` 内部门控保证仅一端主动
+        // 一端被动时实际泵入，双被动时原样返回）。
+        self.pump_input();
         self.try_read_at(demand)
             .map(|(start, take)| self.read_segm(start, take))
             .into()
@@ -659,6 +713,94 @@ where
     }
 
     // ------------------------------------------------------------------
+    // 同步泵（一端主动一端被动）：主动端的数据搬运
+    // ------------------------------------------------------------------
+
+    /// 构建期初始泵：一端主动一端被动时，主动端先各自泵一轮（生产端把输入
+    /// 设备的数据填满缓冲、消费端把缓冲排空到输出设备），让数据从构建完成
+    /// 起就开始流动。双端被动 / 双端主动时按内部门控为 no-op。
+    pub(super) fn start(&self) {
+        self.pump_input();
+        self.pump_output();
+    }
+
+    /// 输入泵（主动生产端）：从输入设备读入缓冲（同步，`block_on` 轮询设备
+    /// future 到完成）。循环直到**缓冲已满 / 任一端关闭 / 设备暂无数据**。
+    ///
+    /// 每轮借出**当前全部可写区**（两段式段，跨末端时拆两段），段 drop 时经
+    /// `WriterReclaim` 提交（`advance_write` → 触发消费端事件）。
+    ///
+    /// # 门控（为何只在一端主动一端被动时运行）
+    ///
+    /// 泵的提交会触发对端事件（`fire_consumer`），若对端也是主动端，会再次
+    /// 进入对端泵，形成「输入泵 → 输出泵 → 输入泵 → …」的**无界递归**。
+    /// 双主动（`Pipeline`）由流水线 future 异步驱动设备，不走本同步泵；因此
+    /// 本方法只在「生产端主动 **且** 消费端被动」时工作，其余组合直接返回。
+    fn pump_input(&self) {
+        let producer = unsafe { &*self.producer_.get() };
+        if producer.is_passive() {
+            return;
+        }
+        let consumer = unsafe { &*self.consumer_.get() };
+        if !consumer.is_passive() {
+            return;
+        }
+        loop {
+            let state = self.atm_stat_.value();
+            if has_flag(state, TX_CLOSED) || has_flag(state, RX_CLOSED) {
+                break;
+            }
+            let pos = IoPos::unpack(state, self.capacity());
+            let free = pos.free_size();
+            if free == 0 {
+                break; // 缓冲已满（整环都是数据）
+            }
+            // 借出全部可写区（`write_segm` 覆盖跨末端的两段式情形）。
+            // SAFETY: 可写区不与任何活段 / 泵操作重叠（SPSC 纪律：泵运行在
+            // 提交之后、且本方法只在调用者线程上执行）。
+            let mut segm = self.write_segm(pos.wp, free);
+            let producer = unsafe { &mut *self.producer_.get() };
+            let r = block_on(producer.react_async(&mut segm));
+            if r == ReceiverReact::Continue {
+                break; // 设备暂无数据 / 错误：本轮无进展
+            }
+            // segm drop：提交（advance_write → 触发消费端事件，被动端被唤醒）
+        }
+    }
+
+    /// 输出泵（主动消费端）：把缓冲数据写到输出设备（同步）。循环直到
+    /// **缓冲排空 / 读端关闭 / 设备暂不能接收**。每轮借出全部可读区，段 drop
+    /// 时提交（`advance_read` → 触发生产端事件）。门控同 [`CircCore::pump_input`]。
+    fn pump_output(&self) {
+        let consumer = unsafe { &*self.consumer_.get() };
+        if consumer.is_passive() {
+            return;
+        }
+        let producer = unsafe { &*self.producer_.get() };
+        if !producer.is_passive() {
+            return;
+        }
+        loop {
+            let state = self.atm_stat_.value();
+            if has_flag(state, RX_CLOSED) {
+                break;
+            }
+            let pos = IoPos::unpack(state, self.capacity());
+            let data = pos.data_size();
+            if data == 0 {
+                break;
+            }
+            // 借出全部可读区（跨末端时两段式）。
+            let mut segm = self.read_segm(pos.rp, data);
+            let consumer = unsafe { &mut *self.consumer_.get() };
+            let r = block_on(consumer.react_async(&mut segm));
+            if r == ReceiverReact::Continue {
+                break; // 设备暂不能接收 / 错误
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 事件分发与泵
     // ------------------------------------------------------------------
 
@@ -692,6 +834,9 @@ where
         if !producer.check(event) || producer.is_passive()  {
             return;
         }
+        // 主动生产端：对端（被动消费端）完成读取 / 关闭，同步泵入一轮补位
+        // （内部门控：仅一端主动一端被动时实际泵入）。
+        self.pump_input();
     }
 
     /// 触发消费端事件（生产端完成写入 / 关闭后）。与 [`CircCore::fire_producer`]
@@ -703,6 +848,9 @@ where
         if !consumer.check(event) || consumer.is_passive()  {
             return;
         }
+        // 主动消费端：对端（被动生产端）完成写入 / 关闭，同步泵出一轮排空
+        // （含 `ProducerClose` 驱动下排空残留数据）。
+        self.pump_output();
     }
 
     /// 原子地读取并清除一个标志（等价于 `swap(false)` 的原子读-清）。

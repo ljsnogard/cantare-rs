@@ -168,9 +168,9 @@ fn consumer_passive_then_pipe_from_input() {
         .build()
         .unwrap();
 
-    // 构造完成即已泵入：容量 8 → 单空槽 → 最多 7 格数据。
-    assert_eq!(rx.data_size(), 7);
-    assert_eq!(pos.load(Ordering::Relaxed), 7);
+    // 构造完成即已泵入：容量 8 全部可用（REVERSION 约定）→ 填满 8 格。
+    assert_eq!(rx.data_size(), 8);
+    assert_eq!(pos.load(Ordering::Relaxed), 8);
 
     let mut total = Vec::new();
     loop {

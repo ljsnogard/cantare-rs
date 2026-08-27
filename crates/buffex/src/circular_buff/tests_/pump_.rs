@@ -42,9 +42,9 @@ fn pipe_from_input_fills_and_refills() {
         .build()
         .unwrap();
 
-    // 构造完成即已泵入：容量 8 → 单空槽 → 最多 7 格数据。
-    assert_eq!(rx.data_size(), 7);
-    assert_eq!(pos.load(Ordering::Relaxed), 7, "输入设备已被读走 7 字节");
+    // 构造完成即已泵入：容量 8 全部可用（REVERSION 约定，不再空一槽）→ 填满 8 格。
+    assert_eq!(rx.data_size(), 8);
+    assert_eq!(pos.load(Ordering::Relaxed), 8, "输入设备已被读走 8 字节");
 
     // 边读边补：读空当前数据 → hook 立即从输入设备拉取下一批。
     let mut total = Vec::new();
@@ -62,7 +62,7 @@ fn pipe_from_input_fills_and_refills() {
         // 读取后（输入未耗尽时）应立即补满。
         let p = pos.load(Ordering::Relaxed);
         if p < 20 {
-            assert_eq!(rx.data_size(), 7, "读取后应立即补满可写空间");
+            assert_eq!(rx.data_size(), 8, "读取后应立即补满可写空间");
         }
     }
     assert_eq!(total, (0..20).collect::<Vec<_>>(), "读回全部输入");
@@ -451,4 +451,58 @@ fn close_tx_drains_remaining_output() {
 
     tx.close();
     assert_eq!(*out_data.lock().unwrap(), vec![1, 2, 3, 4, 5, 6, 7]);
+}
+
+/// 主动生产 × 被动消费的**异步读等待**：空缓冲时 `read_async` 挂起（park），
+/// 每次轮询自动驱动一轮输入泵；设备数据「迟到」（门打开）后，下一次 poll
+/// 即由 park 内的泵拉到数据 → `Ready`——无需任何显式 drive。
+#[test]
+fn read_async_auto_drives_active_producer() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize},
+    };
+
+    let gate = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let input = GatedInput {
+        data: vec![7, 8, 9],
+        pos: 0,
+        gate: gate.clone(),
+        calls: calls.clone(),
+    };
+
+    let mut rx = DefaultBuilder::with_capacity(8)
+        .unwrap()
+        .pipe_from_input(input)
+        .consumer_passive()
+        .build()
+        .unwrap();
+
+    // 构造期 start() 泵了一轮，但门未开 → 缓冲为空。
+    assert_eq!(rx.data_size(), 0);
+
+    // 异步读等待：空 → Pending（park 每次轮询会驱动输入泵，但门未开仍无数据）。
+    let demand = Demand::at_least(3);
+    let fut = rx.read_async(&demand);
+    let mut fut = pin!(fut.into_future());
+    let (waker, _flag) = TestWaker::make_waker_tuple();
+    assert!(
+        poll_once(fut.as_mut(), &waker).is_pending(),
+        "门未开时读等待必须 pending（泵无数据可拉）"
+    );
+
+    // 门打开：下一次 poll 即由 park 内的泵拉到数据 → Ready。
+    gate.store(true, Ordering::Release);
+    let res = poll_once(fut.as_mut(), &waker);
+    let mut rs = match res {
+        std::task::Poll::Ready(r) => r.pick_left().expect("读等待应成功"),
+        std::task::Poll::Pending => panic!("门开后读等待应被泵驱动就绪"),
+    };
+    assert_eq!(rs.least_count(), 3);
+    assert_eq!(take_segm(&mut rs, 3), vec![7, 8, 9]);
+    assert!(
+        calls.load(Ordering::Relaxed) >= 2,
+        "park 轮询应自动驱动输入泵"
+    );
 }
