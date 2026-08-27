@@ -620,7 +620,11 @@ where
 
     #[inline]
     fn is_drained_closing(&self) -> bool {
-        self.core_ref_.is_rx_closed() || self.core_ref_.is_tx_closed()
+        // 「Drained」= 不再会有新数据：读端已关闭，或（写端已关闭且缓冲已
+        // 空）。写端关闭但仍有缓冲数据时不算 drained——EOF 语义要求先把残留
+        // 数据读走（与 `ring_buffer` 的 `RingRx::is_drained_closing` 一致）。
+        self.core_ref_.is_rx_closed()
+            || (self.core_ref_.is_tx_closed() && self.core_ref_.data_size() == 0)
     }
 
     #[inline]

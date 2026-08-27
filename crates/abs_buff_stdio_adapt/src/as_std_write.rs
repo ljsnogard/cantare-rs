@@ -35,7 +35,7 @@ where
     cancel_: &'a mut C,
 }
 
-type Rt = Runtime<{ BLOCK_ON} >;
+type Rt = Runtime<{ BLOCK_ON } >;
 
 impl<'a, W, C> AsStdWrite<'a, W, C>
 where
