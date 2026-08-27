@@ -242,7 +242,7 @@ pub use builder::{
     ReadyBuilder,
 };
 pub use circ_buff_::{
-    BuffConsumer, BuffProducer, DeviceConsumer, DeviceProducer,
+    BufConsumer, BufProducer, DevConsumer, DevProducer,
 };
 pub use error_::{RxError, TxError};
 pub use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;

@@ -91,7 +91,7 @@ use mm_ptr::{
 
 use super::{
     abs_comp_::{TrConsumer, TrProducer},
-    circ_buff_::{BuffConsumer, BuffProducer, DeviceConsumer, DeviceProducer},
+    circ_buff_::{BufConsumer, BufProducer, DevConsumer, DevProducer},
     core_::{self, CircCore},
     spsc_::{Consumer, CoreRef, Pipeline, Producer, SpscPair},
 };
@@ -194,10 +194,10 @@ where
     /// 下一步（`consumer_passive` / `pipe_into_output`）定消费端。
     pub fn producer_passive(
         self,
-    ) -> ProducerSetBuilder<BuffProducer<T>, Owned<[MaybeUninit<T>], A>, T, A> {
+    ) -> ProducerSetBuilder<BufProducer<T>, Owned<[MaybeUninit<T>], A>, T, A> {
         ProducerSetBuilder {
             capacity: self.capacity_,
-            producer: BuffProducer::new(),
+            producer: BufProducer::new(),
             buffer_: self.buffer_,
             alloc: self.alloc_,
             _use_t_: PhantomData,
@@ -210,13 +210,13 @@ where
     pub fn pipe_from_input<I>(
         self,
         input: I,
-    ) -> ProducerSetBuilder<DeviceProducer<I, T>, Owned<[MaybeUninit<T>], A>, T, A>
+    ) -> ProducerSetBuilder<DevProducer<I, T>, Owned<[MaybeUninit<T>], A>, T, A>
     where
         I: TrInput<T>,
     {
         ProducerSetBuilder {
             capacity: self.capacity_,
-            producer: DeviceProducer::new(input),
+            producer: DevProducer::new(input),
             buffer_: self.buffer_,
             alloc: self.alloc_,
             _use_t_: PhantomData,
@@ -227,10 +227,10 @@ where
     /// 下一步（`producer_passive` / `pipe_from_input`）定生产端。
     pub fn consumer_passive(
         self,
-    ) -> ConsumerSetBuilder<BuffConsumer<T>, Owned<[MaybeUninit<T>], A>, T, A> {
+    ) -> ConsumerSetBuilder<BufConsumer<T>, Owned<[MaybeUninit<T>], A>, T, A> {
         ConsumerSetBuilder {
             capacity: self.capacity_,
-            consumer: BuffConsumer::new(),
+            consumer: BufConsumer::new(),
             buffer_: self.buffer_,
             alloc: self.alloc_,
             _use_t_: PhantomData,
@@ -243,13 +243,13 @@ where
     pub fn pipe_into_output<O>(
         self,
         output: O,
-    ) -> ConsumerSetBuilder<DeviceConsumer<O, T>, Owned<[MaybeUninit<T>], A>, T, A>
+    ) -> ConsumerSetBuilder<DevConsumer<O, T>, Owned<[MaybeUninit<T>], A>, T, A>
     where
         O: TrOutput<T>,
     {
         ConsumerSetBuilder {
             capacity: self.capacity_,
-            consumer: DeviceConsumer::new(output),
+            consumer: DevConsumer::new(output),
             buffer_: self.buffer_,
             alloc: self.alloc_,
             _use_t_: PhantomData,
@@ -266,15 +266,15 @@ where
         self,
         input: I,
         output: O,
-    ) -> ReadyBuilder<DeviceProducer<I, T>, DeviceConsumer<O, T>, Owned<[MaybeUninit<T>], A>, T, A>
+    ) -> ReadyBuilder<DevProducer<I, T>, DevConsumer<O, T>, Owned<[MaybeUninit<T>], A>, T, A>
     where
         I: TrInput<T>,
         O: TrOutput<T>,
     {
         ReadyBuilder {
             capacity: self.capacity_,
-            producer: DeviceProducer::new(input),
-            consumer: DeviceConsumer::new(output),
+            producer: DevProducer::new(input),
+            consumer: DevConsumer::new(output),
             buffer: self.buffer_,
             alloc: self.alloc_,
             _use_t_: PhantomData,
@@ -295,8 +295,8 @@ where
     {
         ReadyBuilder {
             capacity: self.capacity_,
-            producer: BuffProducer::new(),
-            consumer: BuffConsumer::new(),
+            producer: BufProducer::new(),
+            consumer: BufConsumer::new(),
             buffer: self.buffer_,
             alloc: self.alloc_,
             _use_t_: PhantomData,
@@ -329,11 +329,11 @@ where
     A: TrMalloc + Clone,
 {
     /// 消费端为被动模式：调用者驱动读取。
-    pub fn consumer_passive(self) -> ReadyBuilder<P, BuffConsumer<T>, B, T, A> {
+    pub fn consumer_passive(self) -> ReadyBuilder<P, BufConsumer<T>, B, T, A> {
         ReadyBuilder {
             capacity: self.capacity,
             producer: self.producer,
-            consumer: BuffConsumer::new(),
+            consumer: BufConsumer::new(),
             buffer: self.buffer_,
             alloc: self.alloc,
             _use_t_: PhantomData,
@@ -344,14 +344,14 @@ where
     pub fn pipe_into_output<O>(
         self,
         output: O,
-    ) -> ReadyBuilder<P, DeviceConsumer<O, T>, B, T, A>
+    ) -> ReadyBuilder<P, DevConsumer<O, T>, B, T, A>
     where
         O: TrOutput<T>,
     {
         ReadyBuilder {
             capacity: self.capacity,
             producer: self.producer,
-            consumer: DeviceConsumer::new(output),
+            consumer: DevConsumer::new(output),
             buffer: self.buffer_,
             alloc: self.alloc,
             _use_t_: PhantomData,
@@ -385,10 +385,10 @@ where
     A: TrMalloc + Clone,
 {
     /// 生产端为被动模式：调用者驱动写入。
-    pub fn producer_passive(self) -> ReadyBuilder<BuffProducer<T>, C, B, T, A> {
+    pub fn producer_passive(self) -> ReadyBuilder<BufProducer<T>, C, B, T, A> {
         ReadyBuilder {
             capacity: self.capacity,
-            producer: BuffProducer::new(),
+            producer: BufProducer::new(),
             consumer: self.consumer,
             buffer: self.buffer_,
             alloc: self.alloc,
@@ -400,13 +400,13 @@ where
     pub fn pipe_from_input<I>(
         self,
         input: I,
-    ) -> ReadyBuilder<DeviceProducer<I, T>, C, B, T, A>
+    ) -> ReadyBuilder<DevProducer<I, T>, C, B, T, A>
     where
         I: TrInput<T>,
     {
         ReadyBuilder {
             capacity: self.capacity,
-            producer: DeviceProducer::new(input),
+            producer: DevProducer::new(input),
             consumer: self.consumer,
             buffer: self.buffer_,
             alloc: self.alloc,
@@ -513,7 +513,7 @@ mod sealed {
 
 impl sealed::Sealed for () {}
 
-impl<B, T, A> BuildOutcome<BuffProducer<T>, BuffConsumer<T>, B, T, A> for ()
+impl<B, T, A> BuildOutcome<BufProducer<T>, BufConsumer<T>, B, T, A> for ()
 where
     B: Send + Sync +BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
@@ -522,48 +522,48 @@ where
     type Output = SpscPair<B, T, A>;
 
     fn assemble(
-        core_ref: CoreRef<BuffProducer<T>, BuffConsumer<T>, B, T, A>,
+        core_ref: CoreRef<BufProducer<T>, BufConsumer<T>, B, T, A>,
         _alloc: A,
     ) -> SpscPair<B, T, A> {
         (Producer::new(core_ref.clone()), Consumer::new(core_ref))
     }
 }
 
-impl<I, B, T, A> BuildOutcome<DeviceProducer<I, T>, BuffConsumer<T>, B, T, A> for ()
+impl<I, B, T, A> BuildOutcome<DevProducer<I, T>, BufConsumer<T>, B, T, A> for ()
 where
     I: Send + Sync + TrInput<T>,
     B: Send + Sync +BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type Output = Consumer<DeviceProducer<I, T>, BuffConsumer<T>, B, T, A>;
+    type Output = Consumer<DevProducer<I, T>, BufConsumer<T>, B, T, A>;
 
     fn assemble(
-        core_ref: CoreRef<DeviceProducer<I, T>, BuffConsumer<T>, B, T, A>,
+        core_ref: CoreRef<DevProducer<I, T>, BufConsumer<T>, B, T, A>,
         _alloc: A,
     ) -> Self::Output {
         Consumer::new(core_ref)
     }
 }
 
-impl<O, B, T, A> BuildOutcome<BuffProducer<T>, DeviceConsumer<O, T>, B, T, A> for ()
+impl<O, B, T, A> BuildOutcome<BufProducer<T>, DevConsumer<O, T>, B, T, A> for ()
 where
     O: Send + Sync + TrOutput<T>,
     B: Send + Sync +BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type Output = Producer<BuffProducer<T>, DeviceConsumer<O, T>, B, T, A>;
+    type Output = Producer<BufProducer<T>, DevConsumer<O, T>, B, T, A>;
 
     fn assemble(
-        core_ref: CoreRef<BuffProducer<T>, DeviceConsumer<O, T>, B, T, A>,
+        core_ref: CoreRef<BufProducer<T>, DevConsumer<O, T>, B, T, A>,
         _alloc: A,
     ) -> Self::Output {
         Producer::new(core_ref)
     }
 }
 
-impl<I, O, B, T, A> BuildOutcome<DeviceProducer<I, T>, DeviceConsumer<O, T>, B, T, A>
+impl<I, O, B, T, A> BuildOutcome<DevProducer<I, T>, DevConsumer<O, T>, B, T, A>
     for ()
 where
     I: Send + Sync + TrInput<T>,
@@ -572,10 +572,10 @@ where
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type Output = Pipeline<DeviceProducer<I, T>, DeviceConsumer<O, T>, B, T, A>;
+    type Output = Pipeline<DevProducer<I, T>, DevConsumer<O, T>, B, T, A>;
 
     fn assemble(
-        core_ref: CoreRef<DeviceProducer<I, T>, DeviceConsumer<O, T>, B, T, A>,
+        core_ref: CoreRef<DevProducer<I, T>, DevConsumer<O, T>, B, T, A>,
         _alloc: A,
     ) -> Self::Output {
         Pipeline::new(core_ref)

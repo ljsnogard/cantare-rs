@@ -38,7 +38,7 @@ use super::{
 // ---------------------------------------------------------------------------
 
 struct BuffObsv {
-    demand_: AtomexPtrOwned<Option<Demand<usize>>>,
+    demand_: AtomexPtrOwned<Demand<usize>>,
 }
 
 impl BuffObsv {
@@ -48,9 +48,25 @@ impl BuffObsv {
         }
     }
 
-    pub fn set_demand(&self, demand: &Option<Demand<usize>>) {
-        let p = demand as *const _ as *mut Option<Demand<usize>>;
-        self.demand_.store(p);
+    /// 假定 Demand 指针为空，设置新的 Demand。返回设置是否成功。
+    #[inline]
+    pub fn try_set_demand(
+        &self,
+        demand: &Demand<usize>,
+    ) -> bool {
+        let p = demand as *const _ as *mut Demand<usize>;
+        let p = unsafe { core::ptr::NonNull::new_unchecked(p) };
+        self.demand_
+            .try_spin_init(p)
+            .is_ok()
+    }
+
+    /// 假定 Demand 指针非空，重新置空。返回此前存储的指针。
+    #[inline]
+    pub fn try_reset_demand(
+        &self,
+    ) -> Result<ptr::NonNull<Demand<usize>>, *mut Demand<usize>> {
+        self.demand_.try_reset()
     }
 }
 
@@ -78,19 +94,31 @@ impl BuffObsv {
 /// 注册槽位）；完成 / drop 时 `3 → 1`（注销槽位 → CAS 清 `TX_STNDBY` →
 /// 清 demand）。因为 `demand` 只在态 3 被 fire 读取、写入先于 armed 置位、
 /// 清除后于 armed 清位，它是**普通字段**（无需原子）。
-pub struct BuffProducer<T> {
+pub struct BufProducer<T> {
     buf_obsv_: BuffObsv,
     wakeslot_: WakeSlot,
     _unuse_t_: PhantomData<fn() -> T>,
 }
 
-impl<T> BuffProducer<T> {
+impl<T> BufProducer<T> {
     pub(super) const fn new() -> Self {
-        BuffProducer {
+        BufProducer {
             buf_obsv_: BuffObsv::new(),
             wakeslot_: WakeSlot::new(),
             _unuse_t_: PhantomData,
         }
+    }
+
+    #[inline]
+    pub(super) fn try_set_demand(&self, demand: &Demand<usize>) -> bool {
+        self.buf_obsv_.try_set_demand(demand)
+    }
+
+    #[inline]
+    pub(super) fn try_reset_demand(
+        &self,
+    ) -> Result<ptr::NonNull<Demand<usize>>, *mut Demand<usize>> {
+        self.buf_obsv_.try_reset_demand()
     }
 }
 
@@ -98,19 +126,31 @@ impl<T> BuffProducer<T> {
 ///
 /// 三态生命周期同 [`BuffProducer`]（armed 位为 `RX_STNDBY`）：fire 仅在
 /// **等待中**（态 3）访问 `demand` 判断兴趣。
-pub struct BuffConsumer<T> {
+pub struct BufConsumer<T> {
     buf_obsv_: BuffObsv,
     wakeslot_: WakeSlot,
     _unuse_t_: PhantomData<fn() -> T>,
 }
 
-impl<T> BuffConsumer<T> {
+impl<T> BufConsumer<T> {
     pub(super) const fn new() -> Self {
-        BuffConsumer {
+        BufConsumer {
             buf_obsv_: BuffObsv::new(),
             wakeslot_: WakeSlot::new(),
             _unuse_t_: PhantomData,
         }
+    }
+
+    #[inline]
+    pub(super) fn try_set_demand(&self, demand: &Demand<usize>) -> bool {
+        self.buf_obsv_.try_set_demand(demand)
+    }
+
+    #[inline]
+    pub(super) fn try_reset_demand(
+        &self,
+    ) -> Result<ptr::NonNull<Demand<usize>>, *mut Demand<usize>> {
+        self.buf_obsv_.try_reset_demand()
     }
 }
 
@@ -130,7 +170,7 @@ impl<T> BuffConsumer<T> {
 /// `react_async`：循环地把 `TrInput` 的数据搬进传入的可写段（经 `abs_buff`
 /// 的 `move_items_from_input_async`），直到段满或设备暂无数据。泵由核心在
 /// 提交路径上同步轮询到完成（`Waker::noop`，不 spawn）。
-pub struct DeviceProducer<TyInput, T>
+pub struct DevProducer<TyInput, T>
 where
     TyInput: TrInput<T>,
 {
@@ -138,12 +178,12 @@ where
     _use_t: PhantomData<fn() -> T>,
 }
 
-impl<TyInput, T> DeviceProducer<TyInput, T>
+impl<TyInput, T> DevProducer<TyInput, T>
 where
     TyInput: TrInput<T>,
 {
     pub(super) fn new(input: TyInput) -> Self {
-        DeviceProducer {
+        DevProducer {
             input_: input,
             _use_t: PhantomData,
         }
@@ -155,7 +195,7 @@ where
 ///
 /// `react_async`：循环地把传入的可读段数据搬到 `TrOutput`（经
 /// `move_items_to_output_async`），直到段空或设备暂时不能接收。
-pub struct DeviceConsumer<TyOutput, T>
+pub struct DevConsumer<TyOutput, T>
 where
     TyOutput: TrOutput<T>,
 {
@@ -163,12 +203,12 @@ where
     _use_t_: PhantomData<fn() -> T>,
 }
 
-impl<TyOutput, T> DeviceConsumer<TyOutput, T>
+impl<TyOutput, T> DevConsumer<TyOutput, T>
 where
     TyOutput: TrOutput<T>,
 {
     pub(super) fn new(output: TyOutput) -> Self {
-        DeviceConsumer {
+        DevConsumer {
             output_: output,
             _use_t_: PhantomData,
         }
@@ -179,17 +219,12 @@ where
 // 端契约实现
 // ---------------------------------------------------------------------------
 
-impl<T> TrProducer for BuffProducer<T> {
+impl<T> TrProducer for BufProducer<T> {
     type Data = T;
 
     #[inline]
     fn is_passive(&self) -> bool {
         true
-    }
-
-    #[inline]
-    fn set_demand(&self, demand: &Option<Demand<usize>>) {
-        self.buf_obsv_.set_demand(demand);
     }
 
     fn check(&self, event: ProducerHookEvent) -> bool {
@@ -199,10 +234,7 @@ impl<T> TrProducer for BuffProducer<T> {
         let Option::Some(demand_ptr) = self.buf_obsv_.demand_.load() else {
             return false;
         };
-        let opt_demand = unsafe { demand_ptr.as_ref() };
-        let Option::Some(demand) = opt_demand else {
-            return false;
-        };
+        let demand = unsafe { demand_ptr.as_ref() };
         let min = demand.min().copied().unwrap_or(0);
         free > min
     }
@@ -220,17 +252,12 @@ impl<T> TrProducer for BuffProducer<T> {
     }
 }
 
-impl<T> TrConsumer for BuffConsumer<T> {
+impl<T> TrConsumer for BufConsumer<T> {
     type Data = T;
 
     #[inline]
     fn is_passive(&self) -> bool {
         true
-    }
-
-    #[inline]
-    fn set_demand(&self, demand: &Option<Demand<usize>>) {
-        self.buf_obsv_.set_demand(demand);
     }
 
     fn check(&self, event: ConsumerHookEvent) -> bool {
@@ -240,10 +267,7 @@ impl<T> TrConsumer for BuffConsumer<T> {
         let Option::Some(demand_ptr) = self.buf_obsv_.demand_.load() else {
             return false;
         };
-        let opt_demand = unsafe { demand_ptr.as_ref() };
-        let Option::Some(demand) = opt_demand else {
-            return false;
-        };
+        let demand = unsafe { demand_ptr.as_ref() };
         let min = demand.min().copied().unwrap_or(0);
         free > min
     }
@@ -257,7 +281,7 @@ impl<T> TrConsumer for BuffConsumer<T> {
     }
 }
 
-impl<TyInput, T> TrProducer for DeviceProducer<TyInput, T>
+impl<TyInput, T> TrProducer for DevProducer<TyInput, T>
 where
     TyInput: TrInput<T>,
 {
@@ -306,7 +330,7 @@ where
     }
 }
 
-impl<TyOutput, T> TrConsumer for DeviceConsumer<TyOutput, T>
+impl<TyOutput, T> TrConsumer for DevConsumer<TyOutput, T>
 where
     TyOutput: TrOutput<T>,
 {

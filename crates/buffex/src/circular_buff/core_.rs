@@ -87,12 +87,18 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use abs_buff::Demand;
-use atomic_sync::x_deps::atomex::{AtomicFlags, CmpxchResult};
-use mm_ptr::{
-    Owned,
-    x_deps::abs_mm::mem_alloc::{CoreAlloc, TrMalloc},
+use abs_buff::{
+    Demand,
+    error::{ReadErrTag, WriteErrTag, TrTaggedError, TrErrTag},
+    gen_may_cancel_future,
+    x_deps::{anylr, abs_cancel},
 };
+use abs_cancel::{TrCancellationToken, TrMayCancel};
+use abs_mm::mem_alloc::{CoreAlloc, TrMalloc};
+use anylr::SomeOf;
+use atomex::{AtomicFlags, CmpxchResult};
+use atomic_sync::x_deps::atomex;
+use mm_ptr::{Owned, x_deps::abs_mm,};
 
 use super::{
     abs_comp_::{
@@ -177,7 +183,10 @@ pub(super) struct IoPos {
 }
 
 impl IoPos {
-    pub const MASK: usize = REVERSION | POS_MASK;
+    /// 本类型在状态字中「拥有」的位：两个位置字段（`rp` 低 `POS_BITS` 位、
+    /// `wp` 次 `POS_BITS` 位）与 REVERSION 位。`pack` 只覆盖这些位，其余
+    /// 标志位由传入的基座状态字原样保留。
+    pub const MASK: usize = REVERSION | POS_MASK | (POS_MASK << POS_BITS);
 
     /// 从 `atm_stat_` 的状态字解出位置与保留标志。
     pub fn unpack(state: usize, cap: usize) -> Self {
@@ -205,34 +214,41 @@ impl IoPos {
         self.capacity_ - self.data_size()
     }
 
-    /// 打包回完整状态字：位置 + 保留标志 + 按 `rv` 重算的 REVERSION 位。
+    /// 以传入的基座状态字 `state` 打包回完整状态字：`state` 中本类型不拥有的
+    /// 位（[`IoPos::MASK`] 之外——关闭、待机、待办泵等标志）**原样保留**；
+    /// 本类型拥有的位（`rp` / `wp` 位置字段与 REVERSION 位）用自身的新值
+    /// **覆盖**（先清除基座中的旧值再写入，而非按位或——否则旧位置会残留并
+    /// 与新位置混合）。
     pub fn pack(&self, state: usize) -> usize {
-        let s = self.rp | (self.wp << POS_BITS) | state;
+        let s = (state & !Self::MASK) | self.rp | (self.wp << POS_BITS);
         if self.rv { s | REVERSION } else { s & !REVERSION }
     }
 
     /// 推进写者位置：`wp += amount`（物理上环绕）；**写者越过缓冲区物理末端
     /// （`wp + amount >= capacity`）时设置 REVERSION flag**，且一旦置位保持
-    /// 到读者追上来为止。
+    /// 到读者追上来为止。返回推进后的**新位置状态**（不含任何标志位）；需要
+    /// 写回 `atm_stat_` 时以原状态字为基座调用 [`IoPos::pack`]。
     ///
     /// 前置：`amount <= free_size`（不允许写过头；恰好写满时进入
     /// `wp == rp && rv` 的满态）。
     pub fn advance_wp(&self, amount: usize) -> Self {
         debug_assert!(amount <= self.free_size());
         let new_wp = self.wp + amount;
-        let rv = new_wp >= self.capacity_;
+        let crossed = new_wp >= self.capacity_;
         Self {
-            rv,
+            // 越过末端置位；已置位则保持（写者仍在读者之后，直到读者追上）。
+            rv: self.rv || crossed,
             rp: self.rp,
-            wp: new_wp & self.capacity_,
+            wp: new_wp % self.capacity_,
             capacity_: self.capacity_,
         }
     }
 
     /// 推进读者位置：`rp += amount`（物理上环绕）；**读者越过缓冲区物理末端
     /// （`rp + amount >= capacity`）时清除 REVERSION flag**——读者跨过末端后，
-    /// 写者的原始位置重新位于读者之前，恢复未跨状态。返回值是完整的新状态字，
-    /// 可以直接写回 `atm_stat_`（其余标志位原样保留）。
+    /// 写者的原始位置重新位于读者之前，恢复未跨状态。返回推进后的**新位置状态**
+    /// （不含任何标志位）；需要写回 `atm_stat_` 时以原状态字为基座调用
+    /// [`IoPos::pack`]。
     ///
     /// 前置：`amount <= data_size`（不允许读过头；恰好读空时回到
     /// `wp == rp && !rv` 的空态）。
@@ -308,6 +324,56 @@ where
     producer_: UnsafeCell<P>,
     consumer_: UnsafeCell<C>,
     _unuse_t_: PhantomData<fn() -> T>,
+}
+
+/// 设计为只给 SPSC 中的 Consumer<P, C, B, T, A> 或者 Producer<P, C, B, T, A> 
+/// 调用。实际上不可并发调用。
+impl<C, B, T> CircCore<BufProducer<T>, C, B, T>
+where
+    // P: Send + Sync + TrProducer<Data = T>,
+    C: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
+{
+    pub fn try_write_<'f>(
+        &'f self,
+        demand: &'f Demand<usize>,
+    ) -> SomeOf<ReclSliceMut<'f, T, WriterReclaim<'f, Self>>, TxError<usize>> {
+        self.try_write_at(demand)
+            .map(|(start, take)| self.write_segm(start, take))
+            .into()
+    }
+
+    pub fn write_async_<'f>(
+        &'f self,
+        demand: &'f Demand<usize>,
+    ) -> CorePassiveWriteAsync<'f, C, B, T> {
+        CorePassiveWriteAsync(self, demand)
+    }
+}
+
+impl<P, B, T> CircCore<P, BufConsumer<T>, B, T>
+where
+    P: Send + Sync + TrProducer<Data = T>,
+    // C: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
+{
+    pub fn try_read_<'f>(
+        &'f self,
+        demand: &'f Demand<usize>,
+    ) -> SomeOf<ReclSliceRef<'f, T, ReaderReclaim<'f, Self>>, RxError<usize>> {
+        self.try_read_at(demand)
+            .map(|(start, take)| self.read_segm(start, take))
+            .into()
+    }
+
+    pub fn read_async_<'f>(
+        &'f self,
+        demand: &'f Demand<usize>,
+    ) -> CorePassiveReadAsync<'f, P, B, T> {
+        CorePassiveReadAsync(self, demand)
+    }
 }
 
 impl<P, C, B, T> CircCore<P, C, B, T>
@@ -775,3 +841,75 @@ impl WakeSlot {
     }
 }
 
+use super::circ_buff_::{BufConsumer, BufProducer};
+
+#[gen_may_cancel_future(CorePassiveRead)]
+async fn core_passive_read_async_<'f, P, B, T, C>(
+    core: &'f CircCore<P, BufConsumer<T>, B, T>,
+    demand: &'f Demand<usize>,
+    cancel: &'f mut C,
+) -> SomeOf<
+    ReclSliceRef<'f, T, ReaderReclaim<'f, CircCore<P, BufConsumer<T>, B, T>>>,
+    RxError<usize>,
+>
+where
+    P: Send + Sync + TrProducer<Data = T>,
+    // K: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
+    C: TrCancellationToken + Clone,
+{
+    let x = core.try_read_(demand);
+    if x.contains_left() {
+        return x;
+    };
+    let err = x.as_ref().pick_right().expect("");
+    if err.err_tag().should_terminate() {
+        return x;
+    };
+    let consume = core.consumer_ref();
+    if !consume.try_set_demand(demand) {
+        unreachable!("Concurrent call `core_passive_read_async_`")
+    }
+    // Safety:
+    // - this is guaranteed by `read_async_` should only be called by 
+    //   Consumer<> which is behand a mut reference. 
+    let consumer = unsafe { &mut *core.consumer_.get() };
+    SomeOf::new_right(RxError::Unavailable)
+}
+
+#[gen_may_cancel_future(CorePassiveWrite)]
+async fn core_passive_write_async_<'f, K, B, T, C>(
+    core: &'f CircCore<BufProducer<T>, K, B, T>,
+    demand: &'f Demand<usize>,
+    cancel: &'f mut C,
+) -> SomeOf<
+    ReclSliceMut<'f, T, WriterReclaim<'f, CircCore<BufProducer<T>, K, B, T>>>,
+    TxError<usize>,
+>
+where
+    // P: Send + Sync + TrProducer<Data = T>,
+    K: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
+    C: TrCancellationToken + Clone,
+{
+    let x = core.try_write_(demand);
+    if x.contains_left() {
+        return x;
+    };
+    let err = x.as_ref().pick_right().expect("");
+    if err.err_tag().should_terminate() {
+        return x;
+    };
+    let producer = core.producer_ref();
+    if !producer.try_set_demand(demand) {
+        unreachable!("Concurrent call `core_passive_write_async_`")
+    };
+    // Safety:
+    // - this is guaranteed by `read_async_` should only be called by 
+    //   Consumer<> which is behand a mut reference. 
+    let producer = unsafe { &mut *core.producer_.get() };
+
+    SomeOf::new_right(TxError::Unavailable)
+}

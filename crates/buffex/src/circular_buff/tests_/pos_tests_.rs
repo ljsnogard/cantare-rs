@@ -23,20 +23,35 @@
 //!   位置重新位于读者之前，恢复未跨状态。
 //!
 //! 两个推进函数的前置：`amount` 分别不超过 `free_size` / `data_size`（写不
-//! 过头、读不空读）。返回值是**完整状态字**（位置 + 其余标志位 + 重算的
-//! REVERSION），可直接写回 `atm_stat_`。
+//! 过头、读不空读）。它们返回**新的位置状态**（`IoPos`，不含任何标志位）。
+//!
+//! # pack 的「基座状态字」契约（本次重设计的核心）
+//!
+//! [`IoPos`] **不能**直接打包出 `atm_stat_` 所需的状态字——它不保存标志位。
+//! 写回时以 **`pack(base)`** 完成：传入一个**保留了原来状态**的基座状态字
+//! `base`，`pack` 用自身的新值**覆盖** `base` 中本类型「拥有」的位
+//! （[`IoPos::MASK`] = 两个位置字段 + REVERSION），其余位（关闭、待机、待办泵
+//! 等标志）由 `base` **原样保留**。因此 `pack` 是「**覆盖**」而非「或」——
+//! 若按位或，基座中的旧位置会残留并与新位置混合。
+//!
+//! 典型用法（与 `core_` 的 `advance_write` / `advance_read` 一致）：
+//!
+//! ```text
+//! let pos = IoPos::unpack(state_word, cap);
+//! let new_word = pos.advance_wp(amount).pack(state_word);
+//! ```
 //!
 //! # 测试的构造与判定方式（总述）
 //!
 //! * **构造**：用 [`state`] 辅助函数按位拼出原始状态字（`rp` 低 `POS_BITS`
 //!   位、`wp` 次 `POS_BITS` 位、需要时置 REVERSION 位），再经
-//!   [`IoPos::unpack`](super::super::core_::IoPos::unpack) 得到被测对象；
-//!   需要验证「推进」时，直接调用 `advance_wp` / `advance_rp` 并把返回的状态
-//!   字再次 `unpack` 观察结果。
-//! * **判定**：以「解出后的 `rp` / `wp` / `rv` 是否符合约定推导值」以及
-//!   「`data_size` / `free_size` 是否符合约定的空 / 满 / 部分量公式」为标志；
-//!   涉及标志保留的测试以「返回状态字中的非 REVERSION 标志位是否原样保留、
-//!   REVERSION 位是否按新位置重算」为标志。
+//!   [`IoPos::unpack`](super::super::core_::IoPos::unpack) 得到被测对象；推进
+//!   直接调用 `advance_wp` / `advance_rp` 获得新位置状态；需要状态字时用
+//!   `新状态.pack(基座)` 打包，必要时再 `unpack` 回读验证。
+//! * **判定**：以「新位置状态的 `rp` / `wp` / `rv` 是否符合约定推导值」、
+//!   「`data_size` / `free_size` 是否符合约定的空 / 满 / 部分量公式」以及
+//!   「`pack(base)` 是否保留 `base` 的标志位、并用新值覆盖位置与 REVERSION
+//!   （而非与旧位置相或）」为标志。
 
 use super::super::core_::{
     FLAG_MASK, IoPos, POS_BITS, POS_MASK, REVERSION,
@@ -85,18 +100,76 @@ fn unpack_extracts_positions_and_reversion() {
 }
 
 /// # 被测约定
-/// `pack` 与 `unpack` 互为逆：任意合法状态字 `s` 应满足
-/// `unpack(s).pack() == s`——包括 REVERSION 位（`rv == true` 时置位、
-/// `rv == false` 时清零）与**其余标志位**（关闭、待机、待办泵等必须原样保留，
-/// 这是「返回值可直接写回 `atm_stat_`」的前提）。
+/// `pack` 的「基座状态字」契约（本次重设计的核心）：`pack(base)` 保留 `base`
+/// 中本类型不拥有的位（[`IoPos::MASK`] 之外——其他标志位），用自身的新值
+/// **覆盖**拥有的位（`rp` / `wp` 位置字段 + REVERSION）。判定要点是**覆盖而
+/// 非或**：若按位或，`base` 中的旧位置会残留并与新位置混合（例如新 `rp = 0`
+/// 与旧 `rp = 3` 相或得 3）。
+///
+/// # 构造
+/// 构造一个挂着「旧位置 + 其他标志」的基座 `base`，再构造一个位置 / rv 与
+/// `base` 不同的 [`IoPos`]（模拟「从基座解出旧位置 → 推进 → 以原基座打包」的
+/// 真实流程），分别覆盖 `rv = false` 与 `rv = true` 两个方向。
+///
+/// # 判定
+/// (1) 打包字中 `MASK` 之外的位与 `base` 完全一致（其他标志原样保留）；
+/// (2) 打包字解出的 `rp` / `wp` / `rv` 为 `IoPos` 的新值（旧位置无残留、
+/// REVERSION 被覆盖为新值）——(1)(2) 同时满足才算遵守「保留基座 + 覆盖」契约。
+#[test]
+fn pack_overwrites_owned_bits_and_preserves_base_flags() {
+    let other = FLAG_MASK & !REVERSION;
+
+    // rv=false 方向：IoPos 位置 (0,5)，基座位置 (3,0) 且挂着其他标志。
+    let base = state(3, 0, false) | other;
+    let pos = IoPos::unpack(state(0, 5, false), CAP);
+    let word = pos.pack(base);
+    assert_eq!(
+        word & !IoPos::MASK,
+        base & !IoPos::MASK,
+        "MASK 之外的位（其他标志）必须与基座一致"
+    );
+    assert_eq!(
+        (IoPos::unpack(word, CAP).rp, IoPos::unpack(word, CAP).wp),
+        (0, 5),
+        "位置必须被覆盖：rp 字段应为 0（基座旧 rp=3 不得残留，即不得按位或）"
+    );
+    assert_eq!(word & REVERSION, 0, "rv=false：REVERSION 位被覆盖为 0");
+
+    // rv=true 方向：IoPos 置位 rv，基座无 REVERSION；位置亦不同。
+    let base = state(6, 1, false) | other;
+    let pos = IoPos::unpack(state(2, 4, true), CAP);
+    let word = pos.pack(base);
+    assert_eq!(word & !IoPos::MASK, base & !IoPos::MASK);
+    assert_eq!(
+        (IoPos::unpack(word, CAP).rp, IoPos::unpack(word, CAP).wp),
+        (2, 4),
+        "位置必须被覆盖（基座旧位置 (6,1) 不得残留）"
+    );
+    assert_ne!(word & REVERSION, 0, "rv=true：REVERSION 位被覆盖为 1");
+
+    // 反向覆盖：IoPos rv=false 覆盖基座中已置位的 REVERSION。
+    let base = state(1, 2, true) | other;
+    let pos = IoPos::unpack(state(3, 6, false), CAP);
+    let word = pos.pack(base);
+    assert_eq!(word & REVERSION, 0, "rv=false 必须清除基座中的 REVERSION 位");
+    assert_eq!(
+        (IoPos::unpack(word, CAP).rp, IoPos::unpack(word, CAP).wp),
+        (3, 6)
+    );
+    assert_eq!(word & other, other, "其他标志位仍由基座保留");
+}
+
+/// # 被测约定
+/// `unpack` 与 `pack` 互为逆：对任意合法状态字 `s`，`unpack(s).pack(s) == s`
+/// ——位置与 REVERSION 从 `s` 解出后原样覆盖回 `s`，其他标志位自然保留。
 ///
 /// # 构造
 /// 遍历空 / 满 / 未跨 / 已跨等典型位置组合逐对往返；并在其中一个状态字上
-/// 叠加全部非 REVERSION 标志位（`FLAG_MASK & !REVERSION`），模拟核心中
-/// 「位置提交时恰好挂着其他标志」的真实状态字。
+/// 叠加全部非 REVERSION 标志位（`FLAG_MASK & !REVERSION`），验证带标志的
+/// 状态字也能完整往返。
 ///
 /// # 判定
-/// `unpack(s).pack() == s` 严格相等——任一位置位、REVERSION 位或保留标志位
+/// `unpack(s).pack(s) == s` 严格相等——任一位置位、REVERSION 位或保留标志位
 /// 在往返中丢失 / 改变都会使断言失败。
 #[test]
 fn pack_roundtrips_the_full_state_word() {
@@ -196,13 +269,12 @@ fn data_size_full_when_positions_coincide_with_reversion() {
 /// `wp = 5`，仍在物理末端（7）之内。
 ///
 /// # 判定
-/// 返回状态字解出 `(rp, wp, rv) == (2, 5, false)` 且 data 由 1 增至 3——
+/// 返回的新位置状态 `(rp, wp, rv) == (2, 5, false)` 且 data 由 1 增至 3——
 /// 若实现误把未跨的推进也置了位，`rv` 断言即失败。
 #[test]
 fn advance_wp_stays_clear_within_the_ring() {
-    let s = state(2, 3, false);
-    let pos = IoPos::unpack(s, CAP);
-    let next = IoPos::unpack(pos.advance_wp(2).pack(s), CAP);
+    let pos = IoPos::unpack(state(2, 3, false), CAP);
+    let next = pos.advance_wp(2);
     assert_eq!((next.rp, next.wp, next.rv), (2, 5, false));
     assert_eq!(next.data_size(), 3);
 }
@@ -216,13 +288,12 @@ fn advance_wp_stays_clear_within_the_ring() {
 /// `6 + 3 = 9 >= 8`，新写者位置 `9 % 8 = 1`——写者越过末端 7、绕回开头。
 ///
 /// # 判定
-/// 返回状态字解出 `(rp, wp, rv) == (2, 1, true)`，且 data 由 4 增至 7
+/// 返回的新位置状态 `(rp, wp, rv) == (2, 1, true)`，且 data 由 4 增至 7
 /// （`1 + 8 - 2`）——`rv` 是否因「越过物理末端」而置位，是本测试的标志。
 #[test]
 fn advance_wp_sets_reversion_when_crossing_the_end() {
-    let s = state(2, 6, false);
-    let pos = IoPos::unpack(s, CAP);
-    let next = IoPos::unpack(pos.advance_wp(3).pack(s), CAP);
+    let pos = IoPos::unpack(state(2, 6, false), CAP);
+    let next = pos.advance_wp(3);
     assert_eq!((next.rp, next.wp, next.rv), (2, 1, true));
     assert_eq!(next.data_size(), 7);
 }
@@ -236,13 +307,12 @@ fn advance_wp_sets_reversion_when_crossing_the_end() {
 /// 停在末端、下一步即绕回 0。
 ///
 /// # 判定
-/// 返回状态字解出 `(rp, wp, rv) == (1, 0, true)`——若实现用 `>` 而非 `>=`
+/// 返回的新位置状态 `(rp, wp, rv) == (1, 0, true)`——若实现用 `>` 而非 `>=`
 /// 判越界，`rv` 将保持 false，断言即失败。
 #[test]
 fn advance_wp_exact_end_cross_sets_reversion() {
-    let s = state(1, 5, false);
-    let pos = IoPos::unpack(s, CAP);
-    let next = IoPos::unpack(pos.advance_wp(3).pack(s), CAP);
+    let pos = IoPos::unpack(state(1, 5, false), CAP);
+    let next = pos.advance_wp(3);
     assert_eq!((next.rp, next.wp, next.rv), (1, 0, true));
     assert_eq!(next.data_size(), 7);
 }
@@ -257,13 +327,12 @@ fn advance_wp_exact_end_cross_sets_reversion() {
 /// `free_size = 4` 格：`6 + 4 = 10`，新写者位置 `10 % 8 = 2 == rp`。
 ///
 /// # 判定
-/// 返回状态字解出 `(rp, wp, rv) == (2, 2, true)`，且 `data_size == CAP`、
+/// 返回的新位置状态 `(rp, wp, rv) == (2, 2, true)`，且 `data_size == CAP`、
 /// `free_size == 0`——若满态未被置位 / 被误判为空，data 或 rv 断言即失败。
 #[test]
 fn advance_wp_to_full_ends_at_coincident_positions_with_reversion() {
-    let s = state(2, 6, false);
-    let pos = IoPos::unpack(s, CAP);
-    let next = IoPos::unpack(pos.advance_wp(4).pack(s), CAP);
+    let pos = IoPos::unpack(state(2, 6, false), CAP);
+    let next = pos.advance_wp(4);
     assert_eq!((next.rp, next.wp, next.rv), (2, 2, true));
     assert_eq!(next.data_size(), CAP);
     assert_eq!(next.free_size(), 0);
@@ -278,13 +347,12 @@ fn advance_wp_to_full_ends_at_coincident_positions_with_reversion() {
 /// 推进 2 格：`2 + 2 = 4 < 8` 未越界，新写者位置 4——写者仍在读者之后。
 ///
 /// # 判定
-/// 返回状态字解出 `(rp, wp, rv) == (5, 4, true)` 且 data 由 5 增至 7——
+/// 返回的新位置状态 `(rp, wp, rv) == (5, 4, true)` 且 data 由 5 增至 7——
 /// `rv` 是否在未越界的推进中保持置位，是本测试的标志。
 #[test]
 fn advance_wp_keeps_reversion_while_writer_stays_wrapped() {
-    let s = state(5, 2, true);
-    let pos = IoPos::unpack(s, CAP);
-    let next = IoPos::unpack(pos.advance_wp(2).pack(s), CAP);
+    let pos = IoPos::unpack(state(5, 2, true), CAP);
+    let next = pos.advance_wp(2);
     assert_eq!((next.rp, next.wp, next.rv), (5, 4, true));
     assert_eq!(next.data_size(), 7);
 }
@@ -303,21 +371,19 @@ fn advance_wp_keeps_reversion_while_writer_stays_wrapped() {
 /// 未跨状态 `(rp, wp) = (2, 5)`（rv = false）推进 2 格（rp → 4）。
 ///
 /// # 判定
-/// 两场景分别解出 `(6, 2, true)` 与 `(4, 5, false)`，data 相应减少——
+/// 两场景分别得到 `(6, 2, true)` 与 `(4, 5, false)`，data 相应减少——
 /// `rv` 在未越界的读者推进中是否保持不变，是本测试的标志。
 #[test]
 fn advance_rp_keeps_reversion_without_crossing() {
     // 已跨（rv = true）：保持置位。
-    let s = state(5, 2, true);
-    let pos = IoPos::unpack(s, CAP);
-    let next = IoPos::unpack(pos.advance_rp(1).pack(s), CAP);
+    let pos = IoPos::unpack(state(5, 2, true), CAP);
+    let next = pos.advance_rp(1);
     assert_eq!((next.rp, next.wp, next.rv), (6, 2, true));
     assert_eq!(next.data_size(), 4, "5 - 1");
 
     // 未跨（rv = false）：保持清零。
-    let s = state(2, 5, false);
-    let pos = IoPos::unpack(s, CAP);
-    let next = IoPos::unpack(pos.advance_rp(2).pack(s), CAP);
+    let pos = IoPos::unpack(state(2, 5, false), CAP);
+    let next = pos.advance_rp(2);
     assert_eq!((next.rp, next.wp, next.rv), (4, 5, false));
     assert_eq!(next.data_size(), 1, "3 - 2");
 }
@@ -333,13 +399,12 @@ fn advance_rp_keeps_reversion_without_crossing() {
 /// 此时 `wp = 2 >= 1`。
 ///
 /// # 判定
-/// 返回状态字解出 `(rp, wp, rv) == (1, 2, false)` 且 data 由 5 减至 1
+/// 返回的新位置状态 `(rp, wp, rv) == (1, 2, false)` 且 data 由 5 减至 1
 /// （`2 - 1`）——`rv` 是否因「越过物理末端」而清除，是本测试的标志。
 #[test]
 fn advance_rp_clears_reversion_when_crossing_the_end() {
-    let s = state(5, 2, true);
-    let pos = IoPos::unpack(s, CAP);
-    let next = IoPos::unpack(pos.advance_rp(4).pack(s), CAP);
+    let pos = IoPos::unpack(state(5, 2, true), CAP);
+    let next = pos.advance_rp(4);
     assert_eq!((next.rp, next.wp, next.rv), (1, 2, false));
     assert_eq!(next.data_size(), 1);
 }
@@ -354,64 +419,63 @@ fn advance_rp_clears_reversion_when_crossing_the_end() {
 /// 格：`5 + 5 = 10`，新读者位置 `10 % 8 = 2 == wp`。
 ///
 /// # 判定
-/// 返回状态字解出 `(rp, wp, rv) == (2, 2, false)`，且 `data_size == 0`、
+/// 返回的新位置状态 `(rp, wp, rv) == (2, 2, false)`，且 `data_size == 0`、
 /// `free_size == CAP`——若读空后 `rv` 未被清除（与满态混淆），断言即失败。
 #[test]
 fn advance_rp_to_empty_ends_at_coincident_positions_without_reversion() {
-    let s = state(5, 2, true);
-    let pos = IoPos::unpack(s, CAP);
-    let next = IoPos::unpack(pos.advance_rp(5).pack(s), CAP);
+    let pos = IoPos::unpack(state(5, 2, true), CAP);
+    let next = pos.advance_rp(5);
     assert_eq!((next.rp, next.wp, next.rv), (2, 2, false));
     assert_eq!(next.data_size(), 0);
     assert_eq!(next.free_size(), CAP);
 }
 
 // ---------------------------------------------------------------------------
-// 标志位保留：advance_* 的返回值是完整状态字
+// 推进 + pack：以原状态字为基座打包，验证标志保留与位置覆盖
 // ---------------------------------------------------------------------------
 
 /// # 被测约定
-/// `advance_wp` / `advance_rp` 的返回值是**完整状态字**：除 REVERSION 按新
-/// 位置重算外，其余标志位（关闭、待机、待办泵等，掩码 `FLAG_MASK & !REVERSION`）
-/// 必须**原样保留**——这是「返回值可以直接写回 `atm_stat_`」、位置提交不
-/// 破坏对端标志的前提。
+/// `advance_*` 只产生新的位置状态；写回 `atm_stat_` 必须经
+/// `新状态.pack(原状态字)`：原状态字中的其余标志位（关闭、待机、待办泵等，
+/// 掩码 `FLAG_MASK & !REVERSION`）**原样保留**，位置字段与 REVERSION 位被
+/// 新值**覆盖**（旧位置不得残留）。
 ///
 /// # 构造
 /// 在原始状态字上叠加全部非 REVERSION 标志位 `other`，模拟核心中「位置提交时
 /// 恰好挂着其他标志」（如对端正待机 / 泵有待办）的真实状态字；对带标志的状态
-/// 分别执行 `advance_wp`（未跨、已跨各一例）与 `advance_rp`（清除 rv 一例）。
+/// 分别执行 `advance_wp`（未跨、已跨各一例）与 `advance_rp`（清除 rv 一例），
+/// 再以原状态字为基座 `pack`。
 ///
 /// # 判定
-/// 返回状态字中 `other` 位逐一保持（`word & other == other`）；同时 REVERSION
-/// 位按推进路径重算（未跨推进保持 0、已跨推进保持 1、读者越界清除为 0）——
-/// 「保留其余标志 + 重算 REVERSION」两者同时满足才算遵守约定。
+/// 打包字中 `other` 位逐一保持（`word & other == other`）、`MASK` 之外的位与
+/// 基座一致；同时解出的位置为新值、REVERSION 位按推进路径重算（未跨推进保持
+/// 0、已跨推进保持 1、读者越界清除为 0）——「保留其余标志 + 覆盖位置与
+/// REVERSION」两者同时满足才算遵守约定。
 #[test]
-fn advance_preserves_unrelated_flags_in_the_state_word() {
+fn advance_then_pack_preserves_unrelated_flags() {
     let other = FLAG_MASK & !REVERSION;
     assert_eq!(other & REVERSION, 0, "other 必须不含 REVERSION 位");
 
     // 未跨状态推进写者：rv 保持 0，other 保留。
     let s = state(2, 5, false) | other;
-    let pos = IoPos::unpack(s, CAP);
-    let w = pos.advance_wp(2);
-    assert_eq!(w & other, other, "advance_wp 后其余标志位原样保留");
-    assert_eq!(w & REVERSION, 0, "未跨推进不得置位 REVERSION");
-    assert_eq!((IoPos::unpack(w, CAP).wp, IoPos::unpack(w, CAP).rv), (7, false));
+    let word = IoPos::unpack(s, CAP).advance_wp(2).pack(s);
+    assert_eq!(word & !IoPos::MASK, s & !IoPos::MASK, "其余标志位原样保留");
+    assert_eq!(word & REVERSION, 0, "未跨推进不得置位 REVERSION");
+    assert_eq!((IoPos::unpack(word, CAP).rp, IoPos::unpack(word, CAP).wp), (2, 7));
 
     // 已跨状态推进写者：rv 保持 1，other 保留。
     let s = state(5, 2, true) | other;
-    let pos = IoPos::unpack(s, CAP);
-    let w = pos.advance_wp(2);
-    assert_eq!(w & other, other, "advance_wp（已跨）后其余标志位原样保留");
-    assert_ne!(w & REVERSION, 0, "已跨推进保持 REVERSION 置位");
+    let word = IoPos::unpack(s, CAP).advance_wp(2).pack(s);
+    assert_eq!(word & !IoPos::MASK, s & !IoPos::MASK, "其余标志位原样保留");
+    assert_ne!(word & REVERSION, 0, "已跨推进保持 REVERSION 置位");
+    assert_eq!((IoPos::unpack(word, CAP).rp, IoPos::unpack(word, CAP).wp), (5, 4));
 
     // 已跨状态推进读者并越过末端：rv 清除为 0，other 保留。
     let s = state(5, 2, true) | other;
-    let pos = IoPos::unpack(s, CAP);
-    let r = pos.advance_rp(4);
-    assert_eq!(r & other, other, "advance_rp 后其余标志位原样保留");
-    assert_eq!(r & REVERSION, 0, "读者越界必须清除 REVERSION");
-    assert_eq!((IoPos::unpack(r, CAP).rp, IoPos::unpack(r, CAP).rv), (1, false));
+    let word = IoPos::unpack(s, CAP).advance_rp(4).pack(s);
+    assert_eq!(word & !IoPos::MASK, s & !IoPos::MASK, "其余标志位原样保留");
+    assert_eq!(word & REVERSION, 0, "读者越界必须清除 REVERSION");
+    assert_eq!((IoPos::unpack(word, CAP).rp, IoPos::unpack(word, CAP).wp), (1, 2));
 }
 
 // ---------------------------------------------------------------------------
@@ -429,8 +493,9 @@ fn advance_preserves_unrelated_flags_in_the_state_word() {
 /// 的满环公式相互自洽。
 ///
 /// # 构造
-/// 不构造真实缓冲，只把 `unpack → advance_* → unpack` 串成状态迁移链：
-/// 从空态 `(0, 0, false)` 开始，依次执行上述推进序列，逐步记录位置与量。
+/// 不构造真实缓冲，只把 `unpack → advance_* → pack → unpack` 串成状态迁移链
+/// （pack 以当前状态字为基座，与原 `core_` 提交路径一致）：从空态 `(0, 0,
+/// false)` 开始，依次执行上述推进序列，逐步记录位置与量。
 ///
 /// # 判定
 /// 每步断言位置 / `rv` / 数据量符合约定推导值，并断言
@@ -441,14 +506,16 @@ fn write_read_roundtrip_conserves_the_ring() {
     let mut pos = IoPos::unpack(state(0, 0, false), CAP);
     assert_eq!((pos.data_size(), pos.free_size()), (0, CAP));
 
-    pos = IoPos::unpack(pos.advance_wp(8), CAP);
+    let word = pos.advance_wp(8).pack(state(0, 0, false));
+    pos = IoPos::unpack(word, CAP);
     assert_eq!(
         (pos.rp, pos.wp, pos.rv, pos.data_size(), pos.free_size()),
         (0, 0, true, CAP, 0),
         "写满：wp==rp 且 rv=true，data=容量（不再空一槽）"
     );
 
-    pos = IoPos::unpack(pos.advance_rp(8), CAP);
+    let word = pos.advance_rp(8).pack(word);
+    pos = IoPos::unpack(word, CAP);
     assert_eq!(
         (pos.rp, pos.wp, pos.rv, pos.data_size(), pos.free_size()),
         (0, 0, false, 0, CAP),
@@ -456,19 +523,24 @@ fn write_read_roundtrip_conserves_the_ring() {
     );
 
     // —— 交错序列：写 3 → 读 2 → 写 5（跨末端）→ 读 6（跨末端）——
-    pos = IoPos::unpack(state(0, 0, false), CAP);
+    let mut word = state(0, 0, false);
+    pos = IoPos::unpack(word, CAP);
 
-    pos = IoPos::unpack(pos.advance_wp(3), CAP); // wp=3, data=3
+    word = pos.advance_wp(3).pack(word); // wp=3, data=3
+    pos = IoPos::unpack(word, CAP);
     assert_eq!((pos.rp, pos.wp, pos.rv, pos.data_size()), (0, 3, false, 3));
 
-    pos = IoPos::unpack(pos.advance_rp(2), CAP); // rp=2, data=1
+    word = pos.advance_rp(2).pack(word); // rp=2, data=1
+    pos = IoPos::unpack(word, CAP);
     assert_eq!((pos.rp, pos.wp, pos.rv, pos.data_size()), (2, 3, false, 1));
 
-    pos = IoPos::unpack(pos.advance_wp(5), CAP); // 3+5=8 越过末端 → wp=0, rv=true, data=6
+    word = pos.advance_wp(5).pack(word); // 3+5=8 越过末端 → wp=0, rv=true, data=6
+    pos = IoPos::unpack(word, CAP);
     assert_eq!((pos.rp, pos.wp, pos.rv, pos.data_size()), (2, 0, true, 6));
     assert_eq!(pos.data_size() + pos.free_size(), CAP);
 
-    pos = IoPos::unpack(pos.advance_rp(6), CAP); // 2+6=8 越过末端 → rp=0, rv=false, data=0
+    word = pos.advance_rp(6).pack(word); // 2+6=8 越过末端 → rp=0, rv=false, data=0
+    pos = IoPos::unpack(word, CAP);
     assert_eq!((pos.rp, pos.wp, pos.rv, pos.data_size()), (0, 0, false, 0));
     assert_eq!(pos.data_size() + pos.free_size(), CAP);
 }

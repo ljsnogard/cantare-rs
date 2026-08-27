@@ -134,15 +134,6 @@ pub trait TrConsumer {
     /// 类型可在裁决时更新内部状态。
     fn check(&self, event: ConsumerHookEvent) -> bool;
 
-    /// 登记 / 清除等待者的完整需求（被动端实现；主动端无等待者，默认无操作）。
-    ///
-    /// 由核心的 `arm_*` / `unpark_*` 调用（等待者 park / 完成时）：**先写
-    /// `demand`（普通字段）、再 CAS 置 `STNDBY` armed 位**——fire 侧仅在
-    /// armed 时访问 `demand`（三态协议，见 `circ_buff_` 的端类型文档），经
-    /// 状态字 Acquire 读与置位 CAS 建立 happens-before（见 `core_` 的
-    /// `fire_*`）。`check` 以 `demand.min()` 判兴趣。
-    fn set_demand(&self, _demand: &Option<Demand<usize>>) {}
-
     /// 对事件作出反应：把 `segm` 中的可读数据搬给本端（设备）。
     ///
     /// `TySegm` 泛型化——端类型**不携带**段类型，避免端类型指名核心类型造成
@@ -168,9 +159,6 @@ pub trait TrProducer {
     /// [`TrConsumer::check`]（被动端按 [`TrProducer::set_demand`] 登记的完整
     /// 需求裁决）。
     fn check(&self, event: ProducerHookEvent) -> bool;
-
-    /// 登记 / 清除等待者的完整需求。语义同 [`TrConsumer::set_demand`]。
-    fn set_demand(&self, _demand: &Option<Demand<usize>>) {}
 
     fn react_async<'f, TySegm>(
         &mut self,

@@ -18,15 +18,17 @@
 use core::{
     borrow::BorrowMut,
     mem::MaybeUninit,
+    ops::Deref,
     task::{Context, Poll},
 };
 
 use abs_buff::{
     Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
     gen_may_cancel_future,
+    io::{TrInput, TrOutput},
     x_deps::{abs_cancel, anylr},
 };
-use abs_cancel::TrCancellationToken;
+use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mm::mem_alloc::{CoreAlloc, TrMalloc};
 use anylr::SomeOf;
 use mm_ptr::{
@@ -34,8 +36,11 @@ use mm_ptr::{
     x_deps::abs_mm,
 };
 
-use crate::circular_buff::{BuffConsumer, BuffProducer, abs_comp_::TrObserver, error_::PipelineError};
-
+use crate::circular_buff::{
+    BufConsumer, BufProducer, DevConsumer, DevProducer,
+    abs_comp_::TrObserver,
+    error_::PipelineError,
+};
 use super::{
     abs_comp_::{TrConsumer, TrProducer},
     core_::{CircCore, WakeSlot},
@@ -53,13 +58,13 @@ pub type CoreRef<P, C, B, T = u8, A = CoreAlloc> =
 /// 构建器产出的半部对：`(Producer, Consumer)`。使用者可持有两者或其一。
 pub type SpscPair<B, T = u8, A = CoreAlloc> = (
     Producer<
-        BuffProducer<T>,
-        BuffConsumer<T>,
+        BufProducer<T>,
+        BufConsumer<T>,
         B, T, A,
     >,
     Consumer<
-        BuffProducer<T>,
-        BuffConsumer<T>,
+        BufProducer<T>,
+        BufConsumer<T>,
         B, T, A,
     >,
 );
@@ -84,9 +89,6 @@ where
     A: TrMalloc + Clone,
 {
     core_ref_: CoreRef<P, C, B, T, A>,
-
-    /// 保存当前的需求，在 CircCore 中的 atomic 指针反向指向这里
-    demand_: Option<Demand<usize>>,
 }
 
 /// 消费端半部：与 [`Producer`] 对称（读路径）。
@@ -101,9 +103,6 @@ where
     A: TrMalloc + Clone,
 {
     core_ref_: CoreRef<P, C, B, T, A>,
-
-    /// 保存当前的需求，在 CircCore 中的 atomic 指针反向指向这里
-    demand_: Option<Demand<usize>>,
 }
 
 /// 半部的公共借用约束：段类型（[`ReclSliceMut`] / [`ReclSliceRef`]）要求
@@ -119,10 +118,7 @@ where
     A: Send + Sync + TrMalloc + Clone,
 {
     pub(super) fn new(core_ref: CoreRef<P, C, B, T, A>) -> Self {
-        Producer {
-            core_ref_: core_ref,
-            demand_: Option::None,
-        }
+        Producer { core_ref_: core_ref }
     }
 
     /// 环形缓冲的容量（单元数）。
@@ -154,22 +150,32 @@ where
     pub fn close(&mut self) {
         self.core_ref_.close_tx();
     }
+}
 
+impl<C, B, T, A> Producer<BufProducer<T>, C, B, T, A>
+where
+    // P: Send + Sync + TrProducer<Data = T>,
+    C: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
+    A: Send + Sync + TrMalloc + Clone,
+{
     pub fn write_async<'f>(
         &'f mut self,
         demand: &'f Demand<usize>,
-    ) -> ProducerWriteAsync<'f, P, C, B, T, A> {
+    ) -> ProducerWriteAsync<'f, C, B, T, A> {
         ProducerWriteAsync(self, demand)
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn try_write<'f>(
         &'f mut self,
         demand: &'f Demand<usize>,
-    ) -> SomeOf<
-        ReclSliceMut<'f, T, WriterReclaim<'f, CircCore<P, C, B, T> >>,
+    ) -> SomeOf< ReclSliceMut<'f, T,
+            WriterReclaim<'f, CircCore<BufProducer<T>, C, B, T> >>,
         TxError<usize>,
     > {
-        SomeOf::new_right(TxError::Unavailable)
+        self.core_ref_.try_write_(demand)
     }
 }
 
@@ -220,20 +226,26 @@ where
 }
 
 #[gen_may_cancel_future(ProducerWrite)]
-async fn producer_write_async_<'f, P, K, B, T, A, C>(
-    producer: &'f mut Producer<P, K, B, T, A>,
+async fn producer_write_async_<'f, K, B, T, A, C>(
+    producer: &'f mut Producer<BufProducer<T>, K, B, T, A>,
     demand: &'f Demand<usize>,
     cancel: &'f mut C,
-) -> SomeOf<ReclSliceMut<'f, T, WriterReclaim<'f, CircCore<P, K, B, T>> >, TxError<usize>>
-where
-    P: Send + Sync + TrProducer<Data = T>,
+) -> SomeOf<
+    ReclSliceMut<'f, T,
+        WriterReclaim<'f, CircCore<BufProducer<T>, K, B, T>> >, 
+    TxError<usize>,
+> where
+    // P: Send + Sync + TrProducer<Data = T>,
     K: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
     C: TrCancellationToken + Clone,
 {
-    SomeOf::new_right(TxError::Closing)
+    producer.core_ref_
+        .write_async_(demand)
+        .may_cancel_with(cancel)
+        .await
 }
 
 // -- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -249,10 +261,7 @@ where
     A: Send + Sync + TrMalloc + Clone,
 {
     pub(super) fn new(core_ref_: CoreRef<P, C, B, T, A>) -> Self {
-        Consumer {
-            core_ref_,
-            demand_: Option::None,
-        }
+        Consumer { core_ref_ }
     }
 
     /// 环形缓冲的容量（单元数）。
@@ -284,22 +293,32 @@ where
     pub fn close(&mut self) {
         self.core_ref_.close_rx();
     }
+}
 
+impl<P, B, T, A> Consumer<P, BufConsumer<T>, B, T, A>
+where
+    P: Send + Sync + TrProducer<Data = T>,
+    // C: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
+    A: Send + Sync + TrMalloc + Clone,
+{
     pub fn read_async<'f>(
         &'f mut self,
         demand: &'f Demand<usize>,
-    ) -> ConsumerReadAsync<'f, P, C, B, T, A> {
+    ) -> ConsumerReadAsync<'f, P, B, T, A> {
         ConsumerReadAsync(self, demand)
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn try_read<'f>(
         &'f mut self,
         demand: &'f Demand<usize>,
     ) -> SomeOf<
-        ReclSliceRef<'f, T, ReaderReclaim<'f, CircCore<P, C, B, T>>>,
+        ReclSliceRef<'f, T, ReaderReclaim<'f, CircCore<P, BufConsumer<T>, B, T>>>,
         RxError<usize>,
     > {
-        todo!()
+        self.core_ref_.try_read_(demand)
     }
 }
 
@@ -350,20 +369,25 @@ where
 }
 
 #[gen_may_cancel_future(ConsumerRead)]
-async fn consumer_read_async_<'f, P, K, B, T, A, C>(
-    consumer: &'f mut Consumer<P, K, B, T, A>,
+async fn consumer_read_async_<'f, P, B, T, A, C>(
+    consumer: &'f mut Consumer<P, BufConsumer<T>, B, T, A>,
     demand: &'f Demand<usize>,
     cancel: &'f mut C,
-) -> SomeOf<ReclSliceRef<'f, T, ReaderReclaim<'f, CircCore<P, K, B, T>> >, RxError<usize>>
+) -> SomeOf<ReclSliceRef<'f, T, 
+    ReaderReclaim<'f, CircCore<P, BufConsumer<T>, B, T>> >,
+    RxError<usize>>
 where
     P: Send + Sync + TrProducer<Data = T>,
-    K: Send + Sync + TrConsumer<Data = T>,
+    // K: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
     C: TrCancellationToken + Clone,
 {
-    SomeOf::new_right(RxError::Closing)
+    consumer.core_ref_
+        .read_async_(demand)
+        .may_cancel_with(cancel)
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -406,16 +430,24 @@ where
     core_ref_: CoreRef<P, C, B, T, A>,
 }
 
-impl<P, C, B, T, A> Pipeline<P, C, B, T, A>
+type PipeCore<I, O, B, T, A> =
+    CoreRef<DevProducer<I, T>, DevConsumer<O, T>, B, T, A>;
+
+type PipeDev<I, O , B, T, A> = 
+    Pipeline<DevProducer<I, T>, DevConsumer<O, T>, B, T, A>;
+
+impl<I, O, B, T, A> Pipeline<DevProducer<I, T>, DevConsumer<O, T>, B, T, A>
 where
-    P: Send + Sync + TrProducer<Data = T>,
-    C: Send + Sync + TrConsumer<Data = T>,
+    // P: Send + Sync + TrProducer<Data = T>,
+    // C: Send + Sync + TrConsumer<Data = T>,
+    I: Send + Sync + TrInput<T>,
+    O: Send + Sync + TrOutput<T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    pub(super) fn new(core_ref_: CoreRef<P, C, B, T, A>) -> Self {
-        Pipeline { core_ref_, }
+    pub(super) fn new(core_ref: PipeCore<I, O, B, T, A>) -> Self {
+        Pipeline { core_ref_: core_ref, }
     }
 
     /// 环形缓冲的容量（单元数）。
@@ -441,15 +473,19 @@ where
         self.core_ref_.is_tx_closed()
     }
 
-    pub fn pipe_async(&mut self) -> PipelineAsync<'_, P, C, B, T, A> {
+    /// 启动背压缓存开始搬运数据。只能通过 cancellation token 来中断搬运，否则
+    /// future 会一直运行直到两端中有一方停止。
+    pub fn pipe_async(&mut self) -> PipelineAsync<'_, I, O, B, T, A> {
         PipelineAsync(self)
     }
 }
 
-impl<P, C, B, T, A> TrObserver for Pipeline<P, C, B, T, A>
+impl<I, O, B, T, A> TrObserver for PipeDev<I, O, B, T, A>
 where
-    P: Send + Sync + TrProducer<Data = T>,
-    C: Send + Sync + TrConsumer<Data = T>,
+    // P: Send + Sync + TrProducer<Data = T>,
+    // C: Send + Sync + TrConsumer<Data = T>,
+    I: Send + Sync + TrInput<T>,
+    O: Send + Sync + TrOutput<T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
@@ -481,13 +517,13 @@ where
 }
 
 #[gen_may_cancel_future(Pipeline)]
-async fn pipeline_piping_async_<'f, TyPro, TyCon, B, T, A, C>(
-    pipeline: &'f mut Pipeline<TyPro, TyCon, B, T, A>,
+async fn pipeline_piping_async_<'f, I, O, B, T, A, C>(
+    pipeline: &'f mut PipeDev<I, O, B, T, A>,
     cancel: &'f mut C,
 ) -> Option<PipelineError<usize>>
 where
-    TyPro: Send + Sync + TrProducer<Data = T>,
-    TyCon: Send + Sync + TrConsumer<Data = T>,
+    I: Send + Sync + TrInput<T>,
+    O: Send + Sync + TrOutput<T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
@@ -500,16 +536,20 @@ where
 // abs_buff 读写 trait
 // ---------------------------------------------------------------------------
 
-impl<P, C, B, T, A> TrBuffWrite<T> for Producer<P, C, B, T, A>
+impl<C, B, T, A> TrBuffWrite<T> for Producer<BufProducer<T>, C, B, T, A>
 where
-    P: Send + Sync + TrProducer<Data = T>,
+    // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type WriteAsync<'f> = ProducerWriteAsync<'f, P, C, B, T, A> where Self: 'f;
-    type SegmMut<'f> = ReclSliceMut<'f, T, WriterReclaim<'f, CircCore<P, C, B, T>>> where Self: 'f;
+    type WriteAsync<'f> = ProducerWriteAsync<'f, C, B, T, A> where Self: 'f;
+
+    type SegmMut<'f> = ReclSliceMut<'f, T,
+        WriterReclaim<'f, CircCore<BufProducer<T>, C, B, T>>>
+    where Self: 'f;
+
     type Err = TxError<usize>;
 
     #[inline]
@@ -526,9 +566,9 @@ where
     }
 }
 
-impl<P, C, B, T, A> TrBuffTryWrite<T> for Producer<P, C, B, T, A>
+impl<C, B, T, A> TrBuffTryWrite<T> for Producer<BufProducer<T>, C, B, T, A>
 where
-    P: Send + Sync + TrProducer<Data = T>,
+    // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
@@ -543,16 +583,20 @@ where
     }
 }
 
-impl<P, C, B, T, A> TrBuffRead<T> for Consumer<P, C, B, T, A>
+impl<P, B, T, A> TrBuffRead<T> for Consumer<P, BufConsumer<T>, B, T, A>
 where
     P: Send + Sync + TrProducer<Data = T>,
-    C: Send + Sync + TrConsumer<Data = T>,
+    // C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
 {
-    type ReadAsync<'f> = ConsumerReadAsync<'f, P, C, B, T, A> where Self: 'f;
-    type SegmRef<'f> = ReclSliceRef<'f, T, ReaderReclaim<'f, CircCore<P, C, B, T>>> where Self: 'f;
+    type ReadAsync<'f> = ConsumerReadAsync<'f, P, B, T, A> where Self: 'f;
+
+    type SegmRef<'f> = ReclSliceRef<'f, T,
+        ReaderReclaim<'f, CircCore<P, BufConsumer<T>, B, T>>>
+    where Self: 'f;
+
     type Err = RxError<usize>;
 
     #[inline]
@@ -569,10 +613,10 @@ where
     }
 }
 
-impl<P, C, B, T, A> TrBuffTryRead<T> for Consumer<P, C, B, T, A>
+impl<P, B, T, A> TrBuffTryRead<T> for Consumer<P, BufConsumer<T>, B, T, A>
 where
     P: Send + Sync + TrProducer<Data = T>,
-    C: Send + Sync + TrConsumer<Data = T>,
+    // C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
