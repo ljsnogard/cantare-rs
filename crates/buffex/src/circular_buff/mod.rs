@@ -81,17 +81,17 @@
 //! `[MaybeUninit<T>]` 视图操作（`T` 默认 `u8`）。`no_std` 下 `alloc` 是 stable
 //! crate，`TrMalloc` 抽象用于避免 `allocator_api` nightly 特性。
 //!
-//! # 主动模式的同步驱动（不 spawn，无运行时依赖）
+//! # 主动模式的驱动（不 spawn，无运行时依赖）
 //!
 //! 主动 hook 直接搬运数据，但 `TrInput::read_async` / `TrOutput::write_async`
-//! 返回的是 future。在 `no_std`、无异步运行时的环境下，hook 采用**同步轮询
-//! （poll-to-completion）**驱动单个 future：
+//! 返回的是 future。泵与设备的交互分两条路径：
 //!
-//! * 用 `core::task::Waker::noop()` 构造一个 `Context`（该 waker 永远不会被唤醒，
-//!   因为此处不存在执行器）；
-//! * 在一个循环里反复 `poll` 该 future，直到返回 `Poll::Ready`；
-//! * 期间不 `yield`、不注册任何任务，纯粹占用当前线程——等价于一个微型的
-//!   单 future `block_on`。
+//! * **同步路径**（构建期 `start` / 提交路径 / `try_*` 重试）：泵对设备
+//!   future 做**非阻塞尝试**——单次 `poll`，设备就绪即完成；`Pending`（设备
+//!   需外部唤醒 / 其它执行体推进）即放弃本轮，**不自旋**；
+//! * **异步路径**（被动端 `read_async` / `write_async` 的 park）：泵 `await`
+//!   设备 future——设备阻塞（`Pending`）时等待 future **挂起**（设备已注册
+//!   其 waker），由 **executor 驱动**；设备就绪后数据流入缓冲。
 //!
 //! 这样「立即搬运」就是字面意义上的立即：消费端完成读取的同一个调用栈上，
 //! hook 就把 `TrInput` 的新数据读进缓冲；生产端完成写入的同一个调用栈上，

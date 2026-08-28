@@ -28,3 +28,9 @@ rand = { version = "0.8.*" }
 atomic_sync = { path = "../atomic_sync" }
 tokio = { version = "1", features = ["full"] }
 futures-lite = { workspace = true }
+# 单线程异步运行时测试环境：验证 circular_buff 的同步泵（block_on）在
+# 不同单线程运行时（tokio current_thread / compio / futures-executor）内
+# 驱动主动端设备时能否正常运行。
+compio = { workspace = true }
+futures-executor = "0.3" 
+futures-util = "0.3"

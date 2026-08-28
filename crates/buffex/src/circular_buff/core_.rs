@@ -30,13 +30,10 @@
 //!
 //! * **被动端**：唤醒等待者——`signal` 核心持有的唤醒槽位（[`WakeSlot`]）。
 //!   槽位是原子指针，无需锁；等待者被唤醒后重查条件（spurious 唤醒无害）；
-//! * **主动端**：置「待办泵」标志并调用 `drive()`——泵循环在 `drive` 内
-//!   构造两段式段、调用端类型的 `react_async`（设备搬数据），并把它返回的
-//!   future 用 `Waker::noop()` 同步轮询到完成（等价于微型 `block_on`）。
-//!   泵自身的段 drop 提交（`advance_*`）会再次触发对端事件，为避免
-//!   「输入泵 → 输出泵 → 输入泵 → …」的无界递归，泵采用**待办标志 + 单层
-//!   `drive()` 循环**收敛（`check` 裁决「是否值得驱动」，`drive` 机制负责
-//!   收敛，两者缺一不可）。
+//! * **主动端**：搬运设备数据——同步上下文（构建 / 提交 / `try_*`）走
+//!   **非阻塞尝试**（单次 poll，`Pending` 即放弃、不自旋）；被动端异步等待
+//!   （`read_async` / `write_async` 的 park）走 **executor 驱动**（`await`
+//!   设备 future，阻塞即挂起、设备 waker 就绪后由 executor 唤醒）。
 //!
 //! # 为什么不需要端锁（STNDBY 位作 armed 协议）
 //!
@@ -80,7 +77,7 @@ use core::{
     future::Future,
     marker::PhantomData,
     mem::MaybeUninit,
-    pin::pin,
+    pin::{pin, Pin},
     ptr,
     slice,
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
@@ -273,21 +270,13 @@ fn has_flag(state: usize, flag: usize) -> bool {
     state & flag != 0
 }
 
-/// 微型 `block_on`：用 `Waker::noop()` 自旋驱动单个 future 到完成。
-///
-/// 主动端的「搬运」在 hook 内部**同步**完成（不 spawn、无运行时）：设备
-/// `read_async` / `write_async` 返回的 future 在此被轮询到 `Ready`。若设备在
-/// 暂无数据 / 空间时返回 `Pending`，这里会自旋等待（无任务模型下「自动搬运」
-/// 的固有语义；非阻塞设备立即 `Ready`，不会空转）。
-fn block_on<F: Future>(fut: F) -> F::Output {
-    let mut fut = pin!(fut);
+/// 单次轮询驱动（供同步泵的**非阻塞尝试**）：poll 一次；`Pending` 表示设备
+/// 需要外部唤醒 / 其它执行体推进——本轮放弃（**不自旋**）。executor 驱动的
+/// 异步等待路径见 [`CircCore::pump_input_round`] / [`CircCore::pump_output_round`]。
+fn poll_once<F: Future>(fut: Pin<&mut F>) -> Poll<F::Output> {
     let waker = Waker::noop();
     let mut cx = Context::from_waker(&waker);
-    loop {
-        if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
-            return v;
-        }
-    }
+    fut.poll(&mut cx)
 }
 
 // ---------------------------------------------------------------------------
@@ -326,9 +315,9 @@ fn block_on<F: Future>(fut: F) -> F::Output {
 ///   按已消费量提交回本核心（经 [`TrCircBuffCore`](super::abs_comp_::TrCircBuffCore)）；
 /// * **事件分发**：提交路径上向对端触发事件——被动端 `signal` 唤醒槽位，
 ///   主动端置待办泵标志 + `drive()`；
-/// * **同步泵**：`drive()` 内构造段、调用端类型 `react_async`、以
-///   [`block_on`] 轮询到完成；泵自身的段 drop 提交再次触发对端事件，由
-///   「待办标志 + 单层 `drive()` 循环 + 重入保护（`PUMPING` 位）」收敛。
+/// * **泵**：同步上下文走非阻塞尝试（单次 poll，`Pending` 即放弃、不自旋）；
+///   被动端异步等待走 executor 驱动（`await` 设备 future）。泵自身的段 drop
+///   提交会触发对端事件，双主动（`Pipeline`）由流水线 future 异步驱动。
 pub struct CircCore<P, C, B, T = u8>
 where
     P: TrProducer<Data = T>,
@@ -725,11 +714,18 @@ where
         self.pump_output();
     }
 
-    /// 输入泵（主动生产端）：从输入设备读入缓冲（同步，`block_on` 轮询设备
-    /// future 到完成）。循环直到**缓冲已满 / 任一端关闭 / 设备暂无数据**。
+    /// 输入泵（同步、**非阻塞尝试**）：从输入设备读入缓冲，但每次设备交互
+    /// 只 `poll_once` **一次**——设备就绪即完成；`Pending`（设备需外部唤醒 /
+    /// 其它执行体推进）则放弃本轮，**不自旋**。循环直到**缓冲已满 / 任一端
+    /// 关闭 / 设备无进展**。返回本轮搬入字节数。
     ///
     /// 每轮借出**当前全部可写区**（两段式段，跨末端时拆两段），段 drop 时经
-    /// `WriterReclaim` 提交（`advance_write` → 触发消费端事件）。
+    /// `WriterReclaim` 提交（`advance_write` → 触发消费端事件）；若设备在
+    /// `Pending` 前已搬入部分数据，段 drop 仍会提交该部分（不丢失）。
+    ///
+    /// 本方法供**同步上下文**（`start` / 提交路径 / `try_*` 重试）使用；
+    /// 需要等待阻塞设备的场景应走异步等待路径（`read_async` / `write_async`
+    /// 的 park，由 executor 驱动 [`CircCore::pump_input_round`]）。
     ///
     /// # 门控（为何只在一端主动一端被动时运行）
     ///
@@ -737,15 +733,16 @@ where
     /// 进入对端泵，形成「输入泵 → 输出泵 → 输入泵 → …」的**无界递归**。
     /// 双主动（`Pipeline`）由流水线 future 异步驱动设备，不走本同步泵；因此
     /// 本方法只在「生产端主动 **且** 消费端被动」时工作，其余组合直接返回。
-    fn pump_input(&self) {
+    fn pump_input(&self) -> usize {
         let producer = unsafe { &*self.producer_.get() };
         if producer.is_passive() {
-            return;
+            return 0;
         }
         let consumer = unsafe { &*self.consumer_.get() };
         if !consumer.is_passive() {
-            return;
+            return 0;
         }
+        let mut total = 0;
         loop {
             let state = self.atm_stat_.value();
             if has_flag(state, TX_CLOSED) || has_flag(state, RX_CLOSED) {
@@ -761,26 +758,39 @@ where
             // 提交之后、且本方法只在调用者线程上执行）。
             let mut segm = self.write_segm(pos.wp, free);
             let producer = unsafe { &mut *self.producer_.get() };
-            let r = block_on(producer.react_async(&mut segm));
-            if r == ReceiverReact::Continue {
-                break; // 设备暂无数据 / 错误：本轮无进展
+            // 单次 poll：设备就绪 → 完成；Pending → 放弃本轮（不自旋）。
+            // 内层作用域让 pin! 的隐藏局部（含对 segm 的借用）在取 moved 前 drop。
+            let outcome = {
+                let mut fut = pin!(producer.react_async(&mut segm));
+                poll_once(fut.as_mut())
+            };
+            let moved = segm.capacity() - segm.least_count();
+            drop(segm); // 提交（含 Pending 前已搬入的部分）
+            total += moved;
+            match outcome {
+                Poll::Ready(ReceiverReact::Reacted) if moved > 0 => {
+                    // 本轮有进展：继续借下一段填充。
+                }
+                _ => break, // 设备无进展 / 未就绪 / 错误
             }
-            // segm drop：提交（advance_write → 触发消费端事件，被动端被唤醒）
         }
+        total
     }
 
-    /// 输出泵（主动消费端）：把缓冲数据写到输出设备（同步）。循环直到
-    /// **缓冲排空 / 读端关闭 / 设备暂不能接收**。每轮借出全部可读区，段 drop
-    /// 时提交（`advance_read` → 触发生产端事件）。门控同 [`CircCore::pump_input`]。
-    fn pump_output(&self) {
+    /// 输出泵（同步、非阻塞尝试）：把缓冲数据写到输出设备。语义同
+    /// [`CircCore::pump_input`]（每次设备交互 poll 一次、Pending 即放弃、
+    /// 不自旋；已搬部分经段 drop 提交）。循环直到**缓冲排空 / 读端关闭 /
+    /// 设备无进展**。门控同 [`CircCore::pump_input`]。
+    fn pump_output(&self) -> usize {
         let consumer = unsafe { &*self.consumer_.get() };
         if consumer.is_passive() {
-            return;
+            return 0;
         }
         let producer = unsafe { &*self.producer_.get() };
         if !producer.is_passive() {
-            return;
+            return 0;
         }
+        let mut total = 0;
         loop {
             let state = self.atm_stat_.value();
             if has_flag(state, RX_CLOSED) {
@@ -794,11 +804,93 @@ where
             // 借出全部可读区（跨末端时两段式）。
             let mut segm = self.read_segm(pos.rp, data);
             let consumer = unsafe { &mut *self.consumer_.get() };
-            let r = block_on(consumer.react_async(&mut segm));
-            if r == ReceiverReact::Continue {
-                break; // 设备暂不能接收 / 错误
+            let outcome = {
+                let mut fut = pin!(consumer.react_async(&mut segm));
+                poll_once(fut.as_mut())
+            };
+            let moved = segm.capacity() - segm.least_count();
+            drop(segm);
+            total += moved;
+            match outcome {
+                Poll::Ready(ReceiverReact::Reacted) if moved > 0 => {}
+                _ => break, // 设备暂不能接收 / 未就绪 / 错误
             }
         }
+        total
+    }
+
+    /// 输入泵的一轮（异步、**executor 驱动**）：`await` 设备的 `react_async`——
+    /// 设备阻塞（`Pending`）时本 future **挂起**（设备已注册其 waker），由
+    /// executor 驱动；设备就绪后数据流入缓冲。循环直到缓冲满 / 关闭 / 设备
+    /// 无进展。返回本轮搬入字节数。
+    ///
+    /// 供被动端的异步等待（`core_passive_read_async_` 的 park）在每次轮询时
+    /// 轮询本 future——设备阻塞即把等待转交给 executor，不再自旋。
+    pub(super) async fn pump_input_round(&self) -> usize {
+        let producer = unsafe { &*self.producer_.get() };
+        if producer.is_passive() {
+            return 0;
+        }
+        let consumer = unsafe { &*self.consumer_.get() };
+        if !consumer.is_passive() {
+            return 0;
+        }
+        let mut total = 0;
+        loop {
+            let state = self.atm_stat_.value();
+            if has_flag(state, TX_CLOSED) || has_flag(state, RX_CLOSED) {
+                break;
+            }
+            let pos = IoPos::unpack(state, self.capacity());
+            let free = pos.free_size();
+            if free == 0 {
+                break;
+            }
+            let mut segm = self.write_segm(pos.wp, free);
+            let producer = unsafe { &mut *self.producer_.get() };
+            let r = producer.react_async(&mut segm).await;
+            let moved = segm.capacity() - segm.least_count();
+            drop(segm); // 提交（设备阻塞前已搬入的部分不丢失）
+            total += moved;
+            if r == ReceiverReact::Continue || moved == 0 {
+                break;
+            }
+        }
+        total
+    }
+
+    /// 输出泵的一轮（异步、executor 驱动）。语义同 [`CircCore::pump_input_round`]。
+    pub(super) async fn pump_output_round(&self) -> usize {
+        let consumer = unsafe { &*self.consumer_.get() };
+        if consumer.is_passive() {
+            return 0;
+        }
+        let producer = unsafe { &*self.producer_.get() };
+        if !producer.is_passive() {
+            return 0;
+        }
+        let mut total = 0;
+        loop {
+            let state = self.atm_stat_.value();
+            if has_flag(state, RX_CLOSED) {
+                break;
+            }
+            let pos = IoPos::unpack(state, self.capacity());
+            let data = pos.data_size();
+            if data == 0 {
+                break;
+            }
+            let mut segm = self.read_segm(pos.rp, data);
+            let consumer = unsafe { &mut *self.consumer_.get() };
+            let r = consumer.react_async(&mut segm).await;
+            let moved = segm.capacity() - segm.least_count();
+            drop(segm);
+            total += moved;
+            if r == ReceiverReact::Continue || moved == 0 {
+                break;
+            }
+        }
+        total
     }
 
     // ------------------------------------------------------------------
@@ -1172,10 +1264,15 @@ where
         if can_stop() {
             return Poll::Ready(());
         }
-        // 对端（生产端）为主动：每次轮询先同步驱动一轮输入泵，再重查——
-        // 设备就绪后数据自动补位（无后台任务模型下「等待即驱动」；内部门控
-        // 保证仅一端主动一端被动时实际泵入）。
-        core.pump_input();
+        // 对端（生产端）为主动：每 poll 重建一轮输入泵并轮询——设备阻塞
+        // （Pending）时本 future 挂起（设备已注册其 waker），由 **executor
+        // 驱动**；设备就绪后数据流入缓冲。泵在 Pending 前已搬入的部分随段
+        // drop 提交，不丢失。内部门控保证仅一端主动一端被动时实际泵入。
+        let mut pump = core.pump_input_round();
+        let mut pump = pin!(pump);
+        if pump.as_mut().poll(cx).is_pending() {
+            return Poll::Pending;
+        }
         if can_stop() {
             return Poll::Ready(());
         }
@@ -1245,9 +1342,14 @@ where
         if can_stop() {
             return Poll::Ready(());
         }
-        // 对端（消费端）为主动：每次轮询先同步驱动一轮输出泵，再重查——
-        // 读取释放空间后自动排空（内部门控：仅一端主动一端被动时泵出）。
-        core.pump_output();
+        // 对端（消费端）为主动：每 poll 重建一轮输出泵并轮询——设备阻塞
+        // （Pending）时本 future 挂起（设备已注册其 waker），由 executor
+        // 驱动；读取释放空间后自动排空（内部门控：仅一端主动一端被动时泵出）。
+        let mut pump = core.pump_output_round();
+        let mut pump = pin!(pump);
+        if pump.as_mut().poll(cx).is_pending() {
+            return Poll::Pending;
+        }
         if can_stop() {
             return Poll::Ready(());
         }
