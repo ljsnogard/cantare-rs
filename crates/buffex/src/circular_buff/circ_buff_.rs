@@ -10,14 +10,16 @@
 //! 半部（借用核心）。主动端（设备驱动）的半部操作返回错误（不对外访问）。
 
 use core::{
+    future::IntoFuture,
     marker::{PhantomData, PhantomPinned},
+    pin::pin,
     ptr,
     sync::atomic::AtomicPtr,
 };
 
 use abs_buff::{
     Demand,
-    buffer::{TrBuffSegmMut, TrBuffSegmRef},
+    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView},
     gen_may_cancel_future,
     io::{TrInput, TrOutput},
     x_deps::abs_cancel,
@@ -31,7 +33,7 @@ use super::{
         ConsumerHookEvent, ProducerHookEvent, ReceiverReact,
         TrCircBuffCore, TrConsumer, TrProducer,
     },
-    core_::WakeSlot,
+    core_::{WakeSlot, poll_once},
 };
 
 // ---------------------------------------------------------------------------
@@ -357,6 +359,11 @@ where
         TySegm: 'a + TrBuffSegmMut<'a, Self::Data>,
         'a: 'f;
 
+    type PumpAsync<'f, TyCore> = core::future::Ready<usize>
+    where
+        Self: 'f,
+        TyCore: 'f + TrCircBuffCore<Data = Self::Data>;
+
     #[inline]
     fn init_async<'f, TyCore>(
         &'f mut self,
@@ -366,6 +373,17 @@ where
         TyCore: TrCircBuffCore<Data = Self::Data>,
     {
         core::future::ready(Result::Ok(()))
+    }
+
+    #[inline]
+    fn pump_async<'f, TyCore>(
+        &'f mut self,
+        _core: &'f TyCore,
+    ) -> Self::PumpAsync<'f, TyCore>
+    where
+        TyCore: TrCircBuffCore<Data = Self::Data>,
+    {
+        core::future::ready(0)
     }
 
     #[inline]
@@ -424,6 +442,11 @@ where
         TySegm: 'a + TrBuffSegmRef<'a, Self::Data>,
         'a: 'f;
 
+    type PumpAsync<'f, TyCore> = core::future::Ready<usize>
+    where
+        Self: 'f,
+        TyCore: 'f + TrCircBuffCore<Data = Self::Data>;
+
     #[inline]
     fn init_async<'f, TyCore>(
         &'f mut self,
@@ -433,6 +456,17 @@ where
         TyCore: TrCircBuffCore<Data = Self::Data>
     {
         core::future::ready(Result::Ok(()))
+    }
+
+    #[inline]
+    fn pump_async<'f, TyCore>(
+        &'f mut self,
+        _core: &'f TyCore,
+    ) -> Self::PumpAsync<'f, TyCore>
+    where
+        TyCore: TrCircBuffCore<Data = Self::Data>,
+    {
+        core::future::ready(0)
     }
 
     #[inline]
@@ -491,6 +525,11 @@ where
         TySegm: 'a + TrBuffSegmMut<'a, Self::Data>,
         'a: 'f;
 
+    type PumpAsync<'f, TyCore> = DevProducerPumpAsync<'f, TyInput, T, TyCore>
+    where
+        Self: 'f,
+        TyCore: 'f + TrCircBuffCore<Data = Self::Data>;
+
     #[inline]
     fn init_async<'f, TyCore>(
         &'f mut self,
@@ -500,6 +539,22 @@ where
         TyCore: TrCircBuffCore<Data = Self::Data>,
     {
         DevProducer::init_async(self, core)
+    }
+
+    #[inline]
+    fn pump_async<'f, TyCore>(
+        &'f mut self,
+        core: &'f TyCore,
+    ) -> DevProducerPumpAsync<'f, TyInput, T, TyCore>
+    where
+        TyCore: TrCircBuffCore<Data = Self::Data>,
+    {
+        DevProducerPumpAsync(self, core)
+    }
+
+    #[inline]
+    fn wakeslot(&self) -> Option<&WakeSlot> {
+        Some(&self.wakeslot_)
     }
 
     #[inline]
@@ -550,6 +605,11 @@ where
         S: 'a + TrBuffSegmRef<'a, Self::Data>,
         'a: 'f;
 
+    type PumpAsync<'f, C> = DevConsumerPumpAsync<'f, O, T, C>
+    where
+        Self: 'f,
+        C: 'f + TrCircBuffCore<Data = Self::Data>;
+
     #[inline]
     fn init_async<'f, C>(
         &'f mut self,
@@ -559,6 +619,22 @@ where
         C: TrCircBuffCore<Data = Self::Data>,
     {
         DevConsumerInitAsync(self, core)
+    }
+
+    #[inline]
+    fn pump_async<'f, C>(
+        &'f mut self,
+        core: &'f C,
+    ) -> DevConsumerPumpAsync<'f, O, T, C>
+    where
+        C: TrCircBuffCore<Data = Self::Data>,
+    {
+        DevConsumerPumpAsync(self, core)
+    }
+
+    #[inline]
+    fn wakeslot(&self) -> Option<&WakeSlot> {
+        Some(&self.wakeslot_)
     }
 
     #[inline]
@@ -606,14 +682,46 @@ where
     C: TrCircBuffCore<Data = T>,
     K: TrCancellationToken + Clone,
 {
-    let Option::Some(mut segm_mut) = core_ref.try_write_init() else {
-        return Result::Err(());
-    };
-    let _ = producer
-        .react_async(&mut segm_mut)
-        .may_cancel_with(cancel)
-        .await;
+    if let Some(mut segm_mut) = core_ref.try_write_init() {
+        // 构建期只做一次非阻塞探测：设备 Pending 就放弃本轮，不等设备。
+        let may_fut = producer
+            .react_async(&mut segm_mut)
+            .may_cancel_with(cancel);
+        let mut fut = pin!(may_fut.into_future());
+        let _ = poll_once(fut.as_mut());
+        // segm_mut 在这里 drop；若已搬入数据，drop 会提交 advance_write。
+    }
+    core_ref.arm_producer();
     Result::Ok(())
+}
+
+#[gen_may_cancel_future(DevProducerPump)]
+async fn dev_producer_pump_async_<'f, I, T, C, K>(
+    producer: &'f mut DevProducer<I, T>,
+    core_ref: &'f C,
+    cancel: &'f mut K,
+) -> usize
+where
+    I: TrInput<T>,
+    T: 'static,
+    C: TrCircBuffCore<Data = T>,
+    K: TrCancellationToken + Clone,
+{
+    let mut total = 0usize;
+    while let Some(mut segm_mut) = core_ref.try_write_init() {
+        let before = segm_mut.least_count();
+        let r = producer
+            .react_async(&mut segm_mut)
+            .may_cancel_with(cancel)
+            .await;
+        let moved = before - segm_mut.least_count();
+        drop(segm_mut); // 提交，触发 fire_consumer
+        total += moved;
+        if moved == 0 || r == ReceiverReact::Continue {
+            break;
+        }
+    }
+    total
 }
 
 #[gen_may_cancel_future(DevProducerReact)]
@@ -666,14 +774,46 @@ where
     C: TrCircBuffCore<Data = T>,
     K: TrCancellationToken + Clone,
 {
-    let Option::Some(mut segm_ref) = core_ref.try_read_init() else {
-        return Result::Err(());
-    };
-    let _ = consumer
-        .react_async(&mut segm_ref)
-        .may_cancel_with(cancel)
-        .await;
+    if let Some(mut segm_ref) = core_ref.try_read_init() {
+        // 构建期只做一次非阻塞探测：设备 Pending 就放弃本轮，不等设备。
+        let may_fut = consumer
+            .react_async(&mut segm_ref)
+            .may_cancel_with(cancel);
+        let mut fut = pin!(may_fut.into_future());
+        let _ = poll_once(fut.as_mut());
+        // segm_ref 在这里 drop；若已搬出数据，drop 会提交 advance_read。
+    }
+    core_ref.arm_consumer();
     Result::Ok(())
+}
+
+#[gen_may_cancel_future(DevConsumerPump)]
+async fn dev_consumer_pump_async_<'f, O, T, C, K>(
+    consumer: &'f mut DevConsumer<O, T>,
+    core_ref: &'f C,
+    cancel: &'f mut K,
+) -> usize
+where
+    O: TrOutput<T>,
+    T: 'static,
+    C: TrCircBuffCore<Data = T>,
+    K: TrCancellationToken + Clone,
+{
+    let mut total = 0usize;
+    while let Some(mut segm_ref) = core_ref.try_read_init() {
+        let before = segm_ref.least_count();
+        let r = consumer
+            .react_async(&mut segm_ref)
+            .may_cancel_with(cancel)
+            .await;
+        let moved = before - segm_ref.least_count();
+        drop(segm_ref); // 提交，触发 fire_producer
+        total += moved;
+        if moved == 0 || r == ReceiverReact::Continue {
+            break;
+        }
+    }
+    total
 }
 
 #[gen_may_cancel_future(DevConsumerReact)]

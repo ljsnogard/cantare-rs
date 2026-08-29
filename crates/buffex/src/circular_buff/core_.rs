@@ -76,13 +76,14 @@
 use core::{
     borrow::BorrowMut,
     cell::UnsafeCell,
+    future::{Future, IntoFuture},
     marker::{PhantomData, PhantomPinned},
     mem::MaybeUninit,
-    // pin::Pin,
+    pin::pin,
     ptr::{self, NonNull},
     slice,
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
-    task::{Poll, Waker},
+    task::{Context, Poll, Waker},
 };
 
 use abs_buff::{
@@ -102,7 +103,7 @@ use atomic_sync::x_deps::{abs_sync, atomex};
 
 use super::{
     abs_comp_::{
-        ConsumerHookEvent, ProducerHookEvent,
+        ConsumerHookEvent, ProducerHookEvent, ReceiverReact,
         TrCircBuffCore, TrConsumer, TrProducer,
     },
     error_::{RxError, TxError},
@@ -263,6 +264,14 @@ fn has_flag(state: usize, flag: usize) -> bool {
     state & flag != 0
 }
 
+/// 同步路径的**非阻塞单次探测**：只 poll 一次，`Pending` 立即放弃。
+/// 这不是忙等；真正的等待由设备 waker 或主动端 WakeSlot 负责。
+pub(super) fn poll_once<F: Future>(fut: core::pin::Pin<&mut F>) -> Poll<F::Output> {
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(&waker);
+    fut.poll(&mut cx)
+}
+
 // ---------------------------------------------------------------------------
 // 环形核心
 // ---------------------------------------------------------------------------
@@ -348,6 +357,8 @@ where
         if err.err_tag().should_terminate() {
             return x;
         };
+        // 对端主动消费时，先非阻塞排空一轮，再重试写入。
+        self.pump_output_sync();
         self.try_write_at(demand)
             .map(|(start, take)| self.create_write_segm(start, take))
             .into()
@@ -396,6 +407,8 @@ where
         if err.err_tag().should_terminate() {
             return x;
         };
+        // 对端主动生产时，先非阻塞补入一轮，再重试读取。
+        self.pump_input_sync();
         self.try_read_at(demand)
             .map(|(start, take)| self.create_read_segm(start, take))
             .into()
@@ -564,6 +577,190 @@ where
     }
 
     // ------------------------------------------------------------------
+    // 泵：同步非阻塞探测 + 异步背压 park
+    // ------------------------------------------------------------------
+
+    /// 同步输入泵（非阻塞、不自旋）。
+    ///
+    /// # 调用上下文
+    /// - `try_read_`：`Drained` 且未终止时，先拉取一轮再重试；
+    /// - `advance_read`：被动消费端读取提交后，立即补位；
+    /// - 仅“主动生产 + 被动消费”时实际工作；双主动交给 Pipeline，避免同步递归。
+    ///
+    /// # Safety / 别名
+    /// 调用点都处于“没有同侧活段 / 没有其它泵正在运行”的路径上；本方法内部
+    /// 通过 `UnsafeCell` 取 `&mut P`，与调用者持有的半部借用互斥（SPSC）。
+    fn pump_input_sync(&self) -> usize {
+        let producer = unsafe { &*self.producer_.get() };
+        if producer.is_passive() {
+            return 0;
+        }
+        let consumer = unsafe { &*self.consumer_.get() };
+        if !consumer.is_passive() {
+            return 0;
+        }
+
+        let mut total = 0;
+        loop {
+            let state = self.atm_stat_.value();
+            if has_flag(state, TX_CLOSED) || has_flag(state, RX_CLOSED) {
+                break;
+            }
+            let pos = IoPos::unpack(state, self.capacity());
+            let free = pos.free_size();
+            if free == 0 {
+                break;
+            }
+
+            let mut segm = self.create_write_segm(pos.wp, free);
+            let producer = unsafe { &mut *self.producer_.get() };
+            let outcome = {
+                let may_fut = producer
+                    .react_async(&mut segm)
+                    .may_cancel_with(NonCancellableToken::shared_mut());
+                let mut fut = pin!(may_fut.into_future());
+                poll_once(fut.as_mut())
+            };
+            let moved = segm.capacity() - segm.least_count();
+            drop(segm); // 提交，触发 fire_consumer
+            total += moved;
+
+            if moved == 0 || !matches!(outcome, Poll::Ready(ReceiverReact::Reacted)) {
+                break;
+            }
+        }
+        total
+    }
+
+    /// 同步输出泵（非阻塞、不自旋）。
+    ///
+    /// # 调用上下文
+    /// - `try_write_`：`Stuffed` 且未终止时，先排空一轮再重试；
+    /// - `advance_write` / `close_tx`：被动生产端写入提交 / 关闭后，立即排空；
+    /// - 仅“被动生产 + 主动消费”时实际工作；双主动交给 Pipeline，避免同步递归。
+    ///
+    /// # Safety / 别名
+    /// 同 [`CircCore::pump_input_sync`]：调用点没有同侧活段 / 其它泵并发，
+    /// `&mut C` 的取得满足 SPSC。
+    fn pump_output_sync(&self) -> usize {
+        let consumer = unsafe { &*self.consumer_.get() };
+        if consumer.is_passive() {
+            return 0;
+        }
+        let producer = unsafe { &*self.producer_.get() };
+        if !producer.is_passive() {
+            return 0;
+        }
+
+        let mut total = 0;
+        loop {
+            let state = self.atm_stat_.value();
+            if has_flag(state, RX_CLOSED) {
+                break;
+            }
+            let pos = IoPos::unpack(state, self.capacity());
+            let data = pos.data_size();
+            if data == 0 {
+                break;
+            }
+
+            let mut segm = self.create_read_segm(pos.rp, data);
+            let consumer = unsafe { &mut *self.consumer_.get() };
+            let outcome = {
+                let may_fut = consumer
+                    .react_async(&mut segm)
+                    .may_cancel_with(NonCancellableToken::shared_mut());
+                let mut fut = pin!(may_fut.into_future());
+                poll_once(fut.as_mut())
+            };
+            let moved = segm.capacity() - segm.least_count();
+            drop(segm); // 提交，触发 fire_producer
+            total += moved;
+
+            if moved == 0 || !matches!(outcome, Poll::Ready(ReceiverReact::Reacted)) {
+                break;
+            }
+        }
+        total
+    }
+
+    /// 生产端背压 park：把 waker 注册到主动生产端自己的 WakeSlot，
+    /// 等待消费端读取提交后的 `fire_producer` 唤醒。
+    ///
+    /// # 调用上下文
+    /// 当前主要由全主动 `Pipeline` 在“输入泵无进展且缓冲满”时调用；
+    /// 也适合任何“连续泵” future 在等待可写空间时使用。
+    ///
+    /// # Safety / 清理
+    /// 本方法通过 `ActiveParkGuard` 保证 future 被取消 / drop 时注销
+    /// `WakeSlot` 并清除 `TX_STNDBY`。
+    pub(super) async fn park_producer(&self) {
+        let Some(slot) = unsafe { &*self.producer_.get() }.wakeslot() else {
+            return;
+        };
+        let mut guard = ActiveParkGuard {
+            slot,
+            waiter: Waiter::new(),
+            core: self,
+            registered: false,
+            unarm: |core| core.unset_tx_standby(),
+        };
+        self.set_tx_standby();
+        let _ = core::future::poll_fn(|cx| {
+            guard.waiter.waker = Some(cx.waker().clone());
+            guard.slot.register(&guard.waiter);
+            guard.registered = true;
+            if self.try_write_at(&Demand::at_least(1)).is_ok()
+                || self.is_tx_closed()
+                || self.is_rx_closed()
+            {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    /// 消费端背压 park：把 waker 注册到主动消费端自己的 WakeSlot，
+    /// 等待生产端写入提交后的 `fire_consumer` 唤醒。
+    ///
+    /// # 调用上下文
+    /// 当前主要由全主动 `Pipeline` 在“输出泵无进展且缓冲空”时调用；
+    /// 也适合任何“连续泵” future 在等待可读数据时使用。
+    ///
+    /// # Safety / 清理
+    /// 同 [`CircCore::park_producer`]：通过 `ActiveParkGuard` 保证取消 / drop
+    /// 时注销 `WakeSlot` 并清除 `RX_STNDBY`。
+    pub(super) async fn park_consumer(&self) {
+        let Some(slot) = unsafe { &*self.consumer_.get() }.wakeslot() else {
+            return;
+        };
+        let mut guard = ActiveParkGuard {
+            slot,
+            waiter: Waiter::new(),
+            core: self,
+            registered: false,
+            unarm: |core| core.unset_rx_standby(),
+        };
+        self.set_rx_standby();
+        let _ = core::future::poll_fn(|cx| {
+            guard.waiter.waker = Some(cx.waker().clone());
+            guard.slot.register(&guard.waiter);
+            guard.registered = true;
+            if self.try_read_at(&Demand::at_least(1)).is_ok()
+                || self.is_tx_closed()
+                || self.is_rx_closed()
+            {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    // ------------------------------------------------------------------
     // 段构建（提交目标：本核心，经 TrCircBuffCore）
     // ------------------------------------------------------------------
 
@@ -634,6 +831,7 @@ where
             ConsumerHookEvent::Available(self.data_size())
         };
         self.fire_consumer(ev);
+        self.pump_output_sync();
     }
 
     /// 读提交：按已消费量推进读位置，触发生产端事件。
@@ -652,16 +850,18 @@ where
             ProducerHookEvent::Available(self.free_size())
         };
         self.fire_producer(event);
+        self.pump_input_sync();
     }
 
     /// 关闭写端：不再接受写入，触发消费端事件（`ProducerClose`）。
     ///
-    /// 对端（消费端）为主动时，先**驱动输出泵排空**残留数据（`drive_output`，非阻塞
+    /// 对端（消费端）为主动时，先**驱动输出泵排空**残留数据（`pump_output_sync`，非阻塞
     /// 尝试、不自旋；内部门控保证仅一端主动一端被动时实际排空）——写端关闭
     /// 后不再有新数据，残留必须送达输出设备（如 `buffex_iroh` 的 `shutdown`）。
     pub(super) fn close_tx(&self) {
         self.set_flag_(TX_CLOSED);
         self.fire_consumer(ConsumerHookEvent::ProducerClose(self.data_size()));
+        self.pump_output_sync();
     }
 
     /// 关闭读端：不再读取，触发生产端事件（`ConsumerClose`）。
@@ -700,7 +900,7 @@ where
     /// 触发生产端事件（消费端完成读取 / 关闭后）。
     ///
     /// **本方法只唤醒，不搬运**——数据的重复拉取由 `advance_read` 直接驱动
-    /// 对端泵（[`CircCore::drive_input`]，主动端 `react_async` 是搬运循环、
+    /// 对端泵（[`CircCore::pump_input_sync`]，主动端 `react_async` 是搬运循环、
     /// 被动端是 no-op），fire 的职责是唤醒注册在端类型唤醒槽位中的等待者：
     ///
     /// * 被动端（`BufProducer`）：等待可写空间的写者 park 时 **armed**
@@ -724,7 +924,7 @@ where
     /// # Safety（取 `&P`）
     ///
     /// 本方法只由 `advance_read` / `close_rx` 触发。`advance_read` 先驱动
-    /// 对端泵（[`CircCore::drive_input`]，其中 `&mut P` 只在本方法返回前使用）
+    /// 对端泵（[`CircCore::pump_input_sync`]，其中 `&mut P` 只在本方法返回前使用）
     /// 再触发本方法（`&P`）——两者顺序执行，不与任何活借用重叠。
     fn fire_producer(&self, event: ProducerHookEvent) {
         // 未 armed：无等待者（被动）或泵未 park（主动）——不唤醒。
@@ -814,7 +1014,7 @@ where
     /// 即挂起、由 executor 驱动其 waker），直接写入缓冲的一段**物理连续**
     /// 可写区，随后立即提交（`advance_write`）。返回本轮搬入字节数。
     ///
-    /// 与同步驱动 [`CircCore::drive_input`] 的两个关键区别：
+    /// 与同步泵 [`CircCore::pump_input_sync`] 的两个关键区别：
     ///
     /// 1. **await 设备 future 而非 `block_on` 自旋**——真实设备（如 iroh
     ///    连接）可能长时间 `Pending`，自旋永远等不到数据；
@@ -921,6 +1121,14 @@ where
             .ok()
             .map(|(start, take)| self.create_read_segm(start, take))
     }
+
+    fn arm_producer(&self) {
+        CircCore::set_tx_standby(self);
+    }
+
+    fn arm_consumer(&self) {
+        CircCore::set_rx_standby(self);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,6 +1223,25 @@ impl WakeSlot {
     }
 }
 
+/// 主动端 park 的守卫：保证 `park_producer` / `park_consumer` 在取消 / drop
+/// 时注销 WakeSlot 并清 STNDBY。
+struct ActiveParkGuard<'a, C> {
+    slot: &'a WakeSlot,
+    waiter: Waiter,
+    core: &'a C,
+    registered: bool,
+    unarm: fn(&C),
+}
+
+impl<C> Drop for ActiveParkGuard<'_, C> {
+    fn drop(&mut self) {
+        if self.registered {
+            self.slot.deregister(&self.waiter);
+        }
+        (self.unarm)(self.core);
+    }
+}
+
 /// 被动等待（park）的守卫：持有注册进唤醒槽位的 [`Waiter`]，并保证等待
 /// future 在**任何退出路径**上完成收尾。
 ///
@@ -1065,6 +1292,13 @@ impl<E, C> Drop for WaitGuard<'_, E, C> {
 
 use super::circ_buff_::{BufConsumer, BufProducer, DevConsumer, DevProducer};
 
+/// 被动读等待：由 `Consumer::read_async` 调用，固定消费端为 `BufConsumer`。
+///
+/// # 调用上下文
+/// - 先尝试直接读取；失败后给对端 `producer.pump_async(core)` 一次机会；
+/// - 若对端是主动端，`pump_async` 会在这里 await 设备；若对端是被动端，
+///   它返回 0，本函数进入普通被动 park；
+/// - 被 `fire_consumer` 唤醒后回到循环，重新尝试读取。
 #[gen_may_cancel_future(CorePassiveRead)]
 async fn core_passive_read_async_<'f, P, B, T, C>(
     core: &'f CircCore<P, BufConsumer<T>, B, T>,
@@ -1080,74 +1314,75 @@ where
     T: Send + Sync + 'static,
     C: TrCancellationToken + Clone,
 {
-    let x = core.try_read_(demand);
-    if x.contains_left() {
-        return x;
-    };
-    let err = x.as_ref().pick_right().expect("");
-    if err.err_tag().should_terminate() {
-        return x;
-    };
-    let consume = unsafe { &*core.consumer_.get() };
-    if !consume.try_set_demand(demand) {
-        unreachable!("Concurrent call `core_passive_read_async_`")
-    }
-    // —— 等待（park）——
-    //
-    // demand 已登记进 `BufConsumer`、armed（`RX_STNDBY`）已置位——对端提交
-    // 路径的 `fire_consumer` 会经 armed 门控 + `check` 裁决是否唤醒本等待者。
-    // 此后循环直到需求满足（或出现终止错误）：
-    //
-    // 1. 重查 `try_read_at`：满足 / 终止 → `Ready`（收尾由守卫的 Drop 完成：
-    //    注销槽位 + 清 armed + 复位 demand）；
-    // 2. **对端（生产端）为主动**：每 poll 驱动一轮输入泵并 `await` 设备——
-    //    设备阻塞（`Pending`，已注册其 waker）时本 future **挂起**，由
-    //    **executor 驱动**（不自旋）；设备就绪后数据流入缓冲（泵在 Pending
-    //    前已搬入的部分随段 drop 提交，不丢失）；
-    // 3. 否则把 waker 注册进 `BufConsumer` 的唤醒槽位，返回 `Pending`——对端
-    //    写入提交触发 `fire_consumer` → `signal` 唤醒本等待者；
-    // 4. **注册后重查一次**：关闭「检查与注册之间对端恰好完成提交」的丢失
-    //    唤醒窗口（`signal` 只唤醒已注册的等待者，不会重查条件；注册前的
-    //    那次提交若已发生，重查能立刻发现而不必等下一次事件）。
-    core.set_rx_standby();
-    let mut guard = WaitGuard {
-        end: consume,
-        core,
-        waiter: Waiter::new(),
-        registered: false,
-        unregister: |end, waiter| end.wakeslot().deregister(waiter),
-        reset_demand: |end| {
-            let _ = end.try_reset_demand();
-        },
-        unarm: |core| core.unset_rx_standby(),
-    };
-    let res = core::future::poll_fn(|cx| {
-        let fn_can_stop = || match core.try_read_at(demand) {
-            Ok(_) => true,
-            Err(e) => e.err_tag().should_terminate(),
+    loop {
+        let x = core.try_read_(demand);
+        if x.contains_left() {
+            return x;
         };
-        if fn_can_stop() {
-            return Poll::Ready(());
+        let err = x.as_ref().pick_right().expect("");
+        if err.err_tag().should_terminate() {
+            return x;
+        };
+
+        // 给对端一次主动补数据的机会。被动端 pump_async 返回 0；
+        // 主动端会在这里 await 设备，设备 Pending 时由设备自己的 waker 唤醒。
+        {
+            let producer = unsafe { &mut *core.producer_.get() };
+            let moved = producer.pump_async(core).may_cancel_with(cancel).await;
+            if moved > 0 {
+                continue;
+            }
         }
-        // 纯等待：不驱动对端泵（本端是被动端，只关心自己的需求；数据由对端
-        // 提交路径 / `try_*` 重试驱动）。把 waker 注册进本端唤醒槽位即可。
-        guard.waiter.waker = Some(cx.waker().clone());
-        guard.end.wakeslot().register(&guard.waiter);
-        guard.registered = true;
-        if fn_can_stop() {
-            return Poll::Ready(());
+
+        // 普通被动 park：对端没有主动补入数据时，注册到 BufConsumer 的槽位，
+        // 等待对端写入提交触发 fire_consumer。
+        let consume = unsafe { &*core.consumer_.get() };
+        if !consume.try_set_demand(demand) {
+            unreachable!("Concurrent call `core_passive_read_async_`")
         }
-        Poll::Pending
-    });
-    // 守卫在此已被 drop：槽位注销、armed 清除、demand 复位。重新尝试——等待
-    // 期间可读数据只增不减（SPSC：只有本消费者读），结果必为可读段或终止错误。
-    if res.ok_or(cancel.cancellation()).await.is_ok() {
-        core.try_read_(demand)
-    } else {
-        SomeOf::new_right(RxError::Cancelled)
+        core.set_rx_standby();
+        let mut guard = WaitGuard {
+            end: consume,
+            core,
+            waiter: Waiter::new(),
+            registered: false,
+            unregister: |end, waiter| end.wakeslot().deregister(waiter),
+            reset_demand: |end| {
+                let _ = end.try_reset_demand();
+            },
+            unarm: |core| core.unset_rx_standby(),
+        };
+        let res = core::future::poll_fn(|cx| {
+            let fn_can_stop = || match core.try_read_at(demand) {
+                Ok(_) => true,
+                Err(e) => e.err_tag().should_terminate(),
+            };
+            if fn_can_stop() {
+                return Poll::Ready(());
+            }
+            guard.waiter.waker = Some(cx.waker().clone());
+            guard.end.wakeslot().register(&guard.waiter);
+            guard.registered = true;
+            if fn_can_stop() {
+                return Poll::Ready(());
+            }
+            Poll::Pending
+        });
+        // 守卫在此已被 drop：槽位注销、armed 清除、demand 复位。
+        if res.ok_or(cancel.cancellation()).await.is_err() {
+            return SomeOf::new_right(RxError::Cancelled);
+        }
+        // 被唤醒后回到循环，重新检查 / 再次 pump_async。
     }
 }
 
+/// 被动写等待：由 `Producer::write_async` 调用，固定生产端为 `BufProducer`。
+///
+/// # 调用上下文
+/// - 先尝试直接写入；失败后给对端 `consumer.pump_async(core)` 一次机会；
+/// - 若对端是主动端，`pump_async` 会在这里 await 设备；若对端是被动端，
+///   它返回 0，本函数进入普通被动 park；
+/// - 被 `fire_producer` 唤醒后回到循环，重新尝试写入。
 #[gen_may_cancel_future(CorePassiveWrite)]
 async fn core_passive_write_async_<'f, K, B, T, C>(
     core: &'f CircCore<BufProducer<T>, K, B, T>,
@@ -1163,58 +1398,64 @@ where
     T: Send + Sync + 'static,
     C: TrCancellationToken + Clone,
 {
-    let x = core.try_write_(demand);
-    if x.contains_left() {
-        return x;
-    };
-    let err = x.as_ref().pick_right().expect("");
-    if err.err_tag().should_terminate() {
-        return x;
-    };
-    let producer = unsafe { &*core.producer_.get() };
-    if !producer.try_set_demand(demand) {
-        unreachable!("Concurrent call `core_passive_write_async_`")
-    };
-    // —— 等待（park）——与读侧（`core_passive_read_async_`）对称：
-    // demand 已登记进 `BufProducer`、armed（`TX_STNDBY`）已置位；循环直到
-    // 可写空间满足需求（或出现终止错误）。**对端（消费端）为主动**时每 poll
-    // 驱动一轮输出泵并 `await` 设备（executor 驱动、不自旋）；否则把 waker
-    // 注册进 `BufProducer` 的唤醒槽位等待对端读取提交触发 `fire_producer` →
-    // `signal` 唤醒；注册后重查一次关闭丢失唤醒窗口。
-    core.set_tx_standby();
-    let mut guard = WaitGuard {
-        end: producer,
-        core,
-        waiter: Waiter::new(),
-        registered: false,
-        unregister: |end, waiter| end.wakeslot().deregister(waiter),
-        reset_demand: |end| {
-            let _ = end.try_reset_demand();
-        },
-        unarm: |core| core.unset_tx_standby(),
-    };
-    let res = core::future::poll_fn(|cx| {
-        let can_stop = || match core.try_write_at(demand) {
-            Ok(_) => true,
-            Err(e) => e.err_tag().should_terminate(),
+    loop {
+        let x = core.try_write_(demand);
+        if x.contains_left() {
+            return x;
         };
-        if can_stop() {
-            return Poll::Ready(());
+        let err = x.as_ref().pick_right().expect("");
+        if err.err_tag().should_terminate() {
+            return x;
+        };
+
+        // 给对端一次主动排空的机会。被动端 pump_async 返回 0；
+        // 主动端会在这里 await 设备，设备 Pending 时由设备自己的 waker 唤醒。
+        {
+            let consumer = unsafe { &mut *core.consumer_.get() };
+            let moved = consumer.pump_async(core).may_cancel_with(cancel).await;
+            if moved > 0 {
+                continue;
+            }
         }
-        // 纯等待：不驱动对端泵（同读侧——本端是被动端，只关心自己的需求）。
-        guard.waiter.waker = Some(cx.waker().clone());
-        guard.end.wakeslot().register(&guard.waiter);
-        guard.registered = true;
-        if can_stop() {
-            return Poll::Ready(());
+
+        // 普通被动 park：对端没有主动排空时，注册到 BufProducer 的槽位，
+        // 等待对端读取提交触发 fire_producer。
+        let producer = unsafe { &*core.producer_.get() };
+        if !producer.try_set_demand(demand) {
+            unreachable!("Concurrent call `core_passive_write_async_`")
+        };
+        core.set_tx_standby();
+        let mut guard = WaitGuard {
+            end: producer,
+            core,
+            waiter: Waiter::new(),
+            registered: false,
+            unregister: |end, waiter| end.wakeslot().deregister(waiter),
+            reset_demand: |end| {
+                let _ = end.try_reset_demand();
+            },
+            unarm: |core| core.unset_tx_standby(),
+        };
+        let res = core::future::poll_fn(|cx| {
+            let can_stop = || match core.try_write_at(demand) {
+                Ok(_) => true,
+                Err(e) => e.err_tag().should_terminate(),
+            };
+            if can_stop() {
+                return Poll::Ready(());
+            }
+            guard.waiter.waker = Some(cx.waker().clone());
+            guard.end.wakeslot().register(&guard.waiter);
+            guard.registered = true;
+            if can_stop() {
+                return Poll::Ready(());
+            }
+            Poll::Pending
+        });
+        // 守卫在此已被 drop：槽位注销、armed 清除、demand 复位。
+        if res.ok_or(cancel.cancellation()).await.is_err() {
+            return SomeOf::new_right(TxError::Cancelled);
         }
-        Poll::Pending
-    });
-    // 守卫在此已被 drop：槽位注销、armed 清除、demand 复位。重新尝试——等待
-    // 期间可写空间只增不减（SPSC：只有本生产者写），结果必为可写段或终止错误。
-    if res.ok_or(cancel.cancellation()).await.is_ok() {
-        core.try_write_(demand)
-    } else {
-        SomeOf::new_right(TxError::Cancelled)
+        // 被唤醒后回到循环，重新检查 / 再次 pump_async。
     }
 }

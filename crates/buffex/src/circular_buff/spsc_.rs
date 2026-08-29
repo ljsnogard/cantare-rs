@@ -519,7 +519,7 @@ where
     I: Send + Sync + TrInput<T>,
     O: Send + Sync + TrOutput<T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: 'static + Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
     C: TrCancellationToken + Clone,
 {
@@ -545,7 +545,15 @@ where
             if core.is_tx_closed() && core.data_size() == 0 {
                 return None;
             }
-            core::future::pending::<()>().await;
+            // 有背压时，park 到主动端自己的 WakeSlot，由对端提交路径的
+            // fire_* 唤醒；只有确实只是设备无进展且无背压时才保持挂起。
+            if core.free_size() == 0 {
+                core.park_producer().await;
+            } else if core.data_size() == 0 {
+                core.park_consumer().await;
+            } else {
+                core::future::pending::<()>().await;
+            }
         }
     }
 }

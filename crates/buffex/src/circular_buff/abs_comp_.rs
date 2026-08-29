@@ -42,6 +42,8 @@ use abs_buff::{
 };
 use abs_cancel::TrMayCancel;
 
+use super::core_::WakeSlot;
+
 /// 环形核心的「段提交 + 泵协作」接口：段 drop 时按已消费量推进读写位置；
 /// 主动端（`DevProducer` / `DevConsumer`）经本接口在 `init_async` 里完成初始
 /// 搬运与 armed 登记。
@@ -75,6 +77,11 @@ where
         &'f self,
     ) -> Option<impl 'f + TrBuffSegmRef<'f, Self::Data>>;
 
+    // 主动端初始化后进入“等待被 fire 唤醒”的 armed 状态。
+    // 默认 no-op，CircCore 会实现为设置 STNDBY 位。
+    fn arm_producer(&self) {}
+
+    fn arm_consumer(&self) {}
 }
 
 /// 生产端 hook 收到的事件（消费端完成读取 / 消费者关闭后触发）。
@@ -151,6 +158,24 @@ pub trait TrConsumer {
         S: 'a + TrBuffSegmRef<'a, Self::Data>,
         'a: 'f;
 
+    type PumpAsync<'f, C>: TrMayCancel<'f, MayCancelOutput = usize>
+    where
+        Self: 'f,
+        C: 'f + TrCircBuffCore<Data = Self::Data>;
+
+    /// 由“对端”调用的异步泵。被动端返回 Ready(0)，主动端实现真正的设备搬运。
+    fn pump_async<'f, C>(
+        &'f mut self,
+        core: &'f C,
+    ) -> Self::PumpAsync<'f, C>
+    where
+        C: TrCircBuffCore<Data = Self::Data>;
+
+    /// 主动端返回自己的唤醒槽位；被动端默认 None。
+    fn wakeslot(&self) -> Option<&WakeSlot> {
+        None
+    }
+
     /// 环形缓冲完成构建前，在 builder 中调用且仅调用一次的方法，用于 Consumer
     /// 自身的异步初始化。
     fn init_async<'f, C>(
@@ -203,6 +228,24 @@ pub trait TrProducer {
         Self: 'f,
         S: 'a + TrBuffSegmMut<'a, Self::Data>,
         'a: 'f;
+
+    type PumpAsync<'f, C>: TrMayCancel<'f, MayCancelOutput = usize>
+    where
+        Self: 'f,
+        C: 'f + TrCircBuffCore<Data = Self::Data>;
+
+    /// 由“对端”调用的异步泵。被动端返回 Ready(0)，主动端实现真正的设备搬运。
+    fn pump_async<'f, C>(
+        &'f mut self,
+        core: &'f C,
+    ) -> Self::PumpAsync<'f, C>
+    where
+        C: TrCircBuffCore<Data = Self::Data>;
+
+    /// 主动端返回自己的唤醒槽位；被动端默认 None。
+    fn wakeslot(&self) -> Option<&WakeSlot> {
+        None
+    }
 
     fn init_async<'f, S>(
         &'f mut self,

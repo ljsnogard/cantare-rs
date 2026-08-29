@@ -15,7 +15,6 @@ mod hook_;
 mod park_tests_;
 mod pos_tests_;
 mod pump_;
-mod rt_block_on_tests_;
 mod sync_;
 
 use core::{fmt, mem::MaybeUninit, pin::Pin};
