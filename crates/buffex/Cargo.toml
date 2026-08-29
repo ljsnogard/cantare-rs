@@ -24,7 +24,7 @@ abs_buff = { path = "../abs_buff", features = ["segm-tests"] }
 
 env_logger = { workspace = true }
 log = { workspace = true }
-rand = { version = "0.8.*" }
+rand = { version = "0.10.*" }
 atomic_sync = { path = "../atomic_sync" }
 tokio = { version = "1", features = ["full"] }
 futures-lite = { workspace = true }

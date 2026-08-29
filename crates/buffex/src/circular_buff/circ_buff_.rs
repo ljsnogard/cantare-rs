@@ -98,6 +98,7 @@ pub struct BufProducer<T> {
     buf_obsv_: BuffObsv,
     wakeslot_: WakeSlot,
     _unuse_t_: PhantomData<fn() -> T>,
+    _pin_buf_: PhantomPinned,
 }
 
 impl<T> BufProducer<T> {
@@ -106,6 +107,7 @@ impl<T> BufProducer<T> {
             buf_obsv_: BuffObsv::new(),
             wakeslot_: WakeSlot::new(),
             _unuse_t_: PhantomData,
+            _pin_buf_: PhantomPinned,
         }
     }
 
@@ -136,6 +138,7 @@ pub struct BufConsumer<T> {
     buf_obsv_: BuffObsv,
     wakeslot_: WakeSlot,
     _unuse_t_: PhantomData<fn() -> T>,
+    _pin_buf_: PhantomPinned,
 }
 
 impl<T> BufConsumer<T> {
@@ -144,6 +147,7 @@ impl<T> BufConsumer<T> {
             buf_obsv_: BuffObsv::new(),
             wakeslot_: WakeSlot::new(),
             _unuse_t_: PhantomData,
+            _pin_buf_: PhantomPinned,
         }
     }
 
@@ -188,6 +192,7 @@ where
 {
     input_: TyInput,
     _use_t: PhantomData<fn() -> T>,
+    _pin_: PhantomPinned,
 }
 
 impl<TyInput, T> DevProducer<TyInput, T>
@@ -198,6 +203,7 @@ where
         DevProducer {
             input_: input,
             _use_t: PhantomData,
+            _pin_: PhantomPinned,
         }
     }
 
@@ -220,6 +226,7 @@ where
 {
     output_: TyOutput,
     _use_t_: PhantomData<fn() -> T>,
+    _pin_: PhantomPinned,
 }
 
 impl<TyOutput, T> DevConsumer<TyOutput, T>
@@ -230,6 +237,7 @@ where
         DevConsumer {
             output_: output,
             _use_t_: PhantomData,
+            _pin_: PhantomPinned,
         }
     }
 
@@ -246,6 +254,21 @@ where
 
 impl<T> TrProducer for BufProducer<T> {
     type Data = T;
+
+    type InitAsync<'f> = core::future::Ready<Result<_, _>>
+    where
+        Self: 'f;
+
+    #[inline]
+    fn init_async<'f>(
+        self: core::pin::Pin<&'f mut self>,
+        core: &'f TyCore,
+    ) -> Self::InitAsync<'f>
+    where
+        TyCore: super::abs_comp_::TrCircBuffCore
+    {
+        core::future::ready(Result::Ok(()))
+    }
 
     #[inline]
     fn is_passive(&self) -> bool {
@@ -288,6 +311,21 @@ impl<T> TrProducer for BufProducer<T> {
 impl<T> TrConsumer for BufConsumer<T> {
     type Data = T;
 
+    type InitAsync<'f> = core::future::Ready<Result<_, _>>
+        where
+            Self: 'f;
+
+    #[inline]
+    fn init_async<'f>(
+        self: core::pin::Pin<&'f mut self>,
+        core: &'f TyCore,
+    ) -> Self::InitAsync<'f>
+    where
+        TyCore: super::abs_comp_::TrCircBuffCore
+    {
+        core::future::ready(Result::Ok(()))
+    }
+
     #[inline]
     fn is_passive(&self) -> bool {
         true
@@ -327,6 +365,21 @@ where
     TyInput: TrInput<T>,
 {
     type Data = T;
+
+    type InitAsync<'f> = core::future::Ready<Result<_, _>>
+    where
+        Self: 'f;
+
+    #[inline]
+    fn init_async<'f>(
+        self: core::pin::Pin<&'f mut self>,
+        core: &'f TyCore,
+    ) -> Self::InitAsync<'f>
+    where
+        TyCore: super::abs_comp_::TrCircBuffCore
+    {
+        core::future::ready(Result::Ok(()))
+    }
 
     #[inline]
     fn is_passive(&self) -> bool {
@@ -376,6 +429,21 @@ where
     TyOutput: TrOutput<T>,
 {
     type Data = T;
+
+    type InitAsync<'f> = core::future::Ready<Result<_, _>>
+    where
+        Self: 'f;
+
+    #[inline]
+    fn init_async<'f>(
+        self: core::pin::Pin<&'f mut self>,
+        core: &'f TyCore,
+    ) -> Self::InitAsync<'f>
+    where
+        TyCore: super::abs_comp_::TrCircBuffCore
+    {
+        core::future::ready(Result::Ok(()))
+    }
 
     #[inline]
     fn is_passive(&self) -> bool {

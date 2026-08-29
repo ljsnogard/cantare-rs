@@ -18,8 +18,6 @@
 use core::{
     borrow::BorrowMut,
     mem::MaybeUninit,
-    ops::Deref,
-    task::{Context, Poll},
 };
 
 use abs_buff::{
@@ -650,105 +648,5 @@ where
         demand: &'f Demand<usize>,
     ) -> SomeOf<Self::SegmRef<'f>, Self::Err> {
         Consumer::try_read(self, demand)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 等待（park）辅助
-// ---------------------------------------------------------------------------
-
-// /// 把 `[min, max]` 区间重新构造为 `Demand`（处理 0 / `usize::MAX` 边界，
-// /// 避免 `Demand::between(a, a)` 的 panic）。
-// fn demand_of(min: usize, max: usize) -> Demand<usize> {
-//     match (min, max) {
-//         (0, usize::MAX) => Demand::at_least(1),
-//         (0, m) => Demand::less_than(m),
-//         (n, usize::MAX) => Demand::at_least(n),
-//         (n, m) => Demand::between(n, m),
-//     }
-// }
-
-/// 等待辅助：把 waker 注册进核心的被动唤醒槽位；条件满足或关闭时返回
-/// `Ready`，否则 `Pending`。注册后**重新检查条件**，以关闭丢失唤醒窗口
-/// （这是事件可被安全丢弃 / 取代的不变量之一）。
-///
-/// park 时先经 `arm`（写 demand → 置 `STNDBY` armed 位）再注册槽位；完成 /
-/// drop 时经 `unpark`（清 armed 位 → 清 demand）。fire 侧仅在 armed 时行动，
-/// 经状态字 Acquire 读与 armed 置位 CAS 建立 happens-before（见 `core_` 的
-/// `fire_*` / `arm_*`）。
-struct Park<'a, P, C, B, T>
-where
-    P: TrProducer<Data = T>,
-    C: TrConsumer<Data = T>,
-    B: BorrowMut<[MaybeUninit<T>]>,
-{
-    core: &'a CircCore<P, C, B, T>,
-    waiter: super::core_::Waiter,
-    registered: bool,
-    slot: &'a WakeSlot,
-    /// 本等待者的完整需求（park 时经 `arm` 登记；固定不变）。
-    demand: Option<Demand<usize>>,
-    /// park：写 demand 并置 armed 位（`CircCore::arm_producer` / `arm_consumer`）。
-    arm: fn(&CircCore<P, C, B, T>, Option<Demand<usize>>),
-    /// 完成 / drop：清 armed 位与 demand（`CircCore::unpark_producer` /
-    /// `unpark_consumer`）。
-    unpark: fn(&CircCore<P, C, B, T>),
-    check: fn(&CircCore<P, C, B, T>, usize) -> bool,
-}
-
-impl<'a, P, C, B, T> Park<'a, P, C, B, T>
-where
-    P: TrProducer<Data = T>,
-    C: TrConsumer<Data = T>,
-    B: BorrowMut<[MaybeUninit<T>]>,
-{
-    fn new(
-        core: &'a CircCore<P, C, B, T>,
-        slot: &'a WakeSlot,
-        arm: fn(&CircCore<P, C, B, T>, Option<Demand<usize>>),
-        unpark: fn(&CircCore<P, C, B, T>),
-        check: fn(&CircCore<P, C, B, T>, usize) -> bool,
-        demand: Option<Demand<usize>>,
-    ) -> Self {
-        Park {
-            core,
-            waiter: super::core_::Waiter::new(),
-            registered: false,
-            slot,
-            demand,
-            arm,
-            unpark,
-            check,
-        }
-    }
-
-    /// 轮询：条件满足则注销并返回 `Ready`；否则注册 waker（先 armed 登记
-    /// demand，再注册槽位）返回 `Pending`。
-    fn poll(&mut self, cx: &mut Context<'_>, core: &CircCore<P, C, B, T>, arg: usize) -> Poll<()> {
-        if (self.check)(core, arg) {
-            self.deregister();
-            return Poll::Ready(());
-        }
-        self.waiter.waker = Some(cx.waker().clone());
-        // 先 armed（写 demand → 置 STNDBY），再注册槽位：fire 侧经状态字
-        // Acquire 读（armed）与置位 CAS 建立 happens-before，保证能读到 demand。
-        (self.arm)(self.core, self.demand.clone());
-        self.slot.register(&self.waiter);
-        self.registered = true;
-        // 注册后重新检查：注册与条件检查之间发生的状态变化不会丢失唤醒。
-        if (self.check)(core, arg) {
-            self.deregister();
-            return Poll::Ready(());
-        }
-        Poll::Pending
-    }
-
-    fn deregister(&mut self) {
-        if self.registered {
-            self.slot.deregister(&self.waiter);
-            // 清 armed 位与 demand（SPSC：同侧等待者先后，不与下一等待者竞争）。
-            (self.unpark)(self.core);
-            self.registered = false;
-        }
     }
 }

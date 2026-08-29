@@ -275,7 +275,7 @@ fn has_flag(state: usize, flag: usize) -> bool {
 /// 异步等待路径见 [`CircCore::pump_input_round`] / [`CircCore::pump_output_round`]。
 fn poll_once<F: Future>(fut: Pin<&mut F>) -> Poll<F::Output> {
     let waker = Waker::noop();
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(waker);
     fut.poll(&mut cx)
 }
 
@@ -581,6 +581,24 @@ where
         self.try_read_at(&Demand::at_least(min.max(1))).is_ok()
             || self.is_tx_closed()
             || self.is_rx_closed()
+    }
+
+    // ------------------------------------------------------------------
+    // 自引用访问
+    // ------------------------------------------------------------------
+
+    pub(super) fn producer_pinned_(self: Pin<&mut Self>) -> Pin<&mut P> {
+        unsafe {
+            let this = self.get_unchecked_mut();
+            Pin::new_unchecked(&mut this.producer_.as_mut_unchecked())
+        }
+    }
+
+    pub(super) fn consumer_pinned_(self: Pin<&mut Self>) -> Pin<&mut C> {
+        unsafe {
+            let this = self.get_unchecked_mut();
+            Pin::new_unchecked(&mut this.consumer_.as_mut_unchecked())
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1218,7 +1236,6 @@ async fn core_passive_read_async_<'f, P, B, T, C>(
 >
 where
     P: Send + Sync + TrProducer<Data = T>,
-    // K: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
     C: TrCancellationToken + Clone,
@@ -1264,18 +1281,6 @@ where
         if can_stop() {
             return Poll::Ready(());
         }
-        // 对端（生产端）为主动：每 poll 重建一轮输入泵并轮询——设备阻塞
-        // （Pending）时本 future 挂起（设备已注册其 waker），由 **executor
-        // 驱动**；设备就绪后数据流入缓冲。泵在 Pending 前已搬入的部分随段
-        // drop 提交，不丢失。内部门控保证仅一端主动一端被动时实际泵入。
-        let mut pump = core.pump_input_round();
-        let mut pump = pin!(pump);
-        if pump.as_mut().poll(cx).is_pending() {
-            return Poll::Pending;
-        }
-        if can_stop() {
-            return Poll::Ready(());
-        }
         guard.waiter.waker = Some(cx.waker().clone());
         guard.end.wakeslot().register(&guard.waiter);
         guard.registered = true;
@@ -1303,7 +1308,6 @@ async fn core_passive_write_async_<'f, K, B, T, C>(
     TxError<usize>,
 >
 where
-    // P: Send + Sync + TrProducer<Data = T>,
     K: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
     T: Send + Sync,
@@ -1339,17 +1343,6 @@ where
             Ok(_) => true,
             Err(e) => e.err_tag().should_terminate(),
         };
-        if can_stop() {
-            return Poll::Ready(());
-        }
-        // 对端（消费端）为主动：每 poll 重建一轮输出泵并轮询——设备阻塞
-        // （Pending）时本 future 挂起（设备已注册其 waker），由 executor
-        // 驱动；读取释放空间后自动排空（内部门控：仅一端主动一端被动时泵出）。
-        let mut pump = core.pump_output_round();
-        let mut pump = pin!(pump);
-        if pump.as_mut().poll(cx).is_pending() {
-            return Poll::Pending;
-        }
         if can_stop() {
             return Poll::Ready(());
         }

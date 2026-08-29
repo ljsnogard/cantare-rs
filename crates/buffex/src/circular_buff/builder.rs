@@ -83,7 +83,12 @@ use core::{
     mem::MaybeUninit,
 };
 
-use abs_buff::io::{TrInput, TrOutput};
+use abs_buff::{
+    gen_may_cancel_future,
+    io::{TrInput, TrOutput},
+    x_deps::abs_cancel,
+};
+use abs_cancel::{TrCancellationToken, TrMayCancel};
 use mm_ptr::{
     Owned, Shared,
     x_deps::abs_mm::mem_alloc::{CoreAlloc, TrMalloc},
@@ -103,6 +108,16 @@ pub enum BuilderError<T> {
     SizeTooSmall(T),
     /// 容量过大。
     SizeTooBig(T),
+    Cancelled,
+}
+
+struct BuildEssential<P, C, B, T, A> {
+    capacity_: usize,
+    producer_: P,
+    consumer_: C,
+    buffer_: B,
+    alloc_: A,
+    _use_t_: PhantomData<fn() -> T>,
 }
 
 /// 构建链起点：只定了容量（与分配器），两端模式均未决定。
@@ -300,12 +315,14 @@ where
         O: TrOutput<T>,
     {
         ReadyBuilder {
-            capacity: self.capacity_,
-            producer: DevProducer::new(input),
-            consumer: DevConsumer::new(output),
-            buffer: self.buffer_,
-            alloc: self.alloc_,
-            _use_t_: PhantomData,
+            essential_: Option::Some(BuildEssential {
+                capacity_: self.capacity_,
+                producer_: DevProducer::new(input),
+                consumer_: DevConsumer::new(output),
+                buffer_: self.buffer_,
+                alloc_: self.alloc_,
+                _use_t_: PhantomData,
+            })
         }
     }
 
@@ -325,12 +342,14 @@ where
         A: Send + Sync + TrMalloc + Clone,
     {
         ReadyBuilder {
-            capacity: self.capacity_,
-            producer: BufProducer::new(),
-            consumer: BufConsumer::new(),
-            buffer: self.buffer_,
-            alloc: self.alloc_,
-            _use_t_: PhantomData,
+            essential_: Option::Some(BuildEssential {
+                capacity_: self.capacity_,
+                producer_: BufProducer::new(),
+                consumer_: BufConsumer::new(),
+                buffer_: self.buffer_,
+                alloc_: self.alloc_,
+                _use_t_: PhantomData,
+            })
         }
         .build()
     }
@@ -362,12 +381,14 @@ where
     /// 消费端为被动模式：调用者驱动读取。
     pub fn consumer_passive(self) -> ReadyBuilder<P, BufConsumer<T>, B, T, A> {
         ReadyBuilder {
-            capacity: self.capacity,
-            producer: self.producer,
-            consumer: BufConsumer::new(),
-            buffer: self.buffer_,
-            alloc: self.alloc,
-            _use_t_: PhantomData,
+            essential_: Option::Some(BuildEssential {
+                capacity_: self.capacity,
+                producer_: self.producer,
+                consumer_: BufConsumer::new(),
+                buffer_: self.buffer_,
+                alloc_: self.alloc,
+                _use_t_: PhantomData,
+            })
         }
     }
 
@@ -380,12 +401,14 @@ where
         O: TrOutput<T>,
     {
         ReadyBuilder {
-            capacity: self.capacity,
-            producer: self.producer,
-            consumer: DevConsumer::new(output),
-            buffer: self.buffer_,
-            alloc: self.alloc,
-            _use_t_: PhantomData,
+            essential_: Option::Some(BuildEssential {
+                capacity_: self.capacity,
+                producer_: self.producer,
+                consumer_: DevConsumer::new(output),
+                buffer_: self.buffer_,
+                alloc_: self.alloc,
+                _use_t_: PhantomData,
+            })
         }
     }
 }
@@ -418,12 +441,14 @@ where
     /// 生产端为被动模式：调用者驱动写入。
     pub fn producer_passive(self) -> ReadyBuilder<BufProducer<T>, C, B, T, A> {
         ReadyBuilder {
-            capacity: self.capacity,
-            producer: BufProducer::new(),
-            consumer: self.consumer,
-            buffer: self.buffer_,
-            alloc: self.alloc,
-            _use_t_: PhantomData,
+            essential_: Option::Some(BuildEssential {
+                capacity_: self.capacity,
+                producer_: BufProducer::new(),
+                consumer_: self.consumer,
+                buffer_: self.buffer_,
+                alloc_: self.alloc,
+                _use_t_: PhantomData,
+            })
         }
     }
 
@@ -436,12 +461,14 @@ where
         I: TrInput<T>,
     {
         ReadyBuilder {
-            capacity: self.capacity,
-            producer: DevProducer::new(input),
-            consumer: self.consumer,
-            buffer: self.buffer_,
-            alloc: self.alloc,
-            _use_t_: PhantomData,
+            essential_: Option::Some(BuildEssential {
+                capacity_: self.capacity,
+                producer_: DevProducer::new(input),
+                consumer_: self.consumer,
+                buffer_: self.buffer_,
+                alloc_: self.alloc,
+                _use_t_: PhantomData,
+            }),
         }
     }
 }
@@ -454,12 +481,7 @@ where
     B: BorrowMut<[MaybeUninit<T>]>,
     A: TrMalloc + Clone,
 {
-    capacity: usize,
-    producer: P,
-    consumer: C,
-    buffer: B,
-    alloc: A,
-    _use_t_: PhantomData<fn() -> T>,
+    essential_: Option<BuildEssential<P, C, B, T, A>>,
 }
 
 impl<P, C, B, T, A> ReadyBuilder<P, C, B, T, A>
@@ -482,36 +504,58 @@ where
     /// 主动 × 主动 → [`Pipeline`]（流水线 future：交给运行时 spawn 后持续
     /// 由两端设备驱动流动，直到一端出错 / 关闭或调用者请求断开）。
     #[allow(clippy::type_complexity)]
-    pub fn build(
-        self,
-    ) -> Result<
-            <() as BuildOutcome<P, C, B, T, A>>::Output,
-            BuilderError<usize>,
-        >
+    pub fn build_async(self) -> EssentialBuildAsync<P, C, B, T, A>
     where
         (): BuildOutcome<P, C, B, T, A>,
     {
-        let cap = self.capacity;
-        if cap < core_::MIN_CAPACITY {
-            return Err(BuilderError::SizeTooSmall(cap));
-        }
-        if cap > core_::MAX_CAPACITY {
-            return Err(BuilderError::SizeTooBig(cap));
-        }
-        let core = CircCore::new(
-            self.producer,
-            self.consumer,
-            self.buffer,
-        );
-        let shared = Shared::new(core, self.alloc.clone());
-        // 构建期初始泵：一端主动一端被动时，主动端先泵一轮（生产端把输入
-        // 设备的数据填满缓冲 / 消费端把缓冲排空到输出），双端被动 / 双主动
-        // 时按内部门控为 no-op。
-        shared.start();
-        Ok(<() as BuildOutcome<P, C, B, T, A>>::assemble(
-            shared, self.alloc,
-        ))
+        let es = self.essential_.take().expect("");
+        EssentialBuildAsync(es)
     }
+}
+
+#[gen_may_cancel_future(EssentialBuild)]
+async fn essential_build_async_<'f, P, C, B, T, A, K>(
+    essential: BuildEssential<P, C, B, T, A>,
+    cancel: &'f mut K,
+) -> Result<
+        <() as BuildOutcome<P, C, B, T, A>>::Output,
+        BuilderError<()>>
+where
+    P: Send + Sync + TrProducer<Data = T>,
+    C: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync,
+    A: Send + Sync + TrMalloc + Clone,
+    (): BuildOutcome<P, C, B, T, A>,
+    K: TrCancellationToken + Clone,
+{
+    let mut core = CircCore::new(
+        essential.producer_,
+        essential.consumer_,
+        essential.buffer_,
+    );
+    unsafe {
+        let p_core = &core as *const CircCore<P, C, B, T>;
+        let mut pin_core = Pin::new_unchecked(&mut core);
+        pin_core
+            .as_mut()
+            .producer_pinned_()
+            .init_async(&*p_core, cancel)
+            .await;
+        pin_core
+            .as_mut()
+            .consumer_pinned_()
+            .init_async(&*p_core, cancel)
+            .await;
+    }
+    let shared = Shared::new(core, essential.alloc_.clone());
+    // 构建期初始泵：一端主动一端被动时，主动端先泵一轮（生产端把输入
+    // 设备的数据填满缓冲 / 消费端把缓冲排空到输出），双端被动 / 双主动
+    // 时按内部门控为 no-op。
+    shared.start();
+    Ok(<() as BuildOutcome<P, C, B, T, A>>::assemble(
+        shared, self.alloc,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +586,10 @@ where
     type Output;
 
     /// 装配构建产物。`alloc` 是构建器的分配器（`Pipeline` 需要它分配断开标志）。
-    fn assemble(core_ref: CoreRef<P, C, B, T, A>, alloc: A) -> Self::Output;
+    fn assemble(
+        core_ref: CoreRef<P, C, B, T, A>,
+        alloc: A,
+    ) -> Self::Output;
 }
 
 mod sealed {

@@ -36,10 +36,15 @@
 //! 解法：端类型**不携带**段类型，`react_async` 的段参数由调用方（核心）按
 //! 具体类型传入。段因此可以指名 `CircCore<P, C, T>`（段不在端类型内部，无环）。
 
+use core::pin::Pin;
+
 use abs_buff::{
     Demand,
     buffer::{TrBuffSegmMut, TrBuffSegmRef},
+    gen_may_cancel_future,
+    x_deps::abs_cancel,
 };
+use abs_cancel::{TrCancellationToken, TrMayCancel};
 
 /// 环形核心的「段提交」接口：段 drop 时按已消费量推进读写位置。
 ///
@@ -123,6 +128,19 @@ pub enum ReceiverReact {
 pub trait TrConsumer {
     type Data;
 
+    type InitAsync<'f>: TrMayCancel<'f, MayCancelOutput = Result<(), ()>>
+    where
+        Self: 'f;
+
+    /// 环形缓冲完成构建前，在 builder 中调用且仅调用一次的方法，用于 Consumer
+    /// 自身的异步初始化。
+    fn init_async<'f>(
+        self: Pin<&'f mut self>,
+        core: &'f TyCore,
+    ) -> Self::InitAsync<'f>
+    where
+        TyCore: TrCircBuffCore;
+
     fn is_passive(&self) -> bool;
 
     /// 本端对 `event`（携带当前数据量）是否感兴趣。
@@ -152,6 +170,17 @@ pub trait TrConsumer {
 /// 对称（详见其文档）；`react_async` 把输入设备的数据搬进 `segm`。
 pub trait TrProducer {
     type Data;
+
+    type InitAsync<'f>: TrMayCancel<'f, MayCancelOutput = Result<(), ()>>
+    where
+        Self: 'f;
+
+    fn init_async<'f>(
+        self: Pin<&'f mut self>,
+        core: &'f TyCore,
+    ) -> Self::InitAsync<'f>
+    where
+        TyCore: TrCircBuffCore;
 
     fn is_passive(&self) -> bool;
 
