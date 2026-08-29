@@ -75,7 +75,7 @@ use core::{
     borrow::{Borrow, BorrowMut},
     cell::UnsafeCell,
     future::Future,
-    marker::PhantomData,
+    marker::{PhantomData, PhantomPinned},
     mem::MaybeUninit,
     pin::{pin, Pin},
     ptr,
@@ -87,7 +87,7 @@ use core::{
 use abs_buff::{
     Demand,
     io::{TrInput, TrOutput},
-    error::{ReadErrTag, WriteErrTag, TrTaggedError, TrErrTag},
+    error::TrTaggedError,
     gen_may_cancel_future,
     x_deps::{anylr, abs_cancel},
 };
@@ -333,6 +333,7 @@ where
     producer_: UnsafeCell<P>,
     consumer_: UnsafeCell<C>,
     _unuse_t_: PhantomData<fn() -> T>,
+    _pinning_: PhantomPinned,
 }
 
 /// 设计为只给 SPSC 中的 Consumer<P, C, B, T, A> 或者 Producer<P, C, B, T, A> 
@@ -353,7 +354,7 @@ where
             TxError<usize>,
         > = self
             .try_write_at(demand)
-            .map(|(start, take)| self.write_segm(start, take))
+            .map(|(start, take)| self.create_write_segm(start, take))
             .into();
         if x.contains_left() {
             return x;
@@ -367,7 +368,7 @@ where
         // 仅一端主动一端被动时实际泵出，双被动时原样返回）。
         self.pump_output();
         self.try_write_at(demand)
-            .map(|(start, take)| self.write_segm(start, take))
+            .map(|(start, take)| self.create_write_segm(start, take))
             .into()
     }
 
@@ -405,7 +406,7 @@ where
             RxError<usize>,
         > = self
             .try_read_at(demand)
-            .map(|(start, take)| self.read_segm(start, take))
+            .map(|(start, take)| self.create_read_segm(start, take))
             .into();
         if x.contains_left() {
             return x;
@@ -419,7 +420,7 @@ where
         // 一端被动时实际泵入，双被动时原样返回）。
         self.pump_input();
         self.try_read_at(demand)
-            .map(|(start, take)| self.read_segm(start, take))
+            .map(|(start, take)| self.create_read_segm(start, take))
             .into()
     }
 
@@ -462,6 +463,7 @@ where
             producer_: UnsafeCell::new(producer),
             consumer_: UnsafeCell::new(consumer),
             _unuse_t_: PhantomData,
+            _pinning_: PhantomPinned,
         }
     }
 
@@ -590,14 +592,14 @@ where
     pub(super) fn producer_pinned_(self: Pin<&mut Self>) -> Pin<&mut P> {
         unsafe {
             let this = self.get_unchecked_mut();
-            Pin::new_unchecked(&mut this.producer_.as_mut_unchecked())
+            Pin::new_unchecked(this.producer_.get_mut())
         }
     }
 
     pub(super) fn consumer_pinned_(self: Pin<&mut Self>) -> Pin<&mut C> {
         unsafe {
             let this = self.get_unchecked_mut();
-            Pin::new_unchecked(&mut this.consumer_.as_mut_unchecked())
+            Pin::new_unchecked(this.consumer_.get_mut())
         }
     }
 
@@ -609,7 +611,7 @@ where
     ///
     /// 段 drop 时经 [`WriterReclaim`] 提交回本核心（推进写位置并触发消费端
     /// 事件）。
-    pub(super) fn write_segm<'s>(
+    pub(super) fn create_write_segm<'s>(
         &'s self,
         start: usize,
         take: usize,
@@ -632,7 +634,7 @@ where
     ///
     /// 段 drop 时经 [`ReaderReclaim`] 提交回本核心（推进读位置并触发生产端
     /// 事件）。
-    pub(super) fn read_segm<'s>(
+    pub(super) fn create_read_segm<'s>(
         &'s self,
         start: usize,
         take: usize,
@@ -774,7 +776,7 @@ where
             // 借出全部可写区（`write_segm` 覆盖跨末端的两段式情形）。
             // SAFETY: 可写区不与任何活段 / 泵操作重叠（SPSC 纪律：泵运行在
             // 提交之后、且本方法只在调用者线程上执行）。
-            let mut segm = self.write_segm(pos.wp, free);
+            let mut segm = self.create_write_segm(pos.wp, free);
             let producer = unsafe { &mut *self.producer_.get() };
             // 单次 poll：设备就绪 → 完成；Pending → 放弃本轮（不自旋）。
             // 内层作用域让 pin! 的隐藏局部（含对 segm 的借用）在取 moved 前 drop。
@@ -820,7 +822,7 @@ where
                 break;
             }
             // 借出全部可读区（跨末端时两段式）。
-            let mut segm = self.read_segm(pos.rp, data);
+            let mut segm = self.create_read_segm(pos.rp, data);
             let consumer = unsafe { &mut *self.consumer_.get() };
             let outcome = {
                 let mut fut = pin!(consumer.react_async(&mut segm));
@@ -864,7 +866,7 @@ where
             if free == 0 {
                 break;
             }
-            let mut segm = self.write_segm(pos.wp, free);
+            let mut segm = self.create_write_segm(pos.wp, free);
             let producer = unsafe { &mut *self.producer_.get() };
             let r = producer.react_async(&mut segm).await;
             let moved = segm.capacity() - segm.least_count();
@@ -898,7 +900,7 @@ where
             if data == 0 {
                 break;
             }
-            let mut segm = self.read_segm(pos.rp, data);
+            let mut segm = self.create_read_segm(pos.rp, data);
             let consumer = unsafe { &mut *self.consumer_.get() };
             let r = consumer.react_async(&mut segm).await;
             let moved = segm.capacity() - segm.least_count();
@@ -947,7 +949,7 @@ where
         }
         // 主动生产端：对端（被动消费端）完成读取 / 关闭，同步泵入一轮补位
         // （内部门控：仅一端主动一端被动时实际泵入）。
-        self.pump_input();
+        // self.pump_input();
     }
 
     /// 触发消费端事件（生产端完成写入 / 关闭后）。与 [`CircCore::fire_producer`]
@@ -961,7 +963,7 @@ where
         }
         // 主动消费端：对端（被动生产端）完成写入 / 关闭，同步泵出一轮排空
         // （含 `ProducerClose` 驱动下排空残留数据）。
-        self.pump_output();
+        // self.pump_output();
     }
 
     /// 原子地读取并清除一个标志（等价于 `swap(false)` 的原子读-清）。
@@ -1274,17 +1276,17 @@ where
         },
     };
     let res = core::future::poll_fn(|cx| {
-        let can_stop = || match core.try_read_at(demand) {
+        let fn_can_stop = || match core.try_read_at(demand) {
             Ok(_) => true,
             Err(e) => e.err_tag().should_terminate(),
         };
-        if can_stop() {
+        if fn_can_stop() {
             return Poll::Ready(());
         }
         guard.waiter.waker = Some(cx.waker().clone());
         guard.end.wakeslot().register(&guard.waiter);
         guard.registered = true;
-        if can_stop() {
+        if fn_can_stop() {
             return Poll::Ready(());
         }
         Poll::Pending

@@ -10,7 +10,8 @@
 //! 半部（借用核心）。主动端（设备驱动）的半部操作返回错误（不对外访问）。
 
 use core::{
-    marker::PhantomData,
+    marker::{PhantomData, PhantomPinned},
+    pin::Pin,
     ptr,
     sync::atomic::AtomicPtr,
 };
@@ -260,9 +261,9 @@ impl<T> TrProducer for BufProducer<T> {
         Self: 'f;
 
     #[inline]
-    fn init_async<'f>(
-        self: core::pin::Pin<&'f mut self>,
-        core: &'f TyCore,
+    fn init_async<'f, TyCore>(
+        self: Pin<&'f mut Self>,
+        core: &'f mut TyCore,
     ) -> Self::InitAsync<'f>
     where
         TyCore: super::abs_comp_::TrCircBuffCore
@@ -316,8 +317,8 @@ impl<T> TrConsumer for BufConsumer<T> {
             Self: 'f;
 
     #[inline]
-    fn init_async<'f>(
-        self: core::pin::Pin<&'f mut self>,
+    fn init_async<'f, TyCore>(
+        self: core::pin::Pin<&'f mut Self>,
         core: &'f TyCore,
     ) -> Self::InitAsync<'f>
     where
@@ -371,8 +372,8 @@ where
         Self: 'f;
 
     #[inline]
-    fn init_async<'f>(
-        self: core::pin::Pin<&'f mut self>,
+    fn init_async<'f, TyCore>(
+        self: core::pin::Pin<&'f mut Self>,
         core: &'f TyCore,
     ) -> Self::InitAsync<'f>
     where
@@ -430,13 +431,13 @@ where
 {
     type Data = T;
 
-    type InitAsync<'f> = core::future::Ready<Result<_, _>>
+    type InitAsync<'f> = core::future::Ready<Result<(), ()>>
     where
         Self: 'f;
 
     #[inline]
-    fn init_async<'f>(
-        self: core::pin::Pin<&'f mut self>,
+    fn init_async<'f, TyCore>(
+        self: core::pin::Pin<&'f mut Self>,
         core: &'f TyCore,
     ) -> Self::InitAsync<'f>
     where

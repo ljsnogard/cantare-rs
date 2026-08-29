@@ -134,8 +134,8 @@ pub trait TrConsumer {
 
     /// 环形缓冲完成构建前，在 builder 中调用且仅调用一次的方法，用于 Consumer
     /// 自身的异步初始化。
-    fn init_async<'f>(
-        self: Pin<&'f mut self>,
+    fn init_async<'f, TyCore>(
+        self: Pin<&'f mut Self>,
         core: &'f TyCore,
     ) -> Self::InitAsync<'f>
     where
@@ -175,8 +175,8 @@ pub trait TrProducer {
     where
         Self: 'f;
 
-    fn init_async<'f>(
-        self: Pin<&'f mut self>,
+    fn init_async<'f, TyCore>(
+        self: Pin<&'f mut Self>,
         core: &'f TyCore,
     ) -> Self::InitAsync<'f>
     where
