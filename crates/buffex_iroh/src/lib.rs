@@ -28,7 +28,6 @@
 
 #![feature(impl_trait_in_assoc_type)]
 
-mod common;
 pub mod device;
 mod reader;
 mod writer;

@@ -109,10 +109,10 @@ impl IrohReader {
         // 非阻塞）——适配器无需手动驱动。
         let some = self.rx.try_read(demand);
         // EOF 合成：空 + 设备已 EOF → Closing（错误详情经 take_error 取回）。
-        if let Some(RxError::Drained(_)) = some.as_ref().pick_right() {
-            if self.eof.load(Ordering::Acquire) {
-                return SomeOf::new_right(RxError::Closing);
-            }
+        if let Some(RxError::Drained(_)) = some.as_ref().pick_right()
+            && self.eof.load(Ordering::Acquire)
+        {
+            return SomeOf::new_right(RxError::Closing);
         }
         some
     }
