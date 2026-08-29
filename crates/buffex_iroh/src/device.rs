@@ -150,13 +150,16 @@ async fn stream_output_write_impl_<'f, C>(
 where
     C: TrCancellationToken + Clone,
 {
-    // 从共享槽位借用发送流（shutdown 取回后为 None → 写入 0，不再搬数据）。
-    let mut guard = output.stream.lock().unwrap();
-    let Some(stream) = guard.as_mut() else {
+    // 从共享槽位取出发送流，避免把 std MutexGuard 持有到 await 之后
+    // （MutexGuard 不是 Send，会导致写 future 无法跨线程发送）。
+    // shutdown 取回后为 None → 写入 0，不再搬数据。
+    let Some(mut stream) = output.stream.lock().unwrap().take() else {
         return SomeOf::new_left(0);
     };
     // 传输经 abs_buff_tokio_adapt 的 AsyncWrite 适配器（宏生成的 future）。
-    let x = WriteAsOutput::new(stream).write_async(source).await;
+    let x = WriteAsOutput::new(&mut stream).write_async(source).await;
+    // 写完后把流放回共享槽位，供下一次 write / shutdown 使用。
+    *output.stream.lock().unwrap() = Some(stream);
     match x.into_inner() {
         SomeLR::Left(n) => SomeOf::new_left(n),
         SomeLR::Right(err) => {

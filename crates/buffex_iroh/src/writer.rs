@@ -18,16 +18,15 @@ use std::{
 use iroh::endpoint::SendStream;
 
 use abs_buff::{
-    Demand, TrBuffWrite, TrBuffTryWrite, gen_may_cancel_future,
+    Demand, TrBuffWrite, TrBuffTryWrite,
 };
 // `abs_buff` 及其底层依赖（`abs_cancel`）经 `abs_buff_tokio_adapt::x_deps`
 // 再导出，无需在 Cargo.toml 重复声明；`buffex` 是直接依赖。
 use abs_buff_tokio_adapt::x_deps::abs_buff;
-use abs_cancel::{TrCancellationToken, TrMayCancel};
 use anylr::SomeOf;
 use buffex::{
     circular_buff::{CircularBuffBuilder, CoreAlloc, DevConsumer, Producer},
-    x_deps::{abs_cancel, mm_ptr},
+    x_deps::mm_ptr,
 };
 use mm_ptr::Owned;
 

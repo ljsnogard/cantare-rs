@@ -41,7 +41,6 @@ use buffex::{
 use mm_ptr::Owned;
 
 use super::{
-    common::sanitize_capacity,
     device::{StreamInput, StreamInputErr},
 };
 

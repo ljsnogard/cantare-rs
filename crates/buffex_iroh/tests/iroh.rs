@@ -76,7 +76,7 @@ async fn buffered_streams_roundtrip_over_real_iroh_connection() {
     let server_addr = server.addr();
 
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-    let server_task = tokio::spawn(async move {
+    let server_future = async move {
         let incoming = server
             .accept()
             .await
@@ -103,37 +103,40 @@ async fn buffered_streams_roundtrip_over_real_iroh_connection() {
         // the last bytes are delivered to the client.
         let _ = done_rx.await;
         server.close().await;
-    });
+    };
 
-    let client = Endpoint::builder(presets::N0)
-        .relay_mode(RelayMode::Disabled)
-        .bind()
-        .await
-        .expect("bind client");
-    let conn = client
-        .connect(server_addr, ALPN)
-        .await
-        .expect("client should connect to server");
-    let (client_send, client_recv) = conn
-        .open_bi()
-        .await
-        .expect("client should open a bidirectional stream");
+    let client_future = async move {
+        let client = Endpoint::builder(presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind client");
+        let conn = client
+            .connect(server_addr, ALPN)
+            .await
+            .expect("client should connect to server");
+        let (client_send, client_recv) = conn
+            .open_bi()
+            .await
+            .expect("client should open a bidirectional stream");
 
-    // Send the payload through TrBuffWrite.
-    let mut writer = IrohWriter::try_new(client_send, 32).unwrap();
-    write_all(&mut writer, PAYLOAD).await;
-    writer.shutdown().await;
+        // Send the payload through TrBuffWrite.
+        let mut writer = IrohWriter::try_new(client_send, 32).unwrap();
+        write_all(&mut writer, PAYLOAD).await;
+        writer.shutdown().await;
 
-    // Receive the response through TrBuffRead.
-    let mut reader = IrohReader::try_new(client_recv, 32).unwrap();
-    let got = read_exact(&mut reader, RESPONSE.len()).await;
-    assert_eq!(got, RESPONSE);
-    reader.shutdown().await;
-    let _ = done_tx.send(());
+        // Receive the response through TrBuffRead.
+        let mut reader = IrohReader::try_new(client_recv, 32).unwrap();
+        let got = read_exact(&mut reader, RESPONSE.len()).await;
+        assert_eq!(got, RESPONSE);
+        reader.shutdown().await;
+        let _ = done_tx.send(());
+        client.close().await;
+    };
 
-    server_task.await.expect("server task should succeed");
-    client.close().await;
+    tokio::join!(server_future, client_future);
 }
+
 
 /// 直接经同步接口 `TrBuffTryWrite` / `TrBuffTryRead` 搬运较大数据
 /// （多段、多次泵），全程不 spawn——验证无后台任务模型下 try 接口的正确性。

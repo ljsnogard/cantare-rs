@@ -39,16 +39,20 @@ use std::{
     vec::Vec,
 };
 
+use abs_art_bridge::{BLOCK_ON, Runtime, TrBlockOn};
 use abs_buff::{
-    buffer::{TrBuffSegmMut, TrBuffSegmRef},
-    x_deps::anylr::SomeOf, Demand, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
+    Demand, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
+    x_deps::anylr,
 };
-use buffex::ring_buffer::{RingBuffer, RingRx, RingTx};
-use buffex::x_deps::abs_mm::mem_alloc::CoreAlloc;
-use buffex::x_deps::mm_ptr::Owned;
+use abs_mm::mem_alloc::CoreAlloc;
+use anylr::SomeOf;
+use buffex::{
+    ring_buffer::{RingBuffer, RingRx, RingTx},
+    x_deps::{abs_mm, mm_ptr},
+};
+use mm_ptr::Owned;
 
 use crate::{AsStdRead, AsStdWrite};
-use buffex::circular_buff::{BufConsumer, BufProducer, SpscPair};
 
 // ===========================================================================
 // 公共辅助
@@ -146,12 +150,25 @@ fn drain_available(rx: &mut Rx) -> Vec<u8> {
 /// 手动管道——`AsStdWrite` 写进生产端、数据经环形缓冲流动、`AsStdRead` 从
 /// 消费端读出。
 fn make_cb_pair(cap: usize) -> CbPair {
-    buffex::circular_buff::CircularBuffBuilder::with_capacity(cap)
+    let mut ready = buffex::circular_buff::CircularBuffBuilder::with_capacity(cap)
         .expect("cap 必须在 [MIN_CAPACITY, MAX_CAPACITY] 内")
         .producer_passive()
-        .consumer_passive()
+        .consumer_passive();
+    // `abs_art_bridge::Runtime::block_on` 的 inherent 方法要求 `F: 'static`，
+    // 但 `build_async` 返回的 future 借用 `ready`，因此这里走 trait 方法
+    // `TrBlockOn::block_on`（无 `'static` 限制），并在临时多线程 tokio 运行时
+    // 上下文中驱动。
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
         .build()
+        .expect("构建 tokio 运行时失败");
+    rt.block_on(async {
+        <Runtime<{ BLOCK_ON }> as TrBlockOn<_>>::block_on(
+            ready.build_async().into_future(),
+        )
         .expect("双端被动构建不可能失败")
+    })
 }
 
 /// 把 `data` 全部写入 circular buff 写端（同步 API，供后台线程使用）。
