@@ -7,75 +7,77 @@
 //! * **构造期定模式**：模式一旦构建完成即固定，之后由 hook 联动驱动；
 //! * **类型状态强制**：`CircularBuffBuilder`（仅容量）→ 任一「单端已定」的中态
 //!   （[`ProducerSetBuilder`] 生产端已定 / [`ConsumerSetBuilder`] 消费端已定）→
-//!   [`ReadyBuilder`]（两端已定）→ `build`。type-state 链强制「两端模式必须在
-//!   构建期决定」，漏设一端无法编译；
+//!   [`ReadyBuilder`]（两端已定）→ `build_async`。type-state 链强制「两端模式
+//!   必须在构建期决定」，漏设一端无法编译；
 //! * **两端顺序自由**：生产端与消费端**任意顺序**设置——可以从生产端开始
 //!   （[`CircularBuffBuilder::pipe_from_input`] / [`CircularBuffBuilder::producer_passive`]）
 //!   再从消费端收尾，也可以从消费端开始
 //!   （[`CircularBuffBuilder::pipe_into_output`] / [`CircularBuffBuilder::consumer_passive`]）
 //!   再从生产端收尾；还可以用 [`CircularBuffBuilder::pipe_between`] 一步同时设置
-//!   两端，或两端都不设置、直接 [`CircularBuffBuilder::build`] 得到双端被动
+//!   两端，或两端都不设置、直接 [`CircularBuffBuilder::build_async`] 得到双端被动
 //!   （经典手动管道）；
 //! * **设备 move 进核心**：`pipe_from_input` / `pipe_into_output` 把设备以
 //!   具体类型装入端类型，核心无需类型擦除；
-//! * **拥有型产物**：`build` 在堆上分配核心与缓冲（`Shared<CircCore>`，
-//!   分配器 `A` 默认 [`CoreAlloc`]），产出 [`SpscPair`]——没有「缓冲聚合体」
-//!   这一层，使用者只持有 [`Producer`] / [`Consumer`] 半部。
+//! * **异步构建**：`build` 已改为异步（[`ReadyBuilder::build_async`]）——主动端
+//!   在真正产出构建成果前完成异步初始化（`init_async`，例如登记待唤醒结构）。
+//!   `build_async` 在堆上分配核心与缓冲（`Shared<CircCore>`，分配器 `A` 默认
+//!   [`CoreAlloc`]），产出 [`SpscPair`]——没有「缓冲聚合体」这一层，使用者只
+//!   持有 [`Producer`] / [`Consumer`] 半部。
 //!
 //! # 用法一览（生产端/消费端可任意换序）
 //!
-//! **主动端不产出半部**——`build` 的返回类型由两端模式决定：双端被动 → 一对
-//! 半部（[`SpscPair`]）；主动生产 × 被动消费 → 仅消费端半部；被动生产 ×
+//! **主动端不产出半部**——`build_async` 的返回类型由两端模式决定：双端被动 →
+//! 一对半部（[`SpscPair`]）；主动生产 × 被动消费 → 仅消费端半部；被动生产 ×
 //! 主动消费 → 仅生产端半部；主动 × 主动 → [`Pipeline`]（流水线 future：
 //! 交给运行时 spawn 后持续由设备驱动流动，断开经
 //! [`Pipeline::disconnect_handle`]）。
 //!
 //! ```ignore
 //! // 双端被动（默认）：经典手动管道，两端都可访问——不 pipe 任何设备
-//! let (mut tx, mut rx) = CircularBuffBuilder::with_capacity(4096)
-//!     .build()?;
+//! let (mut tx, mut rx) = CircularBuffBuilder::with_capacity(4096)?
+//!     .build_async().await?;
 //!
 //! // 显式双端被动（先设生产端，再设消费端）
-//! let (mut tx, mut rx) = CircularBuffBuilder::with_capacity(4096)
+//! let (mut tx, mut rx) = CircularBuffBuilder::with_capacity(4096)?
 //!     .producer_passive()
 //!     .consumer_passive()
-//!     .build()?;
+//!     .build_async().await?;
 //!
 //! // 显式双端被动（先设消费端，再设生产端——顺序与上例对调）
-//! let (mut tx, mut rx) = CircularBuffBuilder::with_capacity(4096)
+//! let (mut tx, mut rx) = CircularBuffBuilder::with_capacity(4096)?
 //!     .consumer_passive()
 //!     .producer_passive()
-//!     .build()?;
+//!     .build_async().await?;
 //!
 //! // 主动生产 × 被动消费：从 TrInput 自动灌入，用户自行读取
 //! // （主动生产端不产出半部——只拿到消费端）
-//! let mut rx = CircularBuffBuilder::with_capacity(4096)
+//! let mut ready = CircularBuffBuilder::with_capacity(4096)?
 //!     .pipe_from_input(input)      // 生产端先行
-//!     .consumer_passive()
-//!     .build()?;
+//!     .consumer_passive();
+//! let mut rx = ready.build_async().await?;
 //!
 //! // 被动生产 × 主动消费：用户自行写入，写后自动搬运到 TrOutput
 //! // （主动消费端不产出半部——只拿到生产端）
-//! let mut tx = CircularBuffBuilder::with_capacity(4096)
+//! let mut ready = CircularBuffBuilder::with_capacity(4096)?
 //!     .pipe_into_output(output)    // 消费端先行
-//!     .producer_passive()
-//!     .build()?;
+//!     .producer_passive();
+//! let mut tx = ready.build_async().await?;
 //!
-//! // 主动 × 主动：TrInput → 缓冲 → TrOutput 流水线——`build` 返回 [`Pipeline`]
-//! // （Future）：交给运行时 spawn 后持续由设备驱动流动，断开经
+//! // 主动 × 主动：TrInput → 缓冲 → TrOutput 流水线——`build_async` 返回
+//! // [`Pipeline`]（Future）：交给运行时 spawn 后持续由设备驱动流动，断开经
 //! // `pipeline.disconnect_handle().request()`
-//! let pipeline = CircularBuffBuilder::with_capacity(4096)
+//! let mut ready = CircularBuffBuilder::with_capacity(4096)?
 //!     .pipe_into_output(output)    // 消费端先行
-//!     .pipe_from_input(input)      // 生产端后设
-//!     .build()?;
+//!     .pipe_from_input(input);     // 生产端后设
+//! let pipeline = ready.build_async().await?;
 //!
 //! // 一步同时设置两端（等价于上例）
-//! let pipeline = CircularBuffBuilder::with_capacity(4096)
-//!     .pipe_between(input, output)
-//!     .build()?;
+//! let mut ready = CircularBuffBuilder::with_capacity(4096)?
+//!     .pipe_between(input, output);
+//! let pipeline = ready.build_async().await?;
 //! ```
 //!
-//! 缓冲容量在 `build` 时校验（`core_::MIN_CAPACITY` ..= `core_::MAX_CAPACITY`）。
+//! 缓冲容量在 `build_async` 时校验（`core_::MIN_CAPACITY` ..= `core_::MAX_CAPACITY`）。
 
 use core::{
     borrow::BorrowMut,
@@ -199,7 +201,8 @@ impl<T, A> CircularBuffBuilder<Owned<[MaybeUninit<T>], A>, T, A>
 where
     A: TrMalloc + Clone + Default,
 {
-    /// 以默认分配器（[`CoreAlloc`]）构造，容量在 `build` 时校验。
+    /// 以默认分配器（[`CoreAlloc`]）构造，并对容量以 try_capacity 来检查，如果
+    /// 容量不被支持，将返回错误。
     pub fn with_capacity(capacity: usize) -> Result<Self, BuilderError<usize>> {
         Self::with_allocator(capacity, A::default())
     }
@@ -317,7 +320,7 @@ where
     ///
     /// 等价于 `pipe_from_input(input).pipe_into_output(output)` 或
     /// `pipe_into_output(output).pipe_from_input(input)`。直接进入
-    /// [`ReadyBuilder`]，下一步即 `build`。
+    /// [`ReadyBuilder`]，下一步即 `build_async`。
     #[allow(clippy::type_complexity)]
     pub fn pipe_between<I, O>(
         self,
@@ -346,8 +349,8 @@ where
 
     /// 两端都不设置时的默认：双端被动（经典手动管道），直接产出半部对。
     ///
-    /// 等价于 `producer_passive().consumer_passive().build()` 或
-    /// `consumer_passive().producer_passive().build()`。
+    /// 等价于 `producer_passive().consumer_passive().build_async()` 或
+    /// `consumer_passive().producer_passive().build_async()`。
     #[allow(clippy::type_complexity)]
     pub async fn build_async(
         self,
@@ -487,7 +490,7 @@ where
     }
 }
 
-/// 构建链终点：两端模式均已决定，可以 `build`。
+/// 构建链终点：两端模式均已决定，可以 `build_async`。
 pub struct ReadyBuilder<P, C, B, T = u8, A = CoreAlloc>
 where
     P: TrProducer<Data = T>,
@@ -508,9 +511,11 @@ where
 {
     /// 装配核心并产出**按两端模式决定的构建产物**。
     ///
-    /// 校验容量 → 分配缓冲并装入两端（`CircCore::new`）→ 移到堆上
-    /// （[`Shared`]）→ 构建期初始驱动（主动端先泵一轮，让数据开始流动）→
-    /// 按模式装配产物（**主动端不产出半部**，见 [`BuildOutcome`]）。
+    /// 校验容量 → 分配缓冲并装入两端（`CircCore::new`）→ **await 两端各自的
+    /// `init_async`**（主动端在构建期完成异步初始化，例如登记待唤醒结构；被动端
+    /// 为 no-op）→ 移到堆上（[`Shared`]）→ 构建期初始驱动（主动端先泵一轮，
+    /// 让数据开始流动）→ 按模式装配产物（**主动端不产出半部**，见
+    /// [`BuildOutcome`]）。
     ///
     /// 返回类型由两端模式决定：被动 × 被动 → [`SpscPair`]（一对半部，调用者
     /// 自行读写）；主动生产 × 被动消费 → 仅消费端半部（读取即自动驱动输入泵
@@ -588,10 +593,11 @@ where
 // 构建产物装配：按两端模式决定 `build` 的返回类型
 // ---------------------------------------------------------------------------
 
-/// 按两端模式装配 `build` 的产物（**内部机制**，调用者不应实现或直接使用）。
+/// 按两端模式装配 `build_async` 的产物（**内部机制**，调用者不应实现或直接
+/// 使用）。
 ///
 /// 设计初衷：**主动端不产出半部**——主动端由设备驱动，调用者不应持有任何
-/// 可操作它的对象，因此 `build` 的返回类型随两端模式而定：
+/// 可操作它的对象，因此 `build_async` 的返回类型随两端模式而定：
 ///
 /// * 被动 × 被动 → [`SpscPair`]（一对半部）；
 /// * 主动生产 × 被动消费 → 仅消费端半部；

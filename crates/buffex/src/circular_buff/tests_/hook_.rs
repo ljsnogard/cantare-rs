@@ -7,7 +7,7 @@
 
 use std::{pin::pin, vec};
 
-use abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite};
+use abs_buff::{Demand, TrBuffTryRead, TrBuffTryWrite};
 
 use super::{
     super::RxError,
@@ -15,13 +15,14 @@ use super::{
 };
 
 /// 构建被动 × 被动半部对（测试辅助，见 [`super::sync_`] 的说明）。
+///
+/// `build` 已改为异步（`build_async`）：同步测试用 `block_on` 驱动构建 future。
 fn make_pair<const N: usize>() -> Pair {
-    DefaultBuilder::with_capacity(N)
+    let mut ready = DefaultBuilder::with_capacity(N)
         .unwrap()
         .producer_passive()
-        .consumer_passive()
-        .build()
-        .unwrap()
+        .consumer_passive();
+    futures_lite::future::block_on(ready.build_async().into_future()).unwrap()
 }
 
 /// 生产者关闭（EOF）：触发消费端 hook `ProducerClose`；读者可读尽剩余数据，

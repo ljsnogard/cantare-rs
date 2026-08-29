@@ -39,12 +39,11 @@
 use core::pin::Pin;
 
 use abs_buff::{
-    Demand,
     buffer::{TrBuffSegmMut, TrBuffSegmRef},
     gen_may_cancel_future,
     x_deps::abs_cancel,
 };
-use abs_cancel::{TrCancellationToken, TrMayCancel};
+use abs_cancel::TrMayCancel;
 
 /// 环形核心的「段提交」接口：段 drop 时按已消费量推进读写位置。
 ///

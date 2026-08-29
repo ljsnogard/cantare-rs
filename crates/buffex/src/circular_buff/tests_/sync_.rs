@@ -13,13 +13,17 @@ use super::{
 };
 
 /// 构建一个容量 `N` 的被动 × 被动半部对（测试辅助）。
+///
+/// `build` 已改为异步（`build_async`，主动端在构建期完成异步初始化）：同步
+/// `#[test]` 用最小单线程执行器（`futures_lite::future::block_on`）把构建
+/// future 驱动到完成。`into_future()` 把生成型构建 future（`TrMayCancel`
+/// 包装）转成普通 `Future` 供 `block_on` 接收。
 fn make_pair<const N: usize>() -> Pair {
-    DefaultBuilder::with_capacity(N)
+    let mut ready = DefaultBuilder::with_capacity(N)
         .unwrap()
         .producer_passive()
-        .consumer_passive()
-        .build()
-        .unwrap()
+        .consumer_passive();
+    futures_lite::future::block_on(ready.build_async().into_future()).unwrap()
 }
 
 /// 写入 / 读出往返：写 3 字节，读回同样的 3 字节，位置正确推进。

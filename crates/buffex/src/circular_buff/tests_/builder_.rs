@@ -22,14 +22,17 @@ use crate::circular_buff::{
     },
 };
 
-/// 默认双端被动：不 pipe 任何设备，`with_capacity(...).build()` 直接得到
+/// 默认双端被动：不 pipe 任何设备，`with_capacity(...).build_async()` 直接得到
 /// 一对可用的 Producer / Consumer（经典手动管道）。
+///
+/// `build` 已改为异步（`build_async`）：同步 `#[test]` 用
+/// `futures_lite::future::block_on` 驱动构建 future 到完成。
 #[test]
 fn build_without_pipe_defaults_to_passive_pair() {
-    let pair: Pair = DefaultBuilder::with_capacity(8)
-        .unwrap()
-        .build()
-        .unwrap();
+    let pair: Pair = futures_lite::future::block_on(
+        DefaultBuilder::with_capacity(8).unwrap().build_async(),
+    )
+    .unwrap();
 
     let (mut tx, mut rx) = pair;
     assert_eq!(tx.capacity(), 8);
@@ -56,12 +59,12 @@ fn build_without_pipe_defaults_to_passive_pair() {
 /// `producer_passive().consumer_passive()` 顺序对调）。
 #[test]
 fn consumer_first_then_producer_passive() {
-    let pair: Pair = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
         .consumer_passive()
-        .producer_passive()
-        .build()
-        .unwrap();
+        .producer_passive();
+    let pair: Pair =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
     let (mut tx, mut rx) = pair;
 
     let demand = Demand::at_least(2);
@@ -80,7 +83,8 @@ fn consumer_first_then_producer_passive() {
 
 /// 消费端先行（`pipe_into_output`）、生产端后设（`pipe_from_input`）：
 /// 与 `pipe_from_input(...).pipe_into_output(...)` 完全等价——首个 poll 即由
-/// 设备驱动把输入全部流到输出。两端主动 → `build` 返回 [`Pipeline`] future。
+/// 设备驱动把输入全部流到输出。两端主动 → `build_async` 返回
+/// [`Pipeline`] future。
 #[test]
 fn pipe_into_output_then_pipe_from_input() {
     let input = TestInput::new((0..20).collect());
@@ -88,12 +92,12 @@ fn pipe_into_output_then_pipe_from_input() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut pipeline = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
         .pipe_into_output(output)
-        .pipe_from_input(input)
-        .build()
-        .unwrap();
+        .pipe_from_input(input);
+    let mut pipeline =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     let (waker, _wake_flag) = TestWaker::make_waker_tuple();
     let fut = pipeline.pipe_async().into_future();
@@ -105,7 +109,7 @@ fn pipe_into_output_then_pipe_from_input() {
 }
 
 /// `pipe_between(input, output)`：一步同时设置两端，等价于两段式全主动
-/// 流水线。两端主动 → `build` 返回 [`Pipeline`] future。
+/// 流水线。两端主动 → `build_async` 返回 [`Pipeline`] future。
 #[test]
 fn pipe_between_builds_active_pipeline() {
     let input = TestInput::new((0..20).collect());
@@ -113,11 +117,11 @@ fn pipe_between_builds_active_pipeline() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut pipeline = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
-        .pipe_between(input, output)
-        .build()
-        .unwrap();
+        .pipe_between(input, output);
+    let mut pipeline =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     let (waker, _wake_flag) = TestWaker::make_waker_tuple();
     let fut = pipeline.pipe_async().into_future();
@@ -136,12 +140,12 @@ fn pipe_into_output_then_passive_producer() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut tx = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
         .pipe_into_output(output)
-        .producer_passive()
-        .build()
-        .unwrap();
+        .producer_passive();
+    let mut tx =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     let demand = Demand::at_least(3);
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
@@ -161,12 +165,12 @@ fn consumer_passive_then_pipe_from_input() {
     let input = TestInput::new((0..10).collect());
     let pos = input.pos.clone();
 
-    let mut rx = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
         .consumer_passive()
-        .pipe_from_input(input)
-        .build()
-        .unwrap();
+        .pipe_from_input(input);
+    let mut rx =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     // 构造完成即已泵入：容量 8 全部可用（REVERSION 约定）→ 填满 8 格。
     assert_eq!(rx.data_size(), 8);

@@ -256,14 +256,14 @@ where
 impl<T> TrProducer for BufProducer<T> {
     type Data = T;
 
-    type InitAsync<'f> = core::future::Ready<Result<_, _>>
+    type InitAsync<'f> = core::future::Ready<Result<(), ()>>
     where
         Self: 'f;
 
     #[inline]
     fn init_async<'f, TyCore>(
         self: Pin<&'f mut Self>,
-        core: &'f mut TyCore,
+        _core: &'f TyCore,
     ) -> Self::InitAsync<'f>
     where
         TyCore: super::abs_comp_::TrCircBuffCore
@@ -312,14 +312,14 @@ impl<T> TrProducer for BufProducer<T> {
 impl<T> TrConsumer for BufConsumer<T> {
     type Data = T;
 
-    type InitAsync<'f> = core::future::Ready<Result<_, _>>
+    type InitAsync<'f> = core::future::Ready<Result<(), ()>>
         where
             Self: 'f;
 
     #[inline]
     fn init_async<'f, TyCore>(
         self: core::pin::Pin<&'f mut Self>,
-        core: &'f TyCore,
+        _core: &'f TyCore,
     ) -> Self::InitAsync<'f>
     where
         TyCore: super::abs_comp_::TrCircBuffCore
@@ -367,14 +367,14 @@ where
 {
     type Data = T;
 
-    type InitAsync<'f> = core::future::Ready<Result<_, _>>
+    type InitAsync<'f> = core::future::Ready<Result<(), ()>>
     where
         Self: 'f;
 
     #[inline]
     fn init_async<'f, TyCore>(
         self: core::pin::Pin<&'f mut Self>,
-        core: &'f TyCore,
+        _core: &'f TyCore,
     ) -> Self::InitAsync<'f>
     where
         TyCore: super::abs_comp_::TrCircBuffCore
@@ -438,7 +438,7 @@ where
     #[inline]
     fn init_async<'f, TyCore>(
         self: core::pin::Pin<&'f mut Self>,
-        core: &'f TyCore,
+        _core: &'f TyCore,
     ) -> Self::InitAsync<'f>
     where
         TyCore: super::abs_comp_::TrCircBuffCore

@@ -33,13 +33,15 @@ use super::{
 };
 
 /// 构建一个容量 `N` 的被动 × 被动半部对（测试辅助）。
+///
+/// `build` 已改为异步（`build_async`）：同步测试用
+/// `futures_lite::future::block_on` 驱动构建 future 到完成。
 fn make_pair<const N: usize>() -> Pair {
-    DefaultBuilder::with_capacity(N)
+    let mut ready = DefaultBuilder::with_capacity(N)
         .unwrap()
         .producer_passive()
-        .consumer_passive()
-        .build()
-        .unwrap()
+        .consumer_passive();
+    futures_lite::future::block_on(ready.build_async().into_future()).unwrap()
 }
 
 /// # 被测约定

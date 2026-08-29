@@ -72,7 +72,7 @@
 //! （见文件末尾的安全说明）。
 
 use core::{
-    borrow::{Borrow, BorrowMut},
+    borrow::BorrowMut,
     cell::UnsafeCell,
     future::Future,
     marker::{PhantomData, PhantomPinned},
@@ -92,13 +92,11 @@ use abs_buff::{
     x_deps::{anylr, abs_cancel},
 };
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
-use abs_mm::mem_alloc::{CoreAlloc, TrMalloc};
 use abs_sync::ok_or::XtOkOr;
 
 use anylr::SomeOf;
-use atomex::{AtomicFlags, CmpxchResult};
+use atomex::AtomicFlags;
 use atomic_sync::x_deps::{abs_sync, atomex};
-use mm_ptr::{Owned, x_deps::abs_mm,};
 
 use super::{
     abs_comp_::{

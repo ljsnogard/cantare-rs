@@ -1,11 +1,12 @@
-//! 主动模式的测试：输入泵（`pipe_from_input`）、输出泵（`pipe_into_output`）、
+//! 主动端的测试：输入泵（`pipe_from_input`）、输出泵（`pipe_into_output`）、
 //! 以及全主动流水线（`Pipeline` future）。主动端不 `spawn` 任何任务：数据在
 //! 构建期 / 对端操作时由 hook 同步搬运；全主动流水线由设备驱动的 `Pipeline`
 //! future 持续搬运。
 //!
-//! 主动端**不产出半部**：`build` 只把被动端的半部交给调用者（主动生产 ×
+//! 主动端**不产出半部**：`build_async` 只把被动端的半部交给调用者（主动生产 ×
 //! 被动消费 → 仅消费端；被动生产 × 主动消费 → 仅生产端；主动 × 主动 →
-//! `Pipeline` future）。
+//! `Pipeline` future）。`build` 已改为异步（`build_async`，主动端在构建期
+//! 完成异步初始化），同步测试用 `futures_lite::future::block_on` 驱动。
 //!
 //! 设备 move 进核心后测试无法直接访问，经 `Arc` 观察其内部状态。
 
@@ -29,19 +30,19 @@ use super::{
 /// 主动生产 × 被动消费：构造即从 `TrInput` 泵入；消费端每读取一次，
 /// 释放的可写空间立即被新数据补满；输入耗尽后停止。
 ///
-/// `build` 只返回消费端半部——主动生产端由设备驱动，不产出写半部。
+/// `build_async` 只返回消费端半部——主动生产端由设备驱动，不产出写半部。
 #[test]
 fn pipe_from_input_fills_and_refills() {
     let input = TestInput::new((0..20).collect());
     let data = input.data.clone();
     let pos = input.pos.clone();
 
-    let mut rx = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
         .pipe_from_input(input)
-        .consumer_passive()
-        .build()
-        .unwrap();
+        .consumer_passive();
+    let mut rx =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     // 构造完成即已泵入：容量 8 全部可用（REVERSION 约定，不再空一槽）→ 填满 8 格。
     assert_eq!(rx.data_size(), 8);
@@ -74,18 +75,18 @@ fn pipe_from_input_fills_and_refills() {
 
 /// 被动生产 × 主动消费：写入缓冲的数据**立即**被搬运到 `TrOutput`。
 ///
-/// `build` 只返回生产端半部——主动消费端由设备驱动，不产出读半部。
+/// `build_async` 只返回生产端半部——主动消费端由设备驱动，不产出读半部。
 #[test]
 fn pipe_into_output_drains_on_write() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut tx = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
         .producer_passive()
-        .pipe_into_output(output)
-        .build()
-        .unwrap();
+        .pipe_into_output(output);
+    let mut tx =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     // 写 3 字节 → 写段 drop 提交 → 消费端 hook 立即泵出。
     let demand = Demand::at_least(3);
@@ -116,7 +117,7 @@ fn pipe_into_output_drains_on_write() {
     );
 }
 
-/// 主动 × 主动：`TrInput → 缓冲 → TrOutput` 流水线。`build` 返回
+/// 主动 × 主动：`TrInput → 缓冲 → TrOutput` 流水线。`build_async` 返回
 /// [`Pipeline`] future；首个 poll 即由设备驱动把当前可用的输入全部流到输出。
 #[test]
 fn pipe_both_active_pipeline() {
@@ -125,12 +126,12 @@ fn pipe_both_active_pipeline() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut pipeline = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
         .pipe_from_input(input)
-        .pipe_into_output(output)
-        .build()
-        .unwrap();
+        .pipe_into_output(output);
+    let mut pipeline =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     // 首个 poll：输入泵 + 输出泵跑完整个流水线（非阻塞设备立即就绪）。
     let (waker, _wake_flag) = TestWaker::make_waker_tuple();
@@ -250,11 +251,11 @@ fn pipeline_flows_driven_by_devices() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut pipeline = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
-        .pipe_between(input, output)
-        .build()
-        .unwrap();
+        .pipe_between(input, output);
+    let mut pipeline =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     let (waker, _wake_flag) = TestWaker::make_waker_tuple();
     let fut = pipeline.pipe_async().into_future();
@@ -294,12 +295,12 @@ fn pipe_from_input_stops_when_exhausted() {
     let input = TestInput::new(vec![1, 2, 3]);
     let pos = input.pos.clone();
 
-    let mut rx = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
         .pipe_from_input(input)
-        .consumer_passive()
-        .build()
-        .unwrap();
+        .consumer_passive();
+    let mut rx =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     let mut total = Vec::new();
     loop {
@@ -380,12 +381,12 @@ fn try_read_auto_drives_active_producer() {
         calls: calls.clone(),
     };
 
-    let mut rx = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
         .pipe_from_input(input)
-        .consumer_passive()
-        .build()
-        .unwrap();
+        .consumer_passive();
+    let mut rx =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     // 构造期 start() 泵了一轮，但门未开 → 缓冲为空。
     assert_eq!(rx.data_size(), 0);
@@ -420,12 +421,12 @@ fn close_tx_drains_remaining_output() {
     let output = TestOutput::new();
     let out_data = output.data.clone();
 
-    let mut tx = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
         .producer_passive()
-        .pipe_into_output(output)
-        .build()
-        .unwrap();
+        .pipe_into_output(output);
+    let mut tx =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     // 写 5 字节（一次借出可写区，全部写入并提交）。
     let demand = Demand::at_least(5);
@@ -473,12 +474,12 @@ fn read_async_auto_drives_active_producer() {
         calls: calls.clone(),
     };
 
-    let mut rx = DefaultBuilder::with_capacity(8)
+    let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
         .pipe_from_input(input)
-        .consumer_passive()
-        .build()
-        .unwrap();
+        .consumer_passive();
+    let mut rx =
+        futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
     // 构造期 start() 泵了一轮，但门未开 → 缓冲为空。
     assert_eq!(rx.data_size(), 0);
@@ -672,24 +673,24 @@ fn dual_head_device_observes_cross_pipe_flow() {
     let dual = DualHeadDevice::new();
 
     // pipe1：source（TrInput）→ dual（TrOutput）——数据流入双头设备。
-    let mut pipe1 = DefaultBuilder::with_capacity(8)
+    let mut ready1 = DefaultBuilder::with_capacity(8)
         .unwrap()
         .pipe_from_input(source)
-        .pipe_into_output(dual.clone())
-        .build()
-        .unwrap();
+        .pipe_into_output(dual.clone());
+    let mut pipe1 =
+        futures_lite::future::block_on(ready1.build_async().into_future()).unwrap();
     // pipe2：dual（TrInput）→ sink（TrOutput）——数据从双头设备流出。
-    let mut pipe2 = DefaultBuilder::with_capacity(8)
+    let mut ready2 = DefaultBuilder::with_capacity(8)
         .unwrap()
         .pipe_from_input(dual.clone())
-        .pipe_into_output(sink)
-        .build()
-        .unwrap();
+        .pipe_into_output(sink);
+    let mut pipe2 =
+        futures_lite::future::block_on(ready2.build_async().into_future()).unwrap();
 
     let (waker, _flag) = TestWaker::make_waker_tuple();
-    let mut f1 = pipe1.pipe_async().into_future();
+    let f1 = pipe1.pipe_async().into_future();
     let mut p1 = pin!(f1);
-    let mut f2 = pipe2.pipe_async().into_future();
+    let f2 = pipe2.pipe_async().into_future();
     let mut p2 = pin!(f2);
 
     // (1) 先 poll pipe2：双头设备尚无数据 → 输入侧挂起（阻塞式设备语义，

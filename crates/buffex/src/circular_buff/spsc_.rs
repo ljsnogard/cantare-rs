@@ -1,7 +1,7 @@
 //! 提供给最终用户、暴露的公共接口 Producer 和 Consumer。
 //! 所有对 Circular Buffer 的操作都必须通过这两个实例。
 //! 如果有一端在 Circular Buffer 构建时就已经被指定（主动模式），那么这一端
-//! **不产出半部**——`build` 只把被动端的半部交给调用者（见
+//! **不产出半部**——`build_async` 只把被动端的半部交给调用者（见
 //! [`super::builder::BuildOutcome`]）；全主动时产出 [`Pipeline`]（流水线
 //! future，由设备驱动）。
 //!
@@ -30,7 +30,7 @@ use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mm::mem_alloc::{CoreAlloc, TrMalloc};
 use anylr::SomeOf;
 use mm_ptr::{
-    Owned, Shared,
+    Shared,
     x_deps::abs_mm,
 };
 
@@ -41,7 +41,7 @@ use crate::circular_buff::{
 };
 use super::{
     abs_comp_::{TrConsumer, TrProducer},
-    core_::{CircCore, WakeSlot},
+    core_::CircCore,
     error_::{RxError, TxError},
     reclaim_::{ReaderReclaim, ReclSliceMut, ReclSliceRef, WriterReclaim},
 };
@@ -391,11 +391,11 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// 全主动流水线（双端主动时 `build` 的产物）：一个由设备驱动的 Future
+// 全主动流水线（双端主动时 `build_async` 的产物）：一个由设备驱动的 Future
 // ---------------------------------------------------------------------------
 
-/// 双端全主动（`TrInput → 缓冲 → TrOutput`）时 `build` 的产物：一条**流水线
-/// Future**。
+/// 双端全主动（`TrInput → 缓冲 → TrOutput`）时 `build_async` 的产物：一条
+/// **流水线 Future**。
 ///
 /// 由调用者交给异步运行时（`spawn`）驱动：**只要本 future 存活（未被取消 /
 /// 未结束），数据就持续从输入设备流向输出设备**——泵循环 await 两端设备的
