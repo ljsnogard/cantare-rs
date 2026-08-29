@@ -11,10 +11,8 @@
 
 use core::{
     marker::{PhantomData, PhantomPinned},
-    pin::{pin, Pin},
     ptr,
     sync::atomic::AtomicPtr,
-    task::{Context, Poll, Waker},
 };
 
 use abs_buff::{
@@ -35,15 +33,6 @@ use super::{
     },
     core_::WakeSlot,
 };
-
-/// 单次非阻塞轮询（同步上下文：`init_async` 的初始搬运）。
-///
-/// `Pending` 表示设备需外部唤醒 / 其它执行体推进——本轮放弃，**不自旋**。
-fn poll_once<F: core::future::Future>(fut: Pin<&mut F>) -> Poll<F::Output> {
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
-    fut.poll(&mut cx)
-}
 
 // ---------------------------------------------------------------------------
 // 端类型
@@ -261,14 +250,16 @@ where
         DevProducerInitAsync(self, core)
     }
 
-    pub(super) fn react_async<'f, TySegm>(
+    pub(super) fn react_async<'a, 'f, TySegm>(
         &'f mut self,
         segm_mut: &'f mut TySegm,
-    ) -> DevProducerReactAsync<'f, TyInput, T, TySegm>
+    ) -> DevProducerReactAsync<'a, 'f, TyInput, T, TySegm>
     where
-        TySegm: TrBuffSegmMut<'f, T>,
+        'a: 'f,
+        TySegm: 'a + TrBuffSegmMut<'a, T>,
     {
-        DevProducerReactAsync(self, segm_mut)
+        // 宏为 where-only 生命周期 'a 追加了 PhantomData 标记字段（位置型）。
+        DevProducerReactAsync(self, segm_mut, PhantomData)
     }
 }
 
@@ -321,6 +312,7 @@ where
         &self.wakeslot_
     }
 
+    #[allow(dead_code)] // trait impl 直接构造 DevConsumerInitAsync，未走本方法
     pub(super) fn init_async<'f, TyCore>(
         &'f mut self,
         core: &'f TyCore,
@@ -331,15 +323,16 @@ where
         DevConsumerInitAsync(self, core)
     }
 
-    pub(super) fn react_async<'f, TySegm>(
+    pub(super) fn react_async<'a, 'f, TySegm>(
         &'f mut self,
         segm_ref: &'f mut TySegm,
-    ) -> DevConsumerReactAsync<'f, TyOutput, T, TySegm>
+    ) -> DevConsumerReactAsync<'a, 'f, TyOutput, T, TySegm>
     where
-        TySegm: TrBuffSegmRef<'f, T>,
+        'a: 'f,
+        TySegm: 'a + TrBuffSegmRef<'a, T>,
         T: 'f,
     {
-        DevConsumerReactAsync(self, segm_ref)
+        DevConsumerReactAsync(self, segm_ref, PhantomData)
     }
 }
 
@@ -358,10 +351,11 @@ where
         Self: 'f,
         TyCore: 'f + TrCircBuffCore<Data = Self::Data>;
 
-    type ReactAsync<'f, TySegm> = core::future::Ready<ReceiverReact>
+    type ReactAsync<'a, 'f, TySegm> = core::future::Ready<ReceiverReact>
     where
         Self: 'f,
-        TySegm: 'f + TrBuffSegmMut<'f, Self::Data>;
+        TySegm: 'a + TrBuffSegmMut<'a, Self::Data>,
+        'a: 'f;
 
     #[inline]
     fn init_async<'f, TyCore>(
@@ -400,12 +394,13 @@ where
     }
 
     #[inline]
-    fn react_async<'f, TySegm>(
+    fn react_async<'a, 'f, TySegm>(
         &'f mut self,
         _segm: &'f mut TySegm,
-    ) -> Self::ReactAsync<'f, TySegm>
+    ) -> Self::ReactAsync<'a, 'f, TySegm>
     where
-        TySegm: TrBuffSegmMut<'f, T>,
+        'a: 'f,
+        TySegm: 'a + TrBuffSegmMut<'a, T>,
     {
         // 被动端由调用者驱动，无反应。
         core::future::ready(ReceiverReact::Continue)
@@ -423,10 +418,11 @@ where
         Self: 'f,
         TyCore: 'f + TrCircBuffCore<Data = Self::Data>;
 
-    type ReactAsync<'f, TySegm> = core::future::Ready<ReceiverReact>
+    type ReactAsync<'a, 'f, TySegm> = core::future::Ready<ReceiverReact>
     where
         Self: 'f,
-        TySegm: 'f + TrBuffSegmRef<'f, Self::Data>;
+        TySegm: 'a + TrBuffSegmRef<'a, Self::Data>,
+        'a: 'f;
 
     #[inline]
     fn init_async<'f, TyCore>(
@@ -465,12 +461,13 @@ where
     }
 
     #[inline]
-    fn react_async<'f, TySegm>(
+    fn react_async<'a, 'f, TySegm>(
         &'f mut self,
         _segm: &'f mut TySegm,
-    ) -> Self::ReactAsync<'f, TySegm>
+    ) -> Self::ReactAsync<'a, 'f, TySegm>
     where
-        TySegm: 'f + TrBuffSegmRef<'f, T>,
+        'a: 'f,
+        TySegm: 'a + TrBuffSegmRef<'a, T>,
     {
         core::future::ready(ReceiverReact::Continue)
     }
@@ -488,10 +485,11 @@ where
         Self: 'f,
         TyCore: 'f + TrCircBuffCore<Data = Self::Data>;
 
-    type ReactAsync<'f, TySegm> = DevProducerReactAsync<'f, TyInput, T, TySegm>
+    type ReactAsync<'a, 'f, TySegm> = DevProducerReactAsync<'a, 'f, TyInput, T, TySegm>
     where
         Self: 'f,
-        TySegm: 'f + TrBuffSegmMut<'f, Self::Data>;
+        TySegm: 'a + TrBuffSegmMut<'a, Self::Data>,
+        'a: 'f;
 
     #[inline]
     fn init_async<'f, TyCore>(
@@ -522,12 +520,13 @@ where
         interested
     }
 
-    fn react_async<'f, TySegm>(
+    fn react_async<'a, 'f, TySegm>(
         &'f mut self,
         segm: &'f mut TySegm,
-    ) -> Self::ReactAsync<'f, TySegm>
+    ) -> Self::ReactAsync<'a, 'f, TySegm>
     where
-        TySegm: TrBuffSegmMut<'f, T>,
+        'a: 'f,
+        TySegm: 'a + TrBuffSegmMut<'a, T>,
     {
         DevProducer::react_async(self, segm)
     }
@@ -545,10 +544,11 @@ where
         Self: 'f,
         C: 'f + TrCircBuffCore<Data = Self::Data>;
 
-    type ReactAsync<'f, S> = DevConsumerReactAsync<'f, O, T, S>
+    type ReactAsync<'a, 'f, S> = DevConsumerReactAsync<'a, 'f, O, T, S>
     where
         Self: 'f,
-        S: 'f + TrBuffSegmRef<'f, Self::Data>;
+        S: 'a + TrBuffSegmRef<'a, Self::Data>,
+        'a: 'f;
 
     #[inline]
     fn init_async<'f, C>(
@@ -582,12 +582,13 @@ where
     }
 
     #[inline]
-    fn react_async<'f, S>(
+    fn react_async<'a, 'f, S>(
         &'f mut self,
         segm_ref: &'f mut S,
-    ) -> Self::ReactAsync<'f, S>
+    ) -> Self::ReactAsync<'a, 'f, S>
     where
-        S: TrBuffSegmRef<'f, T>,
+        'a: 'f,
+        S: 'a + TrBuffSegmRef<'a, T>,
     {
         DevConsumer::react_async(self, segm_ref)
     }
@@ -616,15 +617,16 @@ where
 }
 
 #[gen_may_cancel_future(DevProducerReact)]
-async fn dev_producer_react_async_<'f, I, T, S, K>(
+async fn dev_producer_react_async_<'a, 'f, I, T, S, K>(
     producer: &'f mut DevProducer<I, T>,
     segm_mut: &'f mut S,
     cancel: &'f mut K,
 ) -> ReceiverReact
 where
+    'a: 'f,
     I: TrInput<T>,
     T: 'static,
-    S: 'f + TrBuffSegmMut<'f, T>,
+    S: 'a + TrBuffSegmMut<'a, T>,
     K: TrCancellationToken + Clone,
 {
     let mut moved = 0usize;
@@ -671,19 +673,20 @@ where
         .react_async(&mut segm_ref)
         .may_cancel_with(cancel)
         .await;
-    return Result::Ok(());
+    Result::Ok(())
 }
 
 #[gen_may_cancel_future(DevConsumerReact)]
-async fn dev_consumer_react_async_<'s, 'f, O, T, S, K>(
+async fn dev_consumer_react_async_<'a, 'f, O, T, S, K>(
     consumer: &'f mut DevConsumer<O, T>,
     segm_ref: &'f mut S,
     cancel: &'f mut K,
 ) -> ReceiverReact
 where
+    'a: 'f,
     O: TrOutput<T>,
     T: 'static,
-    S: 'f + TrBuffSegmRef<'f, T>,
+    S: 'a + TrBuffSegmRef<'a, T>,
     K: TrCancellationToken + Clone,
 {
     let mut moved = 0usize;

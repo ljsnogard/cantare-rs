@@ -27,7 +27,40 @@ mod tests_expanded_ {
         let _ = (a, b, l, x, cancel);
         42
     }
+
+    // -------------------------------------------------------------------
+    // 回归用例：where 子句中「与 cancel token 生命周期（最后一个 `'f`）关联
+    // 的生命周期」（`'a`，经 `S: Trait<'a>` + `'a: 'f` 关联）必须成为生成类型
+    // 的泛型参数并补上 `'a: 'f` 约束——否则生成的 future / factory 缺失真实
+    // 约束（E0277 / E0271），或 E0597（借用寿命被统一成 `'f` 超出局部变量）。
+    // -------------------------------------------------------------------
+
+    /// 带生命周期参数的 trait，模拟 `TrBuffSegmMut<'a, T>` 的形态。
+    pub trait SegmLike<'a> {
+        fn len(&self) -> usize;
+    }
+
+    impl<'a> SegmLike<'a> for () {
+        fn len(&self) -> usize {
+            0
+        }
+    }
+
+    #[gen_may_cancel_future(ReactThing)]
+    pub async fn react_thing_async<'a, 'f, S, K>(
+        segm: &'f mut S,
+        cancel: &'f mut K,
+    ) -> usize
+    where
+        'a: 'f,
+        S: 'a + SegmLike<'a>,
+        K: TrCancellationToken + Clone,
+    {
+        let _ = cancel;
+        segm.len()
+    }
 }
+
 
 #[compio::test]
 pub async fn run() {
@@ -39,4 +72,13 @@ pub async fn run() {
     let l = 3usize;
     let x = [0usize; 1usize].as_ref().iter();
     let _ = do_thing_async(&mut a, &mut b, l, x, NonCancellableToken::shared_mut()).await;
+}
+
+#[compio::test]
+pub async fn run_react_thing() {
+    use abs_cancel::NonCancellableToken;
+    use tests_expanded_::react_thing_async;
+
+    let mut segm = ();
+    let _ = react_thing_async(&mut segm, NonCancellableToken::shared_mut()).await;
 }

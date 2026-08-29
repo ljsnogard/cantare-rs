@@ -255,16 +255,50 @@ pub fn gen_may_cancel_future(
         _ => panic!("Expected function to return a value"),
     };
 
-    // async_struct 只需要包含字段中实际出现的生命周期；future 需要包含全部
-    // 生命周期，因为 cancel token 字段会使用最后一个生命周期 `last_lt`。
-    let async_lifetimes = collect_used_lifetimes(&types, &lifetimes_all);
+    // 生命周期收集分两部分：
+    // * **字段生命周期**（`field_lifetimes`）：变换后字段类型中出现的生命周期
+    //   （借用统一成 `last_lt` 后的外层引用不计）。这些是 async struct 的泛型
+    //   参数——结构体的生命周期必须出现在字段中，否则 E0392；
+    // * **where 子句生命周期**（`where_lifetimes`）：类型约束中出现的生命周期
+    //   （如 `S: TrBuffSegmMut<'a, T>` 的 `'a`），经 `'a: last_lt` 与 cancel
+    //   token 的借用生命周期关联。它们只出现在约束里，无法作为结构体泛型
+    //   参数（E0392），因此：
+    //   - future / factory / impl 携带全部生命周期（trait 与 impl 不触发
+    //     E0392），并为 where-only 生命周期添加 `PhantomData<&'lt ()>` 标记
+    //     字段；
+    //   - async struct 只携带字段生命周期，其 where 子句过滤掉引用 where-only
+    //     生命周期的谓词。
+    let field_lifetimes = collect_used_lifetimes(&types, &lifetimes_all);
+    let where_lifetimes = collect_used_lifetimes_from_where(where_clause, &lifetimes_all);
+    // 全部生命周期按 **fn 声明顺序** 收集（字段 ∪ where 子句）：生成类型的
+    // 泛型参数顺序必须与用户书写的一致（如 `DevProducerReactAsync<'a, 'f, ...>`），
+    // 否则实例化时生命周期参数错位（E0478）。
+    let all_lifetimes: Vec<Lifetime> = lifetimes_all
+        .iter()
+        .filter(|lt| {
+            field_lifetimes.contains(lt) || where_lifetimes.contains(lt)
+        })
+        .cloned()
+        .collect();
+    let where_only_lifetimes: Vec<Lifetime> = all_lifetimes
+        .iter()
+        .filter(|lt| !field_lifetimes.contains(lt))
+        .cloned()
+        .collect();
 
     // 把仍然出现在生成类型中的非 `last_lt` 生命周期，重新补上 `lt: last_lt`
     // 约束。它们不是“最外层引用生命周期”，因此不能在上面的剪裁中被一并丢掉。
-    let where_clause_no_cancel_no_lt =
-        add_async_lifetime_bounds(where_clause_no_cancel_no_lt_base.clone(), &async_lifetimes, &last_lt);
+    //
+    // 两份 where 子句（async struct 与 impl 共用 `where_clause_impl`）：
+    // * async struct 携带**全部**生命周期（含 where-only 的 `'a`，经标记字段
+    //   引用）——否则 IntoFuture / TrMayCancel 实现的 self 类型不含 `'a`，
+    //   而关联类型 `ReactThingFuture<'f, 'a, S, ...>` 引用 `'a` → E0207
+    //   （impl 的生命周期必须被 self 类型或 trait 参数约束）；
+    // * future 同样携带全部生命周期。
+    let where_clause_impl =
+        add_async_lifetime_bounds(where_clause_no_cancel_no_lt_base.clone(), &all_lifetimes, &last_lt);
     let where_clause_no_lt =
-        add_async_lifetime_bounds(where_clause_no_lt_base.clone(), &async_lifetimes, &last_lt);
+        add_async_lifetime_bounds(where_clause_no_lt_base.clone(), &all_lifetimes, &last_lt);
 
     // factory trait 的 `make_future` 直接接收 `Pin<&last_lt mut Future<...>>`，
     // 因此它的 where 子句必须显式包含“非最后生命周期存活不短于 last_lt”
@@ -276,7 +310,7 @@ pub fn gen_may_cancel_future(
             .iter()
             .cloned()
             .collect::<Punctuated<_, Token![,]>>();
-        for lt in &async_lifetimes {
+        for lt in &all_lifetimes {
             if lt.ident != last_lt.ident {
                 predicates.push(parse_quote! { #lt: #last_lt });
             }
@@ -287,11 +321,11 @@ pub fn gen_may_cancel_future(
         }
     };
     let generic_params_async_no_cancel =
-        build_generic_params(&async_lifetimes, &generics_no_cancel);
+        build_generic_params(&all_lifetimes, &generics_no_cancel);
     let generic_params_future_no_cancel =
-        build_generic_params(&async_lifetimes, &generics_no_cancel);
+        build_generic_params(&all_lifetimes, &generics_no_cancel);
     let generic_params_future_all =
-        build_generic_params(&async_lifetimes, &generics_all);
+        build_generic_params(&all_lifetimes, &generics_all);
 
     let cancel_type_lt_replaced =
         transform_type_outer_lifetime(cancel_type.as_ref().unwrap(), &last_lt);
@@ -306,8 +340,8 @@ pub fn gen_may_cancel_future(
         .iter()
         .map(|idx| format_ident!("p{}", idx.index))
         .collect();
-    // 只生成 (p0, p1, ...) 部分
-    let tuple_pattern = quote! { ( #(#tuple_idents),* ) };
+    // 只生成 (p0, p1, ...) 部分；`..` 忽略追加的 PhantomData 标记字段
+    let tuple_pattern = quote! { ( #(#tuple_idents),*, .. ) };
     let async_struct_destruct = quote! { #async_struct::<#generic_params_async_no_cancel>#tuple_pattern };
 
     // `IntoFuture::IntoFuture` 的类型：`Future<'c, A, B, ..., NonCancellableToken>`。
@@ -315,12 +349,34 @@ pub fn gen_may_cancel_future(
         #future_struct<#generic_params_future_no_cancel, abs_cancel::NonCancellableToken>
     };
 
+    // where-only 生命周期（只出现在约束里、不在字段里）的标记：结构体的
+    // 生命周期参数必须出现在字段中（否则 E0392），因此为它们生成
+    // `_lt_#ident: PhantomData<&'#ident ()>` 字段（先 collect 成 Vec，
+    // 因为构造处（into_future / may_cancel_with / 调用者）要引用多次）。
+    // async struct 与 future 都需要：async struct 携带全部生命周期是为了让
+    // IntoFuture / TrMayCancel 实现的 self 类型引用 `'a`（E0207）。
+    let marker_fields: Vec<_> = where_only_lifetimes.iter().map(|lt| {
+        let name = format_ident!("_lt_{}", lt.ident);
+        quote! { #name: ::core::marker::PhantomData<&#lt ()> }
+    }).collect();
+    let marker_values: Vec<_> = where_only_lifetimes.iter().map(|lt| {
+        let name = format_ident!("_lt_{}", lt.ident);
+        quote! { #name: ::core::marker::PhantomData }
+    }).collect();
+    // async struct 是 tuple struct：标记字段必须是**位置型**（仅类型）。
+    let marker_types: Vec<_> = where_only_lifetimes.iter().map(|lt| {
+        quote! { ::core::marker::PhantomData<&#lt ()> }
+    }).collect();
+    let async_marker_types = &marker_types;
+    let future_marker_fields = &marker_fields;
+    let future_marker_values = &marker_values;
+
     let expanded = quote! {
         // panic!("input_fn 是: {:#?}", input_fn);
         #input_fn
         // panic!("lt_no_last 结构是: {:#?}\ngenerics_no_cancel 结构是: {:#?}", lt_no_last, generics_no_cancel);
-        pub struct #async_struct<#generic_params_async_no_cancel>(#(#fields),*)
-        #where_clause_no_cancel_no_lt;
+        pub struct #async_struct<#generic_params_async_no_cancel>(#(#fields),* #(, #async_marker_types)*)
+        #where_clause_impl;
 
         pub struct #future_struct<#generic_params_future_all>
         #where_clause_no_lt
@@ -330,11 +386,12 @@ pub fn gen_may_cancel_future(
             future_: Option<
                 <() as #factory_trait<#generic_params_future_all>>::MadeFuture
             >,
+            #(#future_marker_fields),*
         }
 
         // Implement `IntoFuture` for #async_struct
         impl<#generic_params_future_no_cancel> ::core::future::IntoFuture for #async_struct<#generic_params_async_no_cancel>
-        #where_clause_no_cancel_no_lt
+        #where_clause_impl
         {
             type IntoFuture = #into_future_ty;
             type Output = #output_ty_transformed;
@@ -344,13 +401,14 @@ pub fn gen_may_cancel_future(
                     params_: ::core::mem::MaybeUninit::new(self),
                     cancel_: abs_cancel::NonCancellableToken::shared_mut(),
                     future_: Option::None,
+                    #(#future_marker_values),*
                 }
             }
         }
 
         // Implement `TrMayCancel<'a>` for #async_struct
         impl<#generic_params_future_no_cancel> abs_cancel::TrMayCancel<#last_lt> for #async_struct<#generic_params_async_no_cancel>
-        #where_clause_no_cancel_no_lt
+        #where_clause_impl
         {
             type MayCancelFuture<'cancel_, TyCancelTok_GenMcf_> =
                 #future_struct<#generic_params_future_no_cancel, TyCancelTok_GenMcf_>
@@ -378,6 +436,7 @@ pub fn gen_may_cancel_future(
                     params_: ::core::mem::MaybeUninit::new(self),
                     cancel_: cancel,
                     future_: Option::None,
+                    #(#future_marker_values),*
                 }
             }
         }
@@ -510,6 +569,74 @@ fn ty_contains_lifetime(ty: &Type, target_lt: &Lifetime) -> bool {
         Type::Group(group) => ty_contains_lifetime(&group.elem, target_lt),
         // 可根据需要继续补充其他 Type 变体
         _ => false,
+    }
+}
+
+/// 从 where 子句中收集**真正需要成为泛型参数**的生命周期，保持原声明顺序。
+///
+/// 只收集**类型约束**里出现的生命周期：
+///
+/// * trait 实参（`S: TrBuffSegmMut<'a, T>` 中的 `'a`）；
+/// * 生命周期 bound（`S: 'a` 中的 `'a`）；
+/// * bounded_ty 中**非最外层引用**的生命周期（如 `Vec<'a>: Trait` 的 `'a`）。
+///
+/// **不收集**：
+///
+/// * 纯生命周期约束（`'a: 'f`）——左侧是「最外层引用生命周期」，已被
+///   `transform_type_outer_lifetime` 统一成 `last_lt`，不作为泛型参数；
+///   `'a: last_lt` 存活关系由 [`add_async_lifetime_bounds`] 按收集结果补上；
+/// * bounded_ty 的**最外层引用**生命周期（`&'a X: Trait` 的 `'a`，同样会被
+///   统一成 `last_lt`）。
+fn collect_used_lifetimes_from_where(
+    where_clause: &WhereClause,
+    all_lifetimes: &[Lifetime],
+) -> Vec<Lifetime> {
+    all_lifetimes
+        .iter()
+        .filter(|lt| {
+            where_clause.predicates.iter().any(|pred| {
+                match pred {
+                    WherePredicate::Lifetime(_) => false,
+                    WherePredicate::Type(PredicateType {
+                        bounded_ty, bounds, ..
+                    }) => {
+                        ty_contains_lifetime_skip_outer_ref(bounded_ty, lt)
+                            || bounds.iter().any(|bound| match bound {
+                                TypeParamBound::Lifetime(l) => {
+                                    l.ident == lt.ident
+                                }
+                                TypeParamBound::Trait(t) => {
+                                    ty_contains_lifetime(
+                                        &Type::Path(syn::TypePath {
+                                            qself: None,
+                                            path: t.path.clone(),
+                                        }),
+                                        lt,
+                                    )
+                                }
+                                _ => false,
+                            })
+                    }
+                    _ => false,
+                }
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// 与 [`ty_contains_lifetime`] 相同，但**跳过最外层引用**的生命周期——最外层
+/// 引用生命周期会被 `transform_type_outer_lifetime` 统一成 `last_lt`，不是
+/// 需要保留的泛型参数。
+fn ty_contains_lifetime_skip_outer_ref(
+    ty: &Type,
+    target_lt: &Lifetime,
+) -> bool {
+    match ty {
+        Type::Reference(ty_ref) => {
+            ty_contains_lifetime(&ty_ref.elem, target_lt)
+        }
+        _ => ty_contains_lifetime(ty, target_lt),
     }
 }
 

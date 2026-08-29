@@ -144,11 +144,12 @@ pub trait TrConsumer {
         Self: 'f,
         C: 'f + TrCircBuffCore<Data = Self::Data>;
 
-    type ReactAsync<'f, S>:
+    type ReactAsync<'a, 'f, S>:
         TrMayCancel<'f, MayCancelOutput = ReceiverReact>
     where
         Self: 'f,
-        S: 'f + TrBuffSegmRef<'f, Self::Data>;
+        S: 'a + TrBuffSegmRef<'a, Self::Data>,
+        'a: 'f;
 
     /// 环形缓冲完成构建前，在 builder 中调用且仅调用一次的方法，用于 Consumer
     /// 自身的异步初始化。
@@ -176,12 +177,13 @@ pub trait TrConsumer {
     /// 的类型级循环（见模块文档）。核心以具体段类型（两段式
     /// `ReclSliceRef`）调用本方法；返回的 future 由泵 `await`（executor 驱动）
     /// 或非阻塞单次 poll（同步上下文）驱动。
-    fn react_async<'f, S>(
+    fn react_async<'a, 'f, S>(
         &'f mut self,
         segm_ref: &'f mut S,
-    ) -> Self::ReactAsync<'f, S>
+    ) -> Self::ReactAsync<'a, 'f, S>
     where
-        S: 'f + TrBuffSegmRef<'f, Self::Data>,
+        'a: 'f,
+        S: 'a + TrBuffSegmRef<'a, Self::Data>,
         Self: 'f;
 }
 
@@ -195,11 +197,12 @@ pub trait TrProducer {
         Self: 'f,
         C: 'f + TrCircBuffCore<Data = Self::Data>;
 
-    type ReactAsync<'f, S>:
+    type ReactAsync<'a, 'f, S>:
         TrMayCancel<'f, MayCancelOutput = ReceiverReact>
     where
         Self: 'f,
-        S: 'f + TrBuffSegmMut<'f, Self::Data>;
+        S: 'a + TrBuffSegmMut<'a, Self::Data>,
+        'a: 'f;
 
     fn init_async<'f, S>(
         &'f mut self,
@@ -215,12 +218,13 @@ pub trait TrProducer {
     /// 需求裁决）。
     fn check(&self, event: ProducerHookEvent) -> bool;
 
-    fn react_async<'f, S>(
+    fn react_async<'a, 'f, S>(
         &'f mut self,
         segm_mut: &'f mut S,
-    ) -> Self::ReactAsync<'f, S>
+    ) -> Self::ReactAsync<'a, 'f, S>
     where
-        S: 'f + TrBuffSegmMut<'f, Self::Data>,
+        'a: 'f,
+        S: 'a + TrBuffSegmMut<'a, Self::Data>,
         Self: 'f;
 }
 

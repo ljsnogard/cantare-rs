@@ -76,14 +76,13 @@
 use core::{
     borrow::BorrowMut,
     cell::UnsafeCell,
-    future::Future,
     marker::{PhantomData, PhantomPinned},
     mem::MaybeUninit,
     // pin::Pin,
     ptr::{self, NonNull},
     slice,
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
-    task::{Context, Poll, Waker},
+    task::{Poll, Waker},
 };
 
 use abs_buff::{
