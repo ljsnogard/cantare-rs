@@ -83,7 +83,6 @@ use core::{
     borrow::BorrowMut,
     marker::PhantomData,
     mem::MaybeUninit,
-    pin::Pin,
 };
 
 use abs_buff::{
@@ -157,6 +156,7 @@ impl<P, C, B, T, A> BuildEssential<P, C, B, T, A> {
 pub struct CircularBuffBuilder<B, T = u8, A = CoreAlloc>
 where
     B: BorrowMut<[MaybeUninit<T>]>,
+    T: 'static,
     A: TrMalloc + Clone,
 {
     capacity_: usize,
@@ -359,7 +359,7 @@ where
         BuilderError<()>,
     >
     where
-        T: Send + Sync,
+        T: Send + Sync + 'static,
         A: Send + Sync + TrMalloc + Clone,
     {
         ReadyBuilder {
@@ -384,6 +384,7 @@ pub struct ProducerSetBuilder<P, B, T = u8, A = CoreAlloc>
 where
     P: TrProducer<Data = T>,
     B: BorrowMut<[MaybeUninit<T>]>,
+    T: 'static,
     A: TrMalloc + Clone,
 {
     capacity: usize,
@@ -442,6 +443,7 @@ pub struct ConsumerSetBuilder<C, B, T = u8, A = CoreAlloc>
 where
     C: TrConsumer<Data = T>,
     B: BorrowMut<[MaybeUninit<T>]>,
+    T: 'static,
     A: TrMalloc + Clone,
 {
     capacity: usize,
@@ -506,7 +508,7 @@ where
     P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     /// 装配核心并产出**按两端模式决定的构建产物**。
@@ -542,7 +544,7 @@ where
     P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
     (): BuildOutcome<P, C, B, T, A>,
     K: TrCancellationToken + Clone,
@@ -551,28 +553,26 @@ where
     let consumer = essential.consumer_.take().expect("");
     let buffer = essential.buffer_.take().expect("");
     let alloc = essential.alloc_.take().expect("");
-    let mut core = CircCore::new(
+    let core = CircCore::new(
         producer,
         consumer,
         buffer,
     );
     // core 的初始化过程存在自引用结构
     unsafe {
-        let p_core = &core as *const CircCore<P, C, B, T>;
-        let mut pin_core = Pin::new_unchecked(&mut core);
-        let init_producer = pin_core
+        let init_producer = core
+            .producer_ptr()
             .as_mut()
-            .producer_pinned_()
-            .init_async(&*p_core)
+            .init_async(&core)
             .may_cancel_with(cancel)
             .await;
         if init_producer.is_err() {
             return Result::Err(BuilderError::ProducerInit);
         }
-        let init_consumer = pin_core
+        let init_consumer = core
+            .consumer_ptr()
             .as_mut()
-            .consumer_pinned_()
-            .init_async(&*p_core)
+            .init_async(&core)
             .may_cancel_with(cancel)
             .await;
         if init_consumer.is_err() {
@@ -580,10 +580,8 @@ where
         }
     }
     let shared = Shared::new(core, alloc.clone());
-    // 构建期初始泵：一端主动一端被动时，主动端先泵一轮（生产端把输入
-    // 设备的数据填满缓冲 / 消费端把缓冲排空到输出），双端被动 / 双主动
-    // 时按内部门控为 no-op。
-    shared.start();
+    // 构建期初始搬运已在上面的 `init_async` 中完成（`DevProducer` 填满缓冲并
+    // armed 等空位；`DevConsumer` armed 等数据）。
     Ok(<() as BuildOutcome<P, C, B, T, A>>::assemble(
         shared, alloc,
     ))
@@ -634,7 +632,7 @@ impl sealed::Sealed for () {}
 impl<B, T, A> BuildOutcome<BufProducer<T>, BufConsumer<T>, B, T, A> for ()
 where
     B: Send + Sync +BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     type Output = SpscPair<B, T, A>;
@@ -651,7 +649,7 @@ impl<I, B, T, A> BuildOutcome<DevProducer<I, T>, BufConsumer<T>, B, T, A> for ()
 where
     I: Send + Sync + TrInput<T>,
     B: Send + Sync +BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     type Output = Consumer<DevProducer<I, T>, B, T, A>;
@@ -668,7 +666,7 @@ impl<O, B, T, A> BuildOutcome<BufProducer<T>, DevConsumer<O, T>, B, T, A> for ()
 where
     O: Send + Sync + TrOutput<T>,
     B: Send + Sync +BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     type Output = Producer<DevConsumer<O, T>, B, T, A>;
@@ -687,7 +685,7 @@ where
     I: Send + Sync + TrInput<T>,
     O: Send + Sync + TrOutput<T>,
     B: Send + Sync +BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     type Output = Pipeline<I, O, B, T, A>;

@@ -66,10 +66,11 @@ impl IrohWriter {
         else {
             return Result::Err(cap);
         };
-        let tx = builder
+        let mut ready = builder
             .producer_passive()
-            .pipe_into_output(output)
-            .build()
+            .pipe_into_output(output);
+        let tx = futures_lite::future::block_on(ready.build_async().into_future())
+            .map_err(|_| cap)
             .expect("valid iroh buffer capacity");
         Result::Ok(Self { tx, stream, err })
     }

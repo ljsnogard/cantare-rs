@@ -134,7 +134,8 @@ fn pipe_between_builds_active_pipeline() {
 
 /// 消费端先行（`pipe_into_output`）+ 生产端被动（`producer_passive`）：
 /// 与 `producer_passive().pipe_into_output(...)` 顺序对调的等价形态——
-/// 写入缓冲的数据立即被搬运到输出设备。主动消费端 → 只返回生产端半部。
+/// 写入缓冲的数据由提交路径（`advance_write`）驱动主动消费者**立即排空**到
+/// 输出设备。主动消费端 → 只返回生产端半部。
 #[test]
 fn pipe_into_output_then_passive_producer() {
     let output = TestOutput::new();
@@ -147,13 +148,14 @@ fn pipe_into_output_then_passive_producer() {
     let mut tx =
         futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
+    // 写 3 字节：段 drop 提交 → advance_write 驱动输出泵 → 立即排空。
     let demand = Demand::at_least(3);
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
         .unwrap();
     fill_segm(&mut ws, &[1, 2, 3]);
     drop(ws);
-    assert_eq!(*out_data.lock().unwrap(), vec![1, 2, 3]);
+    assert_eq!(*out_data.lock().unwrap(), vec![1, 2, 3], "写入提交即排空");
     assert_eq!(tx.data_size(), 0);
 }
 

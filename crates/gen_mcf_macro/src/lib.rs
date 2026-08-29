@@ -97,7 +97,7 @@ pub fn gen_may_cancel_future(
             .iter()
             .filter(|pred| {
                 !predicate_contains_type_param(pred, &cancel_type_param)
-                    && !predicate_contains_lifetime(pred, &last_lt)
+                    && !predicate_is_lifetime_related(pred, &last_lt)
             })
             .cloned()
             .collect::<Punctuated<_, Token![,]>>();
@@ -113,12 +113,16 @@ pub fn gen_may_cancel_future(
             }
         }
     };
-    // 将 where 子句中涉及生命周期的全部删除，得出 Future 和 FutureState 的泛型约束
+    // 将 where 子句中「纯生命周期」的约束删除（`'a: 'f` 由 add_async_lifetime_bounds
+    // 按需加回），得出 Future 和 FutureState 的泛型约束。类型约束（如
+    // `S: TrBuffSegmMut<'f, T>`）即使引用最后一个生命周期也**保留**——生成的
+    // 类型都携带 `last_lt` 泛型参数，约束仍然成立；若一并删除会导致生成的
+    // future / factory 缺少真实约束（E0277 / E0271）。
     let where_clause_no_lt_base = {
         let punctuated = where_clause
             .predicates
             .iter()
-            .filter(|pred| !predicate_contains_lifetime(pred, &last_lt))
+            .filter(|pred| !predicate_is_lifetime_related(pred, &last_lt))
             .cloned()
             .collect::<Punctuated<_, Token![,]>>();
         WhereClause {
@@ -442,6 +446,26 @@ pub fn gen_may_cancel_future(
     };
 
     TokenStream::from(expanded)
+}
+
+
+/// 判断谓词是否是「纯生命周期约束」且包含目标生命周期（如 `'a: 'f`）。
+///
+/// 类型约束（`WherePredicate::Type`）即使在其 trait 实参 / 生命周期 bound 中
+/// 引用目标生命周期（如 `S: TrBuffSegmMut<'f, T>`、`S: 'f`）也返回 `false`——
+/// 这类约束必须保留在生成的类型上，否则 `gen_may_cancel_future` 生成的
+/// future / factory 会缺失真实约束（E0277 / E0271）。
+fn predicate_is_lifetime_related(
+    pred: &WherePredicate,
+    target_lt: &Lifetime,
+) -> bool {
+    match pred {
+        WherePredicate::Lifetime(_) => {
+            predicate_contains_lifetime(pred, target_lt)
+        }
+        WherePredicate::Type(_) => false,
+        _ => false,
+    }
 }
 
 /// 判断一个类型中是否包含指定的生命周期

@@ -11,28 +11,39 @@
 
 use core::{
     marker::{PhantomData, PhantomPinned},
-    pin::Pin,
+    pin::{pin, Pin},
     ptr,
     sync::atomic::AtomicPtr,
+    task::{Context, Poll, Waker},
 };
 
 use abs_buff::{
     Demand,
     buffer::{TrBuffSegmMut, TrBuffSegmRef},
+    gen_may_cancel_future,
     io::{TrInput, TrOutput},
-    // x_deps::abs_cancel,
+    x_deps::abs_cancel,
 };
-// use abs_cancel::{NonCancellableToken, TrMayCancel};
+use abs_cancel::{TrCancellationToken, TrMayCancel};
 use atomex::AtomexPtrOwned;
 use atomic_sync::x_deps::atomex;
 
 use super::{
     abs_comp_::{
         ConsumerHookEvent, ProducerHookEvent, ReceiverReact,
-        TrConsumer, TrProducer,
+        TrCircBuffCore, TrConsumer, TrProducer,
     },
     core_::WakeSlot,
 };
+
+/// 单次非阻塞轮询（同步上下文：`init_async` 的初始搬运）。
+///
+/// `Pending` 表示设备需外部唤醒 / 其它执行体推进——本轮放弃，**不自旋**。
+fn poll_once<F: core::future::Future>(fut: Pin<&mut F>) -> Poll<F::Output> {
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    fut.poll(&mut cx)
+}
 
 // ---------------------------------------------------------------------------
 // 端类型
@@ -172,8 +183,8 @@ impl<T> BufConsumer<T> {
 }
 
 /// 主动生产端的端类型：携带输入设备的**实际类型**（`TyInput`），随设备一同
-/// 存放进核心。构造完成后由 hook 驱动，自动从设备提取数据填入缓冲——因此
-/// **不对外暴露**可访问的写半部（主动端的 `Producer` 半部操作返回错误）。
+/// 存放进核心。构造完成后由 executor 驱动的输入泵从设备提取数据填入缓冲——
+/// 因此**不对外暴露**可访问的写半部（主动端的 `Producer` 半部操作返回错误）。
 ///
 /// # 为什么是具体类型而不是类型擦除
 ///
@@ -182,16 +193,27 @@ impl<T> BufConsumer<T> {
 /// 不能直接 `dyn`，具体化是唯一可行路径。代价是核心必须泛型于端类型
 /// （`CircCore<P, C, T>`），以及设备必须 `Send + Sync`（随核心跨线程）。
 ///
+/// # 唤醒槽位（与 `BufProducer` 同构）
+///
+/// `wakeslot_: WakeSlot` 供 executor 驱动的输入泵 **park** 使用：缓冲满（无
+/// 可写空间）且设备还有数据时，泵 armed（`TX_STNDBY`，经核心
+/// `CircCore::arm_producer`）并把 waker 注册进本槽位，返回 `Pending`——消费端
+/// 完成读取触发 `fire_producer` 时，经 armed 门控后 `check` 裁决并 `signal`
+/// 唤醒泵，泵在下一次轮询中继续拉取。`init_async` 即「建立待唤醒结构」的
+/// 环节：槽位随端类型一并就绪。
+///
 /// # 行为
 ///
 /// `react_async`：循环地把 `TrInput` 的数据搬进传入的可写段（经 `abs_buff`
-/// 的 `move_items_from_input_async`），直到段满或设备暂无数据。泵由核心在
-/// 提交路径上同步轮询到完成（`Waker::noop`，不 spawn）。
+/// 的 `move_items_from_input_async`），直到段满或设备暂无数据。泵由被动端的
+/// 异步等待 / `try_*` 重试路径驱动（`await` 设备 future，executor 驱动）。
 pub struct DevProducer<TyInput, T>
 where
     TyInput: TrInput<T>,
+    T: 'static,
 {
     input_: TyInput,
+    wakeslot_: WakeSlot,
     _use_t: PhantomData<fn() -> T>,
     _pin_: PhantomPinned,
 }
@@ -199,10 +221,12 @@ where
 impl<TyInput, T> DevProducer<TyInput, T>
 where
     TyInput: TrInput<T>,
+    T: 'static,
 {
     pub(super) fn new(input: TyInput) -> Self {
         DevProducer {
             input_: input,
+            wakeslot_: WakeSlot::new(),
             _use_t: PhantomData,
             _pin_: PhantomPinned,
         }
@@ -214,18 +238,54 @@ where
     pub(super) fn input_mut(&mut self) -> &mut TyInput {
         &mut self.input_
     }
+
+    /// executor 驱动的输入泵 park 时注册 / 注销 waker 的唤醒槽位
+    /// （`fire_producer` 经 armed 门控后 `check` 裁决并 `signal` 唤醒）。
+    ///
+    /// `#[allow(dead_code)]`：当前各驱动路径（构建 / `try_*` / 被动端 park）
+    /// 的泵由设备 waker 驱动、不 park 在本槽位上；本槽位是「连续泵」park
+    /// 的基础设施，端到端行为由 `tests_::pump_` 的协议测试覆盖。
+    #[allow(dead_code)]
+    #[inline]
+    pub(super) fn wakeslot(&self) -> &WakeSlot {
+        &self.wakeslot_
+    }
+
+    pub(super) fn init_async<'f, TyCore>(
+        &'f mut self,
+        core: &'f TyCore,
+    ) -> DevProducerInitAsync<'f, TyInput, T, TyCore>
+    where
+        TyCore: TrCircBuffCore<Data = T>,
+    {
+        DevProducerInitAsync(self, core)
+    }
+
+    pub(super) fn react_async<'f, TySegm>(
+        &'f mut self,
+        segm_mut: &'f mut TySegm,
+    ) -> DevProducerReactAsync<'f, TyInput, T, TySegm>
+    where
+        TySegm: TrBuffSegmMut<'f, T>,
+    {
+        DevProducerReactAsync(self, segm_mut)
+    }
 }
 
 /// 主动消费端的端类型：携带输出设备的**实际类型**（`TyOutput`），与
-/// [`DeviceProducer`] 对称存放进核心的 `C` 参数，不对外暴露。
+/// [`DeviceProducer`] 对称存放进核心的 `C` 参数，不对外暴露。唤醒槽位
+/// （`wakeslot_: WakeSlot`，与 `BufConsumer` 同构）供 executor 驱动的输出泵
+/// park 使用（armed `RX_STNDBY`，见 [`DeviceProducer`] 的文档）。
 ///
 /// `react_async`：循环地把传入的可读段数据搬到 `TrOutput`（经
 /// `move_items_to_output_async`），直到段空或设备暂时不能接收。
 pub struct DevConsumer<TyOutput, T>
 where
     TyOutput: TrOutput<T>,
+    T: 'static,
 {
     output_: TyOutput,
+    wakeslot_: WakeSlot,
     _use_t_: PhantomData<fn() -> T>,
     _pin_: PhantomPinned,
 }
@@ -233,10 +293,12 @@ where
 impl<TyOutput, T> DevConsumer<TyOutput, T>
 where
     TyOutput: TrOutput<T>,
+    T: 'static,
 {
     pub(super) fn new(output: TyOutput) -> Self {
         DevConsumer {
             output_: output,
+            wakeslot_: WakeSlot::new(),
             _use_t_: PhantomData,
             _pin_: PhantomPinned,
         }
@@ -247,26 +309,67 @@ where
     pub(super) fn output_mut(&mut self) -> &mut TyOutput {
         &mut self.output_
     }
+
+    /// executor 驱动的输出泵 park 时注册 / 注销 waker 的唤醒槽位
+    /// （`fire_consumer` 经 armed 门控后 `check` 裁决并 `signal` 唤醒）。
+    ///
+    /// `#[allow(dead_code)]`：同 [`DevProducer::wakeslot`]——「连续泵」park 的
+    /// 基础设施，端到端行为由 `tests_::pump_` 的协议测试覆盖。
+    #[allow(dead_code)]
+    #[inline]
+    pub(super) fn wakeslot(&self) -> &WakeSlot {
+        &self.wakeslot_
+    }
+
+    pub(super) fn init_async<'f, TyCore>(
+        &'f mut self,
+        core: &'f TyCore,
+    ) -> DevConsumerInitAsync<'f, TyOutput, T, TyCore>
+    where
+        TyCore: TrCircBuffCore<Data = T>,
+    {
+        DevConsumerInitAsync(self, core)
+    }
+
+    pub(super) fn react_async<'f, TySegm>(
+        &'f mut self,
+        segm_ref: &'f mut TySegm,
+    ) -> DevConsumerReactAsync<'f, TyOutput, T, TySegm>
+    where
+        TySegm: TrBuffSegmRef<'f, T>,
+        T: 'f,
+    {
+        DevConsumerReactAsync(self, segm_ref)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // 端契约实现
 // ---------------------------------------------------------------------------
 
-impl<T> TrProducer for BufProducer<T> {
+impl<T> TrProducer for BufProducer<T>
+where
+    T: 'static,
+{
     type Data = T;
 
-    type InitAsync<'f> = core::future::Ready<Result<(), ()>>
+    type InitAsync<'f, TyCore> = core::future::Ready<Result<(), ()>>
     where
-        Self: 'f;
+        Self: 'f,
+        TyCore: 'f + TrCircBuffCore<Data = Self::Data>;
+
+    type ReactAsync<'f, TySegm> = core::future::Ready<ReceiverReact>
+    where
+        Self: 'f,
+        TySegm: 'f + TrBuffSegmMut<'f, Self::Data>;
 
     #[inline]
     fn init_async<'f, TyCore>(
-        self: Pin<&'f mut Self>,
+        &'f mut self,
         _core: &'f TyCore,
-    ) -> Self::InitAsync<'f>
+    ) -> Self::InitAsync<'f, TyCore>
     where
-        TyCore: super::abs_comp_::TrCircBuffCore
+        TyCore: TrCircBuffCore<Data = Self::Data>,
     {
         core::future::ready(Result::Ok(()))
     }
@@ -297,32 +400,41 @@ impl<T> TrProducer for BufProducer<T> {
     }
 
     #[inline]
-    async fn react_async<'f, TySegm>(
-        &mut self,
-        _segm: &mut TySegm,
-    ) -> ReceiverReact
+    fn react_async<'f, TySegm>(
+        &'f mut self,
+        _segm: &'f mut TySegm,
+    ) -> Self::ReactAsync<'f, TySegm>
     where
         TySegm: TrBuffSegmMut<'f, T>,
     {
         // 被动端由调用者驱动，无反应。
-        ReceiverReact::Continue
+        core::future::ready(ReceiverReact::Continue)
     }
 }
 
-impl<T> TrConsumer for BufConsumer<T> {
+impl<T> TrConsumer for BufConsumer<T>
+where
+    T: 'static,
+{
     type Data = T;
 
-    type InitAsync<'f> = core::future::Ready<Result<(), ()>>
-        where
-            Self: 'f;
+    type InitAsync<'f, TyCore> = core::future::Ready<Result<(), ()>>
+    where
+        Self: 'f,
+        TyCore: 'f + TrCircBuffCore<Data = Self::Data>;
+
+    type ReactAsync<'f, TySegm> = core::future::Ready<ReceiverReact>
+    where
+        Self: 'f,
+        TySegm: 'f + TrBuffSegmRef<'f, Self::Data>;
 
     #[inline]
     fn init_async<'f, TyCore>(
-        self: core::pin::Pin<&'f mut Self>,
+        &'f mut self,
         _core: &'f TyCore,
-    ) -> Self::InitAsync<'f>
+    ) -> Self::InitAsync<'f, TyCore>
     where
-        TyCore: super::abs_comp_::TrCircBuffCore
+        TyCore: TrCircBuffCore<Data = Self::Data>
     {
         core::future::ready(Result::Ok(()))
     }
@@ -353,33 +465,43 @@ impl<T> TrConsumer for BufConsumer<T> {
     }
 
     #[inline]
-    async fn react_async<'f, TySegm>(&mut self, _segm: &mut TySegm) -> ReceiverReact
+    fn react_async<'f, TySegm>(
+        &'f mut self,
+        _segm: &'f mut TySegm,
+    ) -> Self::ReactAsync<'f, TySegm>
     where
-        TySegm: TrBuffSegmRef<'f, T>,
+        TySegm: 'f + TrBuffSegmRef<'f, T>,
     {
-        ReceiverReact::Continue
+        core::future::ready(ReceiverReact::Continue)
     }
 }
 
 impl<TyInput, T> TrProducer for DevProducer<TyInput, T>
 where
     TyInput: TrInput<T>,
+    T: 'static,
 {
     type Data = T;
 
-    type InitAsync<'f> = core::future::Ready<Result<(), ()>>
+    type InitAsync<'f, TyCore> = DevProducerInitAsync<'f, TyInput, T, TyCore>
     where
-        Self: 'f;
+        Self: 'f,
+        TyCore: 'f + TrCircBuffCore<Data = Self::Data>;
+
+    type ReactAsync<'f, TySegm> = DevProducerReactAsync<'f, TyInput, T, TySegm>
+    where
+        Self: 'f,
+        TySegm: 'f + TrBuffSegmMut<'f, Self::Data>;
 
     #[inline]
     fn init_async<'f, TyCore>(
-        self: core::pin::Pin<&'f mut Self>,
-        _core: &'f TyCore,
-    ) -> Self::InitAsync<'f>
+        &'f mut self,
+        core: &'f TyCore,
+    ) -> DevProducerInitAsync<'f, TyInput, T, TyCore>
     where
-        TyCore: super::abs_comp_::TrCircBuffCore
+        TyCore: TrCircBuffCore<Data = Self::Data>,
     {
-        core::future::ready(Result::Ok(()))
+        DevProducer::init_async(self, core)
     }
 
     #[inline]
@@ -389,61 +511,54 @@ where
 
     #[inline]
     fn check(&self, event: ProducerHookEvent) -> bool {
-        // 有可写空间即值得泵一轮（参考值；泵循环还会重查状态）。
-        matches!(event, ProducerHookEvent::Available(size) if size > 0)
+        // 有可写空间即值得唤醒（fire 侧已保证本方法只在 armed——泵 park 时
+        // 调用）：signal 唤醒 executor 驱动的输入泵，泵重查状态后继续拉取。
+        // 注意：fire 不再同步泵——「唤醒泵」是主动端唯一的响应。
+        let interested =
+            matches!(event, ProducerHookEvent::Available(size) if size > 0);
+        if interested {
+            self.wakeslot_.signal();
+        }
+        interested
     }
 
-    async fn react_async<'f, TySegm>(
-        &mut self,
-        segm: &mut TySegm,
-    ) -> ReceiverReact
+    fn react_async<'f, TySegm>(
+        &'f mut self,
+        segm: &'f mut TySegm,
+    ) -> Self::ReactAsync<'f, TySegm>
     where
         TySegm: TrBuffSegmMut<'f, T>,
     {
-        let mut moved = 0usize;
-        while !segm.is_empty() {
-            let demand = Demand::less_than(segm.least_count());
-            let x = segm
-                .as_segm_mut()
-                .move_items_from_input_async(&mut self.input_, &demand)
-                .await;
-            // 设备错误：本轮视为无数据。
-            if x.as_ref().pick_right().is_some() {
-                break;
-            }
-            let n = x.pick_left().unwrap_or(0);
-            if n == 0 {
-                break; // 设备暂无数据
-            }
-            moved += n;
-        }
-        if moved > 0 {
-            ReceiverReact::Reacted
-        } else {
-            ReceiverReact::Continue
-        }
+        DevProducer::react_async(self, segm)
     }
 }
 
-impl<TyOutput, T> TrConsumer for DevConsumer<TyOutput, T>
+impl<O, T> TrConsumer for DevConsumer<O, T>
 where
-    TyOutput: TrOutput<T>,
+    O: TrOutput<T>,
+    T: 'static,
 {
     type Data = T;
 
-    type InitAsync<'f> = core::future::Ready<Result<(), ()>>
+    type InitAsync<'f, C> = DevConsumerInitAsync<'f, O, T, C>
     where
-        Self: 'f;
+        Self: 'f,
+        C: 'f + TrCircBuffCore<Data = Self::Data>;
+
+    type ReactAsync<'f, S> = DevConsumerReactAsync<'f, O, T, S>
+    where
+        Self: 'f,
+        S: 'f + TrBuffSegmRef<'f, Self::Data>;
 
     #[inline]
-    fn init_async<'f, TyCore>(
-        self: core::pin::Pin<&'f mut Self>,
-        _core: &'f TyCore,
-    ) -> Self::InitAsync<'f>
+    fn init_async<'f, C>(
+        &'f mut self,
+        core: &'f C,
+    ) -> Self::InitAsync<'f, C>
     where
-        TyCore: super::abs_comp_::TrCircBuffCore
+        C: TrCircBuffCore<Data = Self::Data>,
     {
-        core::future::ready(Result::Ok(()))
+        DevConsumerInitAsync(self, core)
     }
 
     #[inline]
@@ -453,39 +568,145 @@ where
 
     #[inline]
     fn check(&self, event: ConsumerHookEvent) -> bool {
-        // 有数据即值得泵一轮；**ProducerClose 也感兴趣**——写端关闭后必须
-        // 把残留数据排空（泵循环会一直搬到空为止）。
-        matches!(
+        // 有数据即值得唤醒；**ProducerClose 也感兴趣**——写端关闭后必须把
+        // 残留数据排空（executor 驱动的输出泵被唤醒后搬到空为止）。fire 侧
+        // 已保证本方法只在 armed（泵 park）时调用；signal 唤醒泵。
+        let interested = matches!(
             event,
             ConsumerHookEvent::Available(size) if size > 0
-        ) || matches!(event, ConsumerHookEvent::ProducerClose(_))
+        ) || matches!(event, ConsumerHookEvent::ProducerClose(_));
+        if interested {
+            self.wakeslot_.signal();
+        }
+        interested
     }
 
-    async fn react_async<'f, TySegm>(&mut self, segm: &mut TySegm) -> ReceiverReact
+    #[inline]
+    fn react_async<'f, S>(
+        &'f mut self,
+        segm_ref: &'f mut S,
+    ) -> Self::ReactAsync<'f, S>
     where
-        TySegm: TrBuffSegmRef<'f, T>,
+        S: TrBuffSegmRef<'f, T>,
     {
-        let mut moved = 0usize;
-        while !segm.is_empty() {
-            let demand = Demand::less_than(segm.least_count());
-            let x = segm
-                .as_segm_ref()
-                .move_items_to_output_async(&mut self.output_, &demand)
-                .await;
-            // 设备错误：本轮视为不能接收。
-            if x.as_ref().pick_right().is_some() {
-                break;
-            }
-            let n = x.pick_left().unwrap_or(0);
-            if n == 0 {
-                break; // 设备暂时不能接收
-            }
-            moved += n;
+        DevConsumer::react_async(self, segm_ref)
+    }
+}
+
+#[gen_may_cancel_future(DevProducerInit)]
+async fn dev_producer_init_async_<'f, I, T, C, K>(
+    producer: &'f mut DevProducer<I, T>,
+    core_ref: &'f C,
+    cancel: &'f mut K,
+) -> Result<(), ()>
+where
+    I: TrInput<T>,
+    T: 'static,
+    C: TrCircBuffCore<Data = T>,
+    K: TrCancellationToken + Clone,
+{
+    let Option::Some(mut segm_mut) = core_ref.try_write_init() else {
+        return Result::Err(());
+    };
+    let _ = producer
+        .react_async(&mut segm_mut)
+        .may_cancel_with(cancel)
+        .await;
+    Result::Ok(())
+}
+
+#[gen_may_cancel_future(DevProducerReact)]
+async fn dev_producer_react_async_<'f, I, T, S, K>(
+    producer: &'f mut DevProducer<I, T>,
+    segm_mut: &'f mut S,
+    cancel: &'f mut K,
+) -> ReceiverReact
+where
+    I: TrInput<T>,
+    T: 'static,
+    S: 'f + TrBuffSegmMut<'f, T>,
+    K: TrCancellationToken + Clone,
+{
+    let mut moved = 0usize;
+    while !segm_mut.is_empty() {
+        let demand = Demand::less_than(segm_mut.least_count());
+        let x = segm_mut
+            .as_segm_mut()
+            .move_items_from_input_async(&mut producer.input_, &demand)
+            .may_cancel_with(cancel)
+            .await;
+        // 设备错误：本轮视为无数据。
+        if x.as_ref().pick_right().is_some() {
+            break;
         }
-        if moved > 0 {
-            ReceiverReact::Reacted
-        } else {
-            ReceiverReact::Continue
+        let n = x.pick_left().unwrap_or(0);
+        if n == 0 {
+            break; // 设备暂无数据
         }
+        moved += n;
+    }
+    if moved > 0 {
+        ReceiverReact::Reacted
+    } else {
+        ReceiverReact::Continue
+    }
+}
+
+#[gen_may_cancel_future(DevConsumerInit)]
+async fn dev_consumer_init_async_<'f, O, T, C, K>(
+    consumer: &'f mut DevConsumer<O, T>,
+    core_ref: &'f C,
+    cancel: &'f mut K,
+) -> Result<(), ()>
+where
+    O: TrOutput<T>,
+    T: 'static,
+    C: TrCircBuffCore<Data = T>,
+    K: TrCancellationToken + Clone,
+{
+    let Option::Some(mut segm_ref) = core_ref.try_read_init() else {
+        return Result::Err(());
+    };
+    let _ = consumer
+        .react_async(&mut segm_ref)
+        .may_cancel_with(cancel)
+        .await;
+    return Result::Ok(());
+}
+
+#[gen_may_cancel_future(DevConsumerReact)]
+async fn dev_consumer_react_async_<'s, 'f, O, T, S, K>(
+    consumer: &'f mut DevConsumer<O, T>,
+    segm_ref: &'f mut S,
+    cancel: &'f mut K,
+) -> ReceiverReact
+where
+    O: TrOutput<T>,
+    T: 'static,
+    S: 'f + TrBuffSegmRef<'f, T>,
+    K: TrCancellationToken + Clone,
+{
+    let mut moved = 0usize;
+    while !segm_ref.is_empty() {
+        let demand = Demand::less_than(segm_ref.least_count());
+        let x = segm_ref
+            .as_segm_ref()
+            .move_items_to_output_async(&mut consumer.output_, &demand)
+            .may_cancel_with(cancel)
+            .await;
+        // 设备错误：本轮视为不能接收。
+        if x.as_ref().pick_right().is_some() {
+            break;
+        }
+        let n = x.pick_left().unwrap_or(0);
+        if n == 0 {
+            break; // 设备暂时不能接收
+        }
+        moved += n;
+    }
+    if moved > 0 {
+        ReceiverReact::Reacted
+    } else {
+        ReceiverReact::Continue
     }
 }

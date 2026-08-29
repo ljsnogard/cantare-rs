@@ -75,10 +75,11 @@ impl IrohReader {
         let Result::Ok(builder) = CircularBuffBuilder::with_capacity(cap) else {
             return Result::Err(cap);
         };
-        let rx = builder
+        let mut ready = builder
             .pipe_from_input(input)
-            .consumer_passive()
-            .build()
+            .consumer_passive();
+        let rx = futures_lite::future::block_on(ready.build_async().into_future())
+            .map_err(|_| cap)
             .expect("valid iroh buffer capacity");
         Result::Ok(Self { rx, eof, err })
     }

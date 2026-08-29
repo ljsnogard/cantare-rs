@@ -82,7 +82,7 @@ where
     // P: TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: TrMalloc + Clone,
 {
     core_ref_: CoreRef<BufProducer<T>, C, B, T, A>,
@@ -97,7 +97,7 @@ where
     P: Send + Sync + TrProducer<Data = T>,
     // C: TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: TrMalloc + Clone,
 {
     core_ref_: CoreRef<P, BufConsumer<T>, B, T, A>,
@@ -112,7 +112,7 @@ where
     // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     pub(super) fn new(core_ref: CoreRef<BufProducer<T>, C, B, T, A>) -> Self {
@@ -155,7 +155,7 @@ where
     // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     pub fn write_async<'f>(
@@ -182,7 +182,7 @@ where
     // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     #[inline]
@@ -216,7 +216,7 @@ where
     // P: TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: TrMalloc + Clone,
 {
     fn drop(&mut self) {
@@ -237,7 +237,7 @@ async fn producer_write_async_<'f, K, B, T, A, C>(
     // P: Send + Sync + TrProducer<Data = T>,
     K: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
     C: TrCancellationToken + Clone,
 {
@@ -256,7 +256,7 @@ where
     P: Send + Sync + TrProducer<Data = T>,
     // C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     pub(super) fn new(core_ref_: CoreRef<P, BufConsumer<T>, B, T, A>) -> Self {
@@ -299,7 +299,7 @@ where
     P: Send + Sync + TrProducer<Data = T>,
     // C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     pub fn read_async<'f>(
@@ -326,7 +326,7 @@ where
     P: Send + Sync + TrProducer<Data = T>,
     // C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     #[inline]
@@ -360,7 +360,7 @@ where
     P: Send + Sync + TrProducer<Data = T>,
     // C: TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: TrMalloc + Clone,
 {
     fn drop(&mut self) {
@@ -380,7 +380,7 @@ where
     P: Send + Sync + TrProducer<Data = T>,
     // K: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
     C: TrCancellationToken + Clone,
 {
@@ -425,6 +425,7 @@ where
     I: Send + Sync + TrInput<T>,
     O: Send + Sync + TrOutput<T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: 'static,
     A: TrMalloc + Clone,
 {
     core_ref_: PipeCore<I, O, B, T, A>,
@@ -438,7 +439,7 @@ where
     I: Send + Sync + TrInput<T>,
     O: Send + Sync + TrOutput<T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     pub(super) fn new(core_ref: PipeCore<I, O, B, T, A>) -> Self {
@@ -480,7 +481,7 @@ where
     I: Send + Sync + TrInput<T>,
     O: Send + Sync + TrOutput<T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     #[inline]
@@ -518,7 +519,7 @@ where
     I: Send + Sync + TrInput<T>,
     O: Send + Sync + TrOutput<T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: 'static + Send + Sync,
     A: Send + Sync + TrMalloc + Clone,
     C: TrCancellationToken + Clone,
 {
@@ -558,7 +559,7 @@ where
     // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     type WriteAsync<'f> = ProducerWriteAsync<'f, C, B, T, A> where Self: 'f;
@@ -588,7 +589,7 @@ where
     // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     #[inline]
@@ -605,7 +606,7 @@ where
     P: Send + Sync + TrProducer<Data = T>,
     // C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     type ReadAsync<'f> = ConsumerReadAsync<'f, P, B, T, A> where Self: 'f;
@@ -639,7 +640,7 @@ where
     P: Send + Sync + TrProducer<Data = T>,
     // C: Send + Sync + TrConsumer<Data = T>,
     B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
-    T: Send + Sync,
+    T: Send + Sync + 'static,
     A: Send + Sync + TrMalloc + Clone,
 {
     #[inline]

@@ -1,25 +1,20 @@
-//! 单线程异步运行时下的「主动端 + 泵」测试。
+//! 阻塞式输入设备下的「主动端 + 泵」测试。
 //!
-//! # 被测约定：泵由 executor 驱动，而非自旋自驱动
+//! # 被测约定：泵非阻塞、由操作驱动（不 spawn、不自旋）
 //!
-//! circular_buff 一端主动一端被动时，被动操作会驱动主动泵。泵与设备的交互
-//! 分两条路径：
+//! circular_buff 一端主动一端被动时，泵由**操作 / 提交路径**驱动：
 //!
-//! * **同步路径**（`start` / 提交路径 / `try_*`）：泵只做**非阻塞尝试**——
-//!   设备 future 单次 poll，`Pending`（设备需外部唤醒 / 其它执行体推进）即
-//!   放弃本轮，**不自旋**；
-//! * **异步路径**（`read_async` / `write_async` 的 park）：泵 `await` 设备
-//!   future——设备阻塞（`Pending`）时等待 future **挂起**（设备已注册其
-//!   waker），由 **executor 驱动**；设备就绪后数据流入缓冲。
+//! * 构建期 `init_async` 的初始搬运（`DevProducer` 填满缓冲）只做**非阻塞
+//!   尝试**——设备 future 单次 poll，`Pending`（设备需外部唤醒 / 其它执行体
+//!   推进）即放弃，**不自旋**；
+//! * `try_read` 的 `Drained` 重试同样驱动一次非阻塞尝试，`Pending` 即返回
+//!   `Drained`，不阻塞调用线程；
+//! * 设备就绪后，下一次操作（`try_read` / 读取提交 `advance_read`）再次驱动
+//!   泵，数据流入缓冲。
 //!
-//! 本模块用一个「必须等另一个 task 置位才就绪、Pending 时注册 executor
-//! waker」的阻塞式设备（[`CrossTaskInput`]，模拟真实连接如 iroh 的行为），
-//! 在单线程 executor（`futures_executor::LocalPool`）中验证：
-//!
-//! 1. 构建期同步泵不阻塞：设备未就绪 → `build_async()` 正常返回（缓冲为空），
-//!    不会把单线程执行器饿死；
-//! 2. 异步等待被 executor 驱动：`read_async` 的泵 await 设备 → 挂起 →
-//!    另一个 task 置位并唤醒 → 泵继续 → 数据流入 → 读完成。
+//! 本模块用一个「必须等外部置位 `ready` 才就绪、Pending 时注册 waker」的
+//! 阻塞式设备（[`CrossTaskInput`]，模拟真实连接如 iroh 的行为）验证上述
+//! 语义，确保泵**不会自旋**饿死调用线程。
 
 use std::{
     future::Future,
@@ -34,9 +29,6 @@ use std::{
     vec::Vec,
 };
 
-use futures_executor::LocalPool;
-use futures_util::task::LocalSpawnExt;
-
 use abs_buff::{
     Demand,
     io::TrInput,
@@ -45,7 +37,10 @@ use abs_buff::{
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use anylr::SomeOf;
 
-use super::{DefaultBuilder, TestErr, take_segm};
+use super::{
+    super::RxError,
+    DefaultBuilder, TestErr, take_segm,
+};
 
 /// 一个必须等待外部 task 置位 `ready` 后才能完成的输入设备。
 ///
@@ -149,24 +144,25 @@ impl TrInput<u8> for CrossTaskInput {
 }
 
 /// # 被测约定
-/// 泵由 **executor 驱动**，而非 `Waker::noop()` 循环自驱动：
+/// 泵**非阻塞、由操作驱动**（不 spawn、不自旋）：
 ///
-/// 1. **同步泵不阻塞**：`build_async()` 的同步泵对未就绪设备只做一次非阻塞尝试，
-///    `Pending` 即放弃——`build_async()` 正常返回，**不会**把单线程执行器饿死；
-/// 2. **异步等待由 executor 驱动**：`read_async` 的 park 每 poll 重建一轮泵
-///    并 `await` 设备——设备 `Pending`（已注册 executor waker）时挂起；另一个
-///    task 置位并唤醒后，executor 重新驱动泵 → 数据流入 → 读完成。
+/// 1. **构建不阻塞**：`build_async` 的 `init_async` 初始搬运对未就绪设备只做
+///    非阻塞尝试（`Pending` 即放弃）——`build_async()` 正常返回、缓冲为空，
+///    **不会**把调用线程饿死；
+/// 2. **try_read 驱动非阻塞尝试**：设备未就绪时，`try_read` 的 `Drained`
+///    重试驱动输入泵（单次 poll，`Pending` 即放弃）→ 返回 `Drained`，不阻塞；
+/// 3. **设备就绪后操作驱动补位**：置位 `ready` 后，下一次 `try_read` 的驱动
+///    拉到数据 → 成功。
 ///
 /// # 构造
-/// 线程内：先用 [`CrossTaskInput`]（未就绪）构建「主动生产 × 被动消费」，
-/// 确认 `build_async()` 返回（同步泵不阻塞）；再在 `LocalPool` 里同时 spawn
-/// `read_async` 与「置位 + 唤醒」两个 task，`run()` 驱动。
+/// 线程内：用 [`CrossTaskInput`]（未就绪）构建「主动生产 × 被动消费」，确认
+/// `build_async()` 返回；随后按上述 2/3 步操作 `try_read`。
 ///
 /// # 判定
-/// (1) `build_async()` 在 100ms 内返回（同步泵非阻塞、不自旋）；(2) `read_async`
-/// 在 2s 内完成并读出 `0..8`（executor 驱动泵，而非自旋空转）。
+/// (1) `build_async()` 在 100ms 内返回；(2) 设备未就绪时 `try_read` 返回
+/// `Drained`（不阻塞）；(3) 设备就绪后 `try_read` 在 2s 内读到 `0..8`。
 #[test]
-fn pump_is_executor_driven_in_single_thread_executor() {
+fn pump_is_non_blocking_and_operation_driven() {
     use std::sync::mpsc;
 
     let ready = Arc::new(AtomicBool::new(false));
@@ -176,9 +172,7 @@ fn pump_is_executor_driven_in_single_thread_executor() {
     let (result_tx, result_rx) = mpsc::channel();
 
     let handle = std::thread::spawn(move || {
-        // —— 1. 同步泵（非阻塞尝试）：设备未就绪 → build 不阻塞、不自旋。 ——
-        // （build 现为异步 `build_async`，用 `futures_lite::future::block_on`
-        // 驱动；其内部对未就绪设备的同步泵仍只做非阻塞尝试。）
+        // —— 1. 构建不阻塞：init_async 初始搬运只做非阻塞尝试。 ——
         let mut ready_builder = DefaultBuilder::with_capacity(8)
             .unwrap()
             .pipe_from_input(CrossTaskInput::new(
@@ -191,52 +185,36 @@ fn pump_is_executor_driven_in_single_thread_executor() {
             futures_lite::future::block_on(ready_builder.build_async().into_future())
                 .unwrap();
         built_tx.send(()).unwrap();
+        assert_eq!(rx.data_size(), 0, "设备未就绪：初始搬运无数据");
 
-        // —— 2. executor 驱动：LocalPool 中，read_async 的泵 await 设备。 ——
-        let mut pool = LocalPool::new();
-        let spawner = pool.spawner();
+        // —— 2. try_read 驱动一次非阻塞尝试：设备未就绪 → Drained，不阻塞。 ——
+        let demand = Demand::at_least(8);
+        let some = rx.try_read(&demand);
+        assert!(
+            matches!(some.pick_right(), Some(RxError::Drained(_))),
+            "设备未就绪：try_read 应返回 Drained（驱动不做非阻塞尝试后放弃）"
+        );
 
-        // 读者 task：其 park 每 poll 重建一轮输入泵并 await 设备——设备
-        // Pending（注册 executor waker）时挂起，由 executor 驱动。
-        spawner
-            .spawn_local(async move {
-                let demand = Demand::at_least(8);
-                let fut = rx.read_async(&demand);
-                let mut segm = fut
-                    .into_future()
-                    .await
-                    .pick_left()
-                    .expect("executor 驱动后应有数据");
-                let n = segm.least_count();
-                let got = take_segm(&mut segm, n);
-                result_tx.send(got).unwrap();
-            })
-            .unwrap();
-
-        // 「设备就绪」task：先让出（给读者 task 先 poll、注册 waker 的机会），
-        // 再置位并唤醒——验证唤醒确实由 executor 调度，而非自旋。
-        spawner
-            .spawn_local(async move {
-                futures_lite::future::yield_now().await;
-                ready.store(true, Ordering::Release);
-                if let Some(w) = waker_slot.lock().unwrap().take() {
-                    w.wake();
-                }
-            })
-            .unwrap();
-
-        pool.run();
+        // —— 3. 设备就绪后：下一次 try_read 的驱动拉到数据。 ——
+        ready.store(true, Ordering::Release);
+        let some = rx.try_read(&demand);
+        let mut segm = some
+            .pick_left()
+            .expect("设备就绪后 try_read 应经驱动拉到数据");
+        let n = segm.least_count();
+        let got = take_segm(&mut segm, n);
+        result_tx.send(got).unwrap();
     });
 
-    // (1) 同步泵不阻塞：build_async() 必须在 100ms 内返回。
+    // (1) build_async 必须在 100ms 内返回（init_async 初始搬运非阻塞、不自旋）。
     built_rx
         .recv_timeout(Duration::from_millis(100))
-        .expect("build 不应阻塞：同步泵对未就绪设备只做非阻塞尝试");
+        .expect("build 不应阻塞：init_async 对未就绪设备只做非阻塞尝试");
 
-    // (2) executor 驱动：read_async 必须在 2s 内由 executor 驱动完成并读出数据。
+    // (3) 设备就绪后 try_read 必须在 2s 内成功（非阻塞驱动，不会自旋空转）。
     let got = result_rx
         .recv_timeout(Duration::from_secs(2))
-        .expect("executor 驱动应让读完成（而非自旋空转）");
+        .expect("设备就绪后 try_read 应经驱动拉到数据（而非自旋）");
     assert_eq!(got, (0..8).collect::<Vec<_>>(), "读出的数据应与输入一致");
 
     // 不要 join：若实现回归为自旋，线程会永久卡死，join 会让测试挂住。

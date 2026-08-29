@@ -1,7 +1,7 @@
 //! 主动端的测试：输入泵（`pipe_from_input`）、输出泵（`pipe_into_output`）、
-//! 以及全主动流水线（`Pipeline` future）。主动端不 `spawn` 任何任务：数据在
-//! 构建期 / 对端操作时由 hook 同步搬运；全主动流水线由设备驱动的 `Pipeline`
-//! future 持续搬运。
+//! 以及全主动流水线（`Pipeline` future）。主动端不 `spawn` 任何任务：数据由
+//! executor 驱动的泵搬运（被动端异步等待 / `try_*` 重试 / 构建期初始泵），
+//! fire 只唤醒不搬运；全主动流水线由设备驱动的 `Pipeline` future 持续搬运。
 //!
 //! 主动端**不产出半部**：`build_async` 只把被动端的半部交给调用者（主动生产 ×
 //! 被动消费 → 仅消费端；被动生产 × 主动消费 → 仅生产端；主动 × 主动 →
@@ -21,14 +21,22 @@ use abs_buff::{
     },
 };
 
+use mm_ptr::Owned;
+
 use super::{
-    super::{RxError, TxError},
+    super::{
+        RxError, TxError,
+        abs_comp_::{ConsumerHookEvent, TrConsumer},
+        core_::{CircCore, Waiter},
+        BufProducer, CoreAlloc, DevConsumer,
+    },
     DefaultBuilder, ReadySegm, TestErr, TestInput, TestOutput, TestWaker, fill_segm,
     poll_once, take_segm,
 };
 
-/// 主动生产 × 被动消费：构造即从 `TrInput` 泵入；消费端每读取一次，
-/// 释放的可写空间立即被新数据补满；输入耗尽后停止。
+/// 主动生产 × 被动消费：构造（`init_async`）即把 `TrInput` 现有数据灌满缓冲；
+/// 消费端每读取一次，读取提交（`advance_read`）驱动主动生产者**重复拉取**补满
+/// 空位；输入耗尽后停止。
 ///
 /// `build_async` 只返回消费端半部——主动生产端由设备驱动，不产出写半部。
 #[test]
@@ -44,11 +52,11 @@ fn pipe_from_input_fills_and_refills() {
     let mut rx =
         futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
-    // 构造完成即已泵入：容量 8 全部可用（REVERSION 约定，不再空一槽）→ 填满 8 格。
+    // 构造完成即已填满：容量 8 全部可用（REVERSION 约定，不再空一槽）→ 8 格。
     assert_eq!(rx.data_size(), 8);
     assert_eq!(pos.load(Ordering::Relaxed), 8, "输入设备已被读走 8 字节");
 
-    // 边读边补：读空当前数据 → hook 立即从输入设备拉取下一批。
+    // 边读边补：读取提交 → advance_read 驱动输入泵重复拉取，读空后立即补满。
     let mut total = Vec::new();
     loop {
         let demand = Demand::at_least(1);
@@ -59,12 +67,12 @@ fn pipe_from_input_fills_and_refills() {
         };
         let n = rs.least_count();
         let got = take_segm(&mut rs, n);
-        drop(rs);
+        drop(rs); // 提交 → advance_read → 驱动输入泵补位
         total.extend(got);
-        // 读取后（输入未耗尽时）应立即补满。
+        // 输入未耗尽时，读取提交后缓冲应立即补满。
         let p = pos.load(Ordering::Relaxed);
         if p < 20 {
-            assert_eq!(rx.data_size(), 8, "读取后应立即补满可写空间");
+            assert_eq!(rx.data_size(), 8, "advance_read 应驱动输入泵补满空位");
         }
     }
     assert_eq!(total, (0..20).collect::<Vec<_>>(), "读回全部输入");
@@ -73,7 +81,8 @@ fn pipe_from_input_fills_and_refills() {
     assert_eq!(data.lock().unwrap().len(), 20);
 }
 
-/// 被动生产 × 主动消费：写入缓冲的数据**立即**被搬运到 `TrOutput`。
+/// 被动生产 × 主动消费：写入提交（`advance_write`）驱动主动消费者**重复推送**
+/// 到 `TrOutput`——写入后立即排空。
 ///
 /// `build_async` 只返回生产端半部——主动消费端由设备驱动，不产出读半部。
 #[test]
@@ -88,7 +97,7 @@ fn pipe_into_output_drains_on_write() {
     let mut tx =
         futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
-    // 写 3 字节 → 写段 drop 提交 → 消费端 hook 立即泵出。
+    // 写 3 字节 → 写段 drop 提交 → advance_write 驱动输出泵排空。
     let demand = Demand::at_least(3);
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
@@ -98,11 +107,11 @@ fn pipe_into_output_drains_on_write() {
     assert_eq!(
         *out_data.lock().unwrap(),
         vec![1, 2, 3],
-        "写入后应立即泵到输出设备"
+        "写入提交后应立即排空到输出设备"
     );
-    assert_eq!(tx.data_size(), 0, "泵出后缓冲应为空");
+    assert_eq!(tx.data_size(), 0, "排空后缓冲应为空");
 
-    // 连续多次写入：每次都即时泵出。
+    // 连续多次写入：每次都即时排空。
     for chunk in 0..3u8 {
         let demand = Demand::at_least(2);
         let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
@@ -414,8 +423,8 @@ fn try_read_auto_drives_active_producer() {
     );
 }
 
-/// 写端关闭（`ProducerClose` 事件）时，消费端 `check` 仍感兴趣 → 泵排空残留
-/// 数据（写后未及搬运的部分在 close 时被搬走）。
+/// 写端关闭（`ProducerClose` 事件）：`close_tx` 先驱动输出泵排空残留再触发
+/// 事件——写端关闭后不再有新数据，残留必须送达输出设备。
 #[test]
 fn close_tx_drains_remaining_output() {
     let output = TestOutput::new();
@@ -428,7 +437,7 @@ fn close_tx_drains_remaining_output() {
     let mut tx =
         futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
-    // 写 5 字节（一次借出可写区，全部写入并提交）。
+    // 写 5 字节（一次借出可写区，全部写入并提交）——advance_write 已排空。
     let demand = Demand::at_least(5);
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
@@ -438,11 +447,10 @@ fn close_tx_drains_remaining_output() {
     assert_eq!(
         *out_data.lock().unwrap(),
         vec![1, 2, 3, 4, 5],
-        "写入提交即泵出"
+        "写入提交即排空"
     );
 
-    // 再写 2 字节后立即 close：残留数据必须在 close 的 ProducerClose 事件
-    // 驱动下被排空（check 对 ProducerClose 感兴趣）。
+    // 再写 2 字节后 close：写入已排空，close 的排空路径对空缓冲是 no-op。
     let demand = Demand::at_least(2);
     let mut ws = TrBuffTryWrite::try_write(&mut tx, &demand)
         .pick_left()
@@ -455,24 +463,14 @@ fn close_tx_drains_remaining_output() {
     assert_eq!(*out_data.lock().unwrap(), vec![1, 2, 3, 4, 5, 6, 7]);
 }
 
-/// 主动生产 × 被动消费的**异步读等待**：空缓冲时 `read_async` 挂起（park），
-/// 每次轮询自动驱动一轮输入泵；设备数据「迟到」（门打开）后，下一次 poll
-/// 即由 park 内的泵拉到数据 → `Ready`——无需任何显式 drive。
+/// 主动生产 × 被动消费的**异步读**：构造（`init_async` 初始搬运）已把缓冲填满，
+/// 因此第一次 `read_async` **无需任何泵驱动**即成功——等待逻辑保持纯粹（只
+/// 关心本端需求）；随后每次读取提交（`advance_read`）驱动输入泵补位，后续
+/// `read_async` 同样立即成功。
 #[test]
-fn read_async_auto_drives_active_producer() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize},
-    };
-
-    let gate = Arc::new(AtomicBool::new(false));
-    let calls = Arc::new(AtomicUsize::new(0));
-    let input = GatedInput {
-        data: vec![7, 8, 9],
-        pos: 0,
-        gate: gate.clone(),
-        calls: calls.clone(),
-    };
+fn read_async_with_active_producer_has_data() {
+    let input = TestInput::new((0..20).collect());
+    let pos = input.pos.clone();
 
     let mut ready = DefaultBuilder::with_capacity(8)
         .unwrap()
@@ -481,32 +479,26 @@ fn read_async_auto_drives_active_producer() {
     let mut rx =
         futures_lite::future::block_on(ready.build_async().into_future()).unwrap();
 
-    // 构造期 start() 泵了一轮，但门未开 → 缓冲为空。
-    assert_eq!(rx.data_size(), 0);
+    // 构造即已填满：第一次 read_async 必有数据（无需等待 / 泵驱动）。
+    // 内层作用域：future 持有 &mut rx，读取完成后立即 drop 释放借用。
+    {
+        let demand = Demand::at_least(8);
+        let fut = rx.read_async(&demand);
+        let mut fut = pin!(fut.into_future());
+        let (waker, _flag) = TestWaker::make_waker_tuple();
+        let res = poll_once(fut.as_mut(), &waker);
+        let mut rs = match res {
+            std::task::Poll::Ready(r) => r.pick_left().expect("构造已填满：第一次读应有数据"),
+            std::task::Poll::Pending => panic!("构造已填满：read_async 不应 park"),
+        };
+        assert_eq!(rs.least_count(), 8);
+        assert_eq!(take_segm(&mut rs, 8), (0..8).collect::<Vec<_>>());
+        drop(rs); // 提交 → advance_read → 驱动输入泵补位
+    }
 
-    // 异步读等待：空 → Pending（park 每次轮询会驱动输入泵，但门未开仍无数据）。
-    let demand = Demand::at_least(3);
-    let fut = rx.read_async(&demand);
-    let mut fut = pin!(fut.into_future());
-    let (waker, _flag) = TestWaker::make_waker_tuple();
-    assert!(
-        poll_once(fut.as_mut(), &waker).is_pending(),
-        "门未开时读等待必须 pending（泵无数据可拉）"
-    );
-
-    // 门打开：下一次 poll 即由 park 内的泵拉到数据 → Ready。
-    gate.store(true, Ordering::Release);
-    let res = poll_once(fut.as_mut(), &waker);
-    let mut rs = match res {
-        std::task::Poll::Ready(r) => r.pick_left().expect("读等待应成功"),
-        std::task::Poll::Pending => panic!("门开后读等待应被泵驱动就绪"),
-    };
-    assert_eq!(rs.least_count(), 3);
-    assert_eq!(take_segm(&mut rs, 3), vec![7, 8, 9]);
-    assert!(
-        calls.load(Ordering::Relaxed) >= 2,
-        "park 轮询应自动驱动输入泵"
-    );
+    // 读取提交后缓冲立即补满（advance_read 驱动重复拉取）。
+    assert_eq!(rx.data_size(), 8, "advance_read 应驱动输入泵补满空位");
+    assert_eq!(pos.load(Ordering::Relaxed), 16, "输入设备已被读走 16 字节");
 }
 
 // ---------------------------------------------------------------------------
@@ -720,5 +712,85 @@ fn dual_head_device_observes_cross_pipe_flow() {
         *dual.seen_out.lock().unwrap(),
         (0..20).collect::<Vec<_>>(),
         "双头设备已转交全部数据（seen_out 可观察）"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dev 端唤醒槽位 + STNDBY armed 协议（executor 驱动的泵 park 机制）
+// ---------------------------------------------------------------------------
+
+/// # 被测约定
+/// 主动端（`DevProducer` / `DevConsumer`）携带与被动端同构的唤醒槽位
+/// （`wakeslot_`）。executor 驱动的泵在「无事可做」（缓冲满 / 空、设备阻塞）
+/// 时把 waker 注册进主动端自身的槽位并 armed（`TX_STNDBY` / `RX_STNDBY`，
+/// 经核心 `arm_producer` / `arm_consumer`）；对端提交路径的 fire 侧**只唤醒
+/// 不搬运**——armed 才 `check`，`check` 感兴趣即 `signal` 唤醒泵。
+///
+/// # 判定
+/// (1) 端级：`DevConsumer::check(Available(…))` 感兴趣 → 直接 `signal` 自身
+/// 槽位（唤醒已注册的泵）；(2) 核心级端到端：armed 后经核心写入 → 段 drop →
+/// `advance_write` → `fire_consumer` → `check` → `signal`；(3) 门控：未 armed
+/// 时 fire 不唤醒（无等待者 / 泵未 park）。
+#[test]
+fn dev_wakeslot_and_stndby_protocol() {
+    // (1) 端级：check 感兴趣 → signal 自身唤醒槽位。
+    let output = TestOutput::new();
+    let dev = DevConsumer::new(output);
+    let (waker, flag) = TestWaker::make_waker_tuple();
+    let mut waiter = Waiter::new();
+    waiter.waker = Some(waker);
+    dev.wakeslot().register(&waiter); // 模拟泵已 park（注册进主动端槽位）
+    assert!(
+        dev.check(ConsumerHookEvent::Available(3)),
+        "有数据可消费时 check 应感兴趣"
+    );
+    assert!(
+        flag.load(Ordering::Acquire),
+        "check 感兴趣时应 signal 唤醒已注册的泵"
+    );
+    dev.wakeslot().deregister(&waiter);
+
+    // (2) 核心级：armed 后写入提交 → fire_consumer → check → signal。
+    let output = TestOutput::new();
+    let dev = DevConsumer::new(output);
+    let (waker, flag) = TestWaker::make_waker_tuple();
+    let mut waiter = Waiter::new();
+    waiter.waker = Some(waker);
+    dev.wakeslot().register(&waiter);
+    let buffer = Owned::new_uninit_slice(8, CoreAlloc);
+    let core = CircCore::new(BufProducer::new(), dev, buffer);
+    core.set_rx_standby(); // 泵 armed（RX_STNDBY）——fire 侧才可能唤醒
+    let demand = Demand::at_least(3);
+    let mut ws = core
+        .try_write_(&demand)
+        .pick_left()
+        .expect("应可写");
+    fill_segm(&mut ws, &[1, 2, 3]);
+    drop(ws); // 段 drop → advance_write → fire_consumer(Available(3))
+    assert!(
+        flag.load(Ordering::Acquire),
+        "armed 后写入提交应经 fire_consumer → check → signal 唤醒泵"
+    );
+
+    // (3) 未 armed：fire 门控不唤醒（无等待者 / 泵未 park）。
+    let output = TestOutput::new();
+    let dev = DevConsumer::new(output);
+    let (waker, flag) = TestWaker::make_waker_tuple();
+    let mut waiter = Waiter::new();
+    waiter.waker = Some(waker);
+    dev.wakeslot().register(&waiter);
+    let buffer = Owned::new_uninit_slice(8, CoreAlloc);
+    let core = CircCore::new(BufProducer::new(), dev, buffer);
+    // 不 arm_consumer：fire_consumer 应直接返回，不访问 check / 槽位。
+    let demand = Demand::at_least(3);
+    let mut ws = core
+        .try_write_(&demand)
+        .pick_left()
+        .expect("应可写");
+    fill_segm(&mut ws, &[1, 2, 3]);
+    drop(ws);
+    assert!(
+        !flag.load(Ordering::Acquire),
+        "未 armed 时 fire 门控应不唤醒"
     );
 }

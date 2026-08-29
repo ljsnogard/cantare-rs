@@ -23,8 +23,8 @@
 //! * [`TrProducer`] / [`TrConsumer`] 是**端契约**——由存放在核心里的端类型
 //!   （被动：`BuffProducer` / `BuffConsumer`；
 //!   主动：`DeviceProducer` / `DeviceConsumer`）
-//!   实现。核心在提交路径上向对端触发事件，主动端经 `react_async` 拿到一段
-//!   缓冲区视图完成同步搬运。
+//!   实现。核心在提交路径上向对端触发事件（fire，**只唤醒不搬运**）；主动端
+//!   由 executor 驱动的泵经 `react_async` 拿到一段缓冲区视图完成数据搬运。
 //!
 //! # 为什么 `react_async` 泛化段参数（而不是关联类型）
 //!
@@ -36,16 +36,15 @@
 //! 解法：端类型**不携带**段类型，`react_async` 的段参数由调用方（核心）按
 //! 具体类型传入。段因此可以指名 `CircCore<P, C, T>`（段不在端类型内部，无环）。
 
-use core::pin::Pin;
-
 use abs_buff::{
     buffer::{TrBuffSegmMut, TrBuffSegmRef},
-    gen_may_cancel_future,
     x_deps::abs_cancel,
 };
 use abs_cancel::TrMayCancel;
 
-/// 环形核心的「段提交」接口：段 drop 时按已消费量推进读写位置。
+/// 环形核心的「段提交 + 泵协作」接口：段 drop 时按已消费量推进读写位置；
+/// 主动端（`DevProducer` / `DevConsumer`）经本接口在 `init_async` 里完成初始
+/// 搬运与 armed 登记。
 ///
 /// 这是 [`super::reclaim_`] 的 `WriterReclaim` / `ReaderReclaim` 唯一依赖的
 /// 接口——段层通过它把消费量提交回环形，而无需指名核心的具体类型。**对端
@@ -63,6 +62,19 @@ where
     fn advance_read(&self, amount: usize);
 
     fn advance_write(&self, amount: usize);
+
+    // ------------------------------------------------------------------
+    // 主动端（Dev ends）的泵协作：`init_async` 的初始搬运 + armed 登记
+    // ------------------------------------------------------------------
+
+    fn try_write_init<'f>(
+        &'f self,
+    ) -> Option<impl 'f + TrBuffSegmMut<'f, Self::Data>>;
+
+    fn try_read_init<'f>(
+        &'f self,
+    ) -> Option<impl 'f + TrBuffSegmRef<'f, Self::Data>>;
+
 }
 
 /// 生产端 hook 收到的事件（消费端完成读取 / 消费者关闭后触发）。
@@ -127,24 +139,31 @@ pub enum ReceiverReact {
 pub trait TrConsumer {
     type Data;
 
-    type InitAsync<'f>: TrMayCancel<'f, MayCancelOutput = Result<(), ()>>
+    type InitAsync<'f, C>: TrMayCancel<'f, MayCancelOutput = Result<(), ()>>
     where
-        Self: 'f;
+        Self: 'f,
+        C: 'f + TrCircBuffCore<Data = Self::Data>;
+
+    type ReactAsync<'f, S>:
+        TrMayCancel<'f, MayCancelOutput = ReceiverReact>
+    where
+        Self: 'f,
+        S: 'f + TrBuffSegmRef<'f, Self::Data>;
 
     /// 环形缓冲完成构建前，在 builder 中调用且仅调用一次的方法，用于 Consumer
     /// 自身的异步初始化。
-    fn init_async<'f, TyCore>(
-        self: Pin<&'f mut Self>,
-        core: &'f TyCore,
-    ) -> Self::InitAsync<'f>
+    fn init_async<'f, C>(
+        &'f mut self,
+        core: &'f C,
+    ) -> Self::InitAsync<'f, C>
     where
-        TyCore: TrCircBuffCore;
+        C: TrCircBuffCore<Data = Self::Data>;
 
     fn is_passive(&self) -> bool;
 
     /// 本端对 `event`（携带当前数据量）是否感兴趣。
     ///
-    /// 核心在**事件分发**（提交路径）与**泵循环每轮**调用本方法：返回 `false`
+    /// 核心在**事件分发**（fire）与**泵的驱动路径**调用本方法：返回 `false`
     /// 则不唤醒 / 不继续泵。被动端按 [`TrConsumer::set_demand`] 登记的等待者
     /// 完整需求（`demand.min()`）裁决——不足下限不唤醒，避免 spurious wake；
     /// 关闭事件例外——EOF 总是值得唤醒；主动端由设备裁决。`&mut self`——端
@@ -155,13 +174,14 @@ pub trait TrConsumer {
     ///
     /// `TySegm` 泛型化——端类型**不携带**段类型，避免端类型指名核心类型造成
     /// 的类型级循环（见模块文档）。核心以具体段类型（两段式
-    /// `ReclSliceRef`）调用本方法，并把返回的 future 同步轮询到完成。
-    fn react_async<'f, TySegm>(
-        &mut self,
-        segm: &mut TySegm,
-    ) -> impl Future<Output = ReceiverReact>
+    /// `ReclSliceRef`）调用本方法；返回的 future 由泵 `await`（executor 驱动）
+    /// 或非阻塞单次 poll（同步上下文）驱动。
+    fn react_async<'f, S>(
+        &'f mut self,
+        segm_ref: &'f mut S,
+    ) -> Self::ReactAsync<'f, S>
     where
-        TySegm: TrBuffSegmRef<'f, Self::Data>,
+        S: 'f + TrBuffSegmRef<'f, Self::Data>,
         Self: 'f;
 }
 
@@ -170,16 +190,23 @@ pub trait TrConsumer {
 pub trait TrProducer {
     type Data;
 
-    type InitAsync<'f>: TrMayCancel<'f, MayCancelOutput = Result<(), ()>>
+    type InitAsync<'f, C>: TrMayCancel<'f, MayCancelOutput = Result<(), ()>>
     where
-        Self: 'f;
+        Self: 'f,
+        C: 'f + TrCircBuffCore<Data = Self::Data>;
 
-    fn init_async<'f, TyCore>(
-        self: Pin<&'f mut Self>,
-        core: &'f TyCore,
-    ) -> Self::InitAsync<'f>
+    type ReactAsync<'f, S>:
+        TrMayCancel<'f, MayCancelOutput = ReceiverReact>
     where
-        TyCore: TrCircBuffCore;
+        Self: 'f,
+        S: 'f + TrBuffSegmMut<'f, Self::Data>;
+
+    fn init_async<'f, S>(
+        &'f mut self,
+        core: &'f S,
+    ) -> Self::InitAsync<'f, S>
+    where
+        S: TrCircBuffCore<Data = Self::Data>;
 
     fn is_passive(&self) -> bool;
 
@@ -188,12 +215,12 @@ pub trait TrProducer {
     /// 需求裁决）。
     fn check(&self, event: ProducerHookEvent) -> bool;
 
-    fn react_async<'f, TySegm>(
-        &mut self,
-        segm: &mut TySegm,
-    ) -> impl Future<Output = ReceiverReact>
+    fn react_async<'f, S>(
+        &'f mut self,
+        segm_mut: &'f mut S,
+    ) -> Self::ReactAsync<'f, S>
     where
-        TySegm: TrBuffSegmMut<'f, Self::Data>,
+        S: 'f + TrBuffSegmMut<'f, Self::Data>,
         Self: 'f;
 }
 
