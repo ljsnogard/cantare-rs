@@ -19,7 +19,7 @@ members = [
     "crates/cancel_src",
 
     "crates/abs_vfs",
-    "crates/mem_vfs",
+    # "crates/mem_vfs",
 
     "crates/abs_smux",
     "crates/smux_v1",

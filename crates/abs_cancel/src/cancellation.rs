@@ -16,10 +16,9 @@ where
     type MayCancelFuture<'f, C>: IntoFuture<Output = Self::MayCancelOutput>
     where
         Self: 'f,
-        C: TrCancellationToken + Clone,
-        C: 'a,
+        'f: 'a,
         C: 'f,
-        'f: 'a;
+        C: TrCancellationToken + Clone;
 
     type MayCancelOutput;
 
@@ -180,6 +179,35 @@ impl TrCancellationToken for NonCancellableToken {
     #[inline]
     fn cancellation(&mut self) -> Self::Cancellation {
         NonCancellableToken::cancellation(self)
+    }
+}
+
+impl<'a, T> TrMayCancel<'a> for core::future::Ready<T>
+where
+    T: 'a,
+{
+    type MayCancelOutput = T;
+    type MayCancelFuture<'f, C> = core::future::Ready<T>
+    where
+        Self: 'f,
+        'f: 'a,
+        C: 'f,
+        C: TrCancellationToken + Clone;
+
+    fn may_cancel_with<'f, C>(
+        self,
+        _tok: &'f mut C,
+    ) -> Self::MayCancelFuture<'f, C>
+    where
+        Self: 'f,
+        // 当 `MayCancelOutput` 携带生命周期（即返回类型借用了 `Self` 的数据）时，
+        // 生成的 future 需要把 cancel token 的借用以 `&'a mut C` 的形式保存，
+        // 因此要求 cancel 借用存活期不短于 `'a`。没有这一条，宏生成的
+        // `may_cancel_with` 无法用 `&'f mut C` 构造出输出类型引用 `'a` 的 future。
+        'f: 'a,
+        C: TrCancellationToken + Clone
+    {
+        self
     }
 }
 
