@@ -9,10 +9,14 @@
 use std::{
     mem::MaybeUninit,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
+
+use tokio::sync::Mutex;
+
+use iroh::endpoint::{RecvStream, SendStream};
 
 // `abs_buff` 及其底层依赖（`abs_cancel` / `anylr`）经
 // `abs_buff_tokio_adapt::x_deps` 再导出，无需在 Cargo.toml 重复声明。
@@ -27,7 +31,7 @@ use abs_buff_tokio_adapt::{
 };
 use abs_cancel::TrCancellationToken;
 use anylr::{SomeLR, SomeOf};
-use iroh::endpoint::{RecvStream, SendStream};
+use buffex::x_deps::abs_cancel::TrMayCancel;
 
 /// 输入设备的错误类型：tokio 读错误（`ReadErrTag::Propagated`）。
 pub type StreamInputErr = TaggedError<std::io::Error, ReadErrTag>;
@@ -56,8 +60,7 @@ impl StreamInput {
 }
 
 impl TrInput<u8> for StreamInput {
-    type ReadAsync<'f>
-        = StreamInputReadAsync<'f>
+    type ReadAsync<'f> = StreamInputReadAsync<'f>
     where
         Self: 'f,
         u8: 'f;
@@ -75,13 +78,16 @@ impl TrInput<u8> for StreamInput {
 async fn stream_input_read_impl_<'f, C>(
     input: &'f mut StreamInput,
     target: &'f mut [MaybeUninit<u8>],
-    _cancel: &'f mut C,
+    cancel: &'f mut C,
 ) -> SomeOf<usize, StreamInputErr>
 where
     C: TrCancellationToken + Clone,
 {
     // 传输经 abs_buff_tokio_adapt 的 AsyncRead 适配器（宏生成的 future）。
-    let x = ReadAsInput::new(&mut input.stream).read_async(target).await;
+    let x = ReadAsInput::new(&mut input.stream)
+        .read_async(target)
+        .may_cancel_with(cancel)
+        .await;
     match x.into_inner() {
         SomeLR::Left(n) => {
             // tokio `AsyncRead` 语义：读到 0 = 流结束（EOF）。
@@ -92,15 +98,13 @@ where
         }
         SomeLR::Right(err) => {
             // 泵会把设备错误当作「本轮无数据」——记入共享 Arc 供 take_error。
-            if let Ok(mut guard) = input.err.lock() {
-                *guard = Some(err);
-            }
+            let mut guard = input.err.lock().await;
+            *guard = Some(err);
             SomeOf::new_left(0)
         }
         SomeLR::Both(_, err) => {
-            if let Ok(mut guard) = input.err.lock() {
-                *guard = Some(err);
-            }
+            let mut guard = input.err.lock().await;
+            *guard = Some(err);
             SomeOf::new_left(0)
         }
     }
@@ -145,7 +149,7 @@ impl TrOutput<u8> for StreamOutput {
 async fn stream_output_write_impl_<'f, C>(
     output: &'f mut StreamOutput,
     source: &'f [MaybeUninit<u8>],
-    _cancel: &'f mut C,
+    cancel: &'f mut C,
 ) -> SomeOf<usize, StreamOutputErr>
 where
     C: TrCancellationToken + Clone,
@@ -153,26 +157,29 @@ where
     // 从共享槽位取出发送流，避免把 std MutexGuard 持有到 await 之后
     // （MutexGuard 不是 Send，会导致写 future 无法跨线程发送）。
     // shutdown 取回后为 None → 写入 0，不再搬数据。
-    let Some(mut stream) = output.stream.lock().unwrap().take() else {
-        return SomeOf::new_left(0);
+    let mut guard = output.stream.lock().await;
+    let Option::Some(stream) = &mut *guard else {
+        let err = std::io::Error::other("Stream missing");
+        return SomeOf::new_right(StreamOutputErr::new(err, WriteErrTag::Unknown))
     };
     // 传输经 abs_buff_tokio_adapt 的 AsyncWrite 适配器（宏生成的 future）。
-    let x = WriteAsOutput::new(&mut stream).write_async(source).await;
+    let x = WriteAsOutput::new(stream)
+        .write_async(source)
+        .may_cancel_with(cancel)
+        .await;
     // 写完后把流放回共享槽位，供下一次 write / shutdown 使用。
-    *output.stream.lock().unwrap() = Some(stream);
+    // *output.stream.lock().unwrap() = Some(stream);
     match x.into_inner() {
         SomeLR::Left(n) => SomeOf::new_left(n),
         SomeLR::Right(err) => {
             // 泵会把设备错误当作「本轮不能接收」——记入共享 Arc 供 take_error。
-            if let Ok(mut guard) = output.err.lock() {
-                *guard = Some(err);
-            }
+            let mut guard = output.err.lock().await;
+            *guard = Some(err);
             SomeOf::new_left(0)
         }
         SomeLR::Both(_, err) => {
-            if let Ok(mut guard) = output.err.lock() {
-                *guard = Some(err);
-            }
+            let mut guard = output.err.lock().await;
+            *guard = Some(err);
             SomeOf::new_left(0)
         }
     }

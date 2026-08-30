@@ -271,6 +271,7 @@ pub trait TrProducer {
         Self: 'f;
 }
 
+#[allow(unused)]
 pub trait TrObserver {
     fn capacity(&self) -> usize;
 

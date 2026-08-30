@@ -10,7 +10,7 @@ use abs_buff::error::{IoErrTag, ReadErrTag, TrTaggedError, WriteErrTag};
 
 /// 写（生产）端错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TxError<S> {
+pub enum ProducerError<S> {
     /// 缓冲区已满（或可写空间不足 `Demand` 下限），携带当前写位置。
     Stuffed(S),
     /// 写端已关闭，不再接受数据。
@@ -23,34 +23,34 @@ pub enum TxError<S> {
     Argument,
 }
 
-impl<S: fmt::Debug> fmt::Display for TxError<S> {
+impl<S: fmt::Debug> fmt::Display for ProducerError<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TxError::Stuffed(p) => write!(f, "TxError::Stuffed(at: {p:?})"),
-            TxError::Closing => write!(f, "TxError::Closing"),
-            TxError::Cancelled => write!(f, "TxError::Cancelled"),
-            TxError::Unavailable => write!(f, "TxError::Unavailable"),
-            TxError::Argument => write!(f, "TxError::Argument"),
+            ProducerError::Stuffed(p) => write!(f, "ProducerError::Stuffed(at: {p:?})"),
+            ProducerError::Closing => write!(f, "ProducerError::Closing"),
+            ProducerError::Cancelled => write!(f, "ProducerError::Cancelled"),
+            ProducerError::Unavailable => write!(f, "ProducerError::Unavailable"),
+            ProducerError::Argument => write!(f, "ProducerError::Argument"),
         }
     }
 }
 
-impl<S: fmt::Debug> core::error::Error for TxError<S> {}
+impl<S: fmt::Debug> core::error::Error for ProducerError<S> {}
 
-impl<S: fmt::Debug> TrTaggedError<WriteErrTag> for TxError<S> {
+impl<S: fmt::Debug> TrTaggedError<WriteErrTag> for ProducerError<S> {
     fn err_tag(&self) -> WriteErrTag {
         match self {
-            TxError::Closing | TxError::Cancelled | TxError::Unavailable
+            ProducerError::Closing | ProducerError::Cancelled | ProducerError::Unavailable
                 => WriteErrTag::Closing,
-            TxError::Argument => WriteErrTag::Unknown,
-            TxError::Stuffed(_) => WriteErrTag::Stuffed,
+            ProducerError::Argument => WriteErrTag::Unknown,
+            ProducerError::Stuffed(_) => WriteErrTag::Stuffed,
         }
     }
 }
 
 /// 读（消费）端错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RxError<S> {
+pub enum ConsumerError<S> {
     /// 缓冲区已空（或可读数据不足 `Demand` 下限），携带当前读位置。
     Drained(S),
     /// 读端已关闭，不再有数据。
@@ -63,35 +63,35 @@ pub enum RxError<S> {
     Argument,
 }
 
-impl<S: fmt::Debug> fmt::Display for RxError<S> {
+impl<S: fmt::Debug> fmt::Display for ConsumerError<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RxError::Drained(p) => write!(f, "RxError::Drained(at: {p:?})"),
-            RxError::Closing => write!(f, "RxError::Closing"),
-            RxError::Cancelled => write!(f, "RxError::Cancelled"),
-            RxError::Unavailable => write!(f, "RxError::Unavailable"),
-            RxError::Argument => write!(f, "RxError::Argument"),
+            ConsumerError::Drained(p) => write!(f, "ConsumerError::Drained(at: {p:?})"),
+            ConsumerError::Closing => write!(f, "ConsumerError::Closing"),
+            ConsumerError::Cancelled => write!(f, "ConsumerError::Cancelled"),
+            ConsumerError::Unavailable => write!(f, "ConsumerError::Unavailable"),
+            ConsumerError::Argument => write!(f, "ConsumerError::Argument"),
         }
     }
 }
 
-impl<S: fmt::Debug> core::error::Error for RxError<S> {}
+impl<S: fmt::Debug> core::error::Error for ConsumerError<S> {}
 
-impl<S: fmt::Debug> TrTaggedError<ReadErrTag> for RxError<S> {
+impl<S: fmt::Debug> TrTaggedError<ReadErrTag> for ConsumerError<S> {
     fn err_tag(&self) -> ReadErrTag {
         match self {
-            RxError::Closing | RxError::Cancelled | RxError::Unavailable
+            ConsumerError::Closing | ConsumerError::Cancelled | ConsumerError::Unavailable
                 => ReadErrTag::Closing,
-            RxError::Argument => ReadErrTag::Unknown,
-            RxError::Drained(_) => ReadErrTag::Drained,
+            ConsumerError::Argument => ReadErrTag::Unknown,
+            ConsumerError::Drained(_) => ReadErrTag::Drained,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineError<S> {
-    Tx(TxError<S>),
-    Rx(RxError<S>),
+    Tx(ProducerError<S>),
+    Rx(ConsumerError<S>),
 }
 
 impl<S: fmt::Debug> fmt::Display for PipelineError<S> {

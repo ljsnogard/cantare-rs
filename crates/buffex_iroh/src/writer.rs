@@ -10,15 +10,19 @@
 //! hook 同步泵把数据写进 QUIC 流（阻塞写保证送达）。`shutdown` 关闭写端
 //! （触发泵冲刷剩余数据）后取回流执行 `finish()`（对端读侧由此看到 EOF）。
 
+use core::marker::PhantomData;
+
 use std::{
     mem::MaybeUninit,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
+
+use tokio::sync::Mutex;
 
 use iroh::endpoint::SendStream;
 
 use abs_buff::{
-    Demand, TrBuffWrite, TrBuffTryWrite,
+    Demand, TrBuffWrite, TrBuffTryWrite, gen_may_cancel_future,
 };
 // `abs_buff` 及其底层依赖（`abs_cancel`）经 `abs_buff_tokio_adapt::x_deps`
 // 再导出，无需在 Cargo.toml 重复声明；`buffex` 是直接依赖。
@@ -26,8 +30,9 @@ use abs_buff_tokio_adapt::x_deps::abs_buff;
 use anylr::SomeOf;
 use buffex::{
     circular_buff::{CircularBuffBuilder, CoreAlloc, DevConsumer, Producer},
-    x_deps::mm_ptr,
+    x_deps::{abs_cancel, mm_ptr},
 };
+use abs_cancel::{TrCancellationToken, TrMayCancel};
 use mm_ptr::Owned;
 
 use super::{
@@ -57,26 +62,13 @@ impl IrohWriter {
     /// 把一个 QUIC 发送流包装成 `cap` 字节的缓冲写端。
     ///
     /// 不 spawn 任何任务；写入的数据在段 drop 时被同步泵搬运到流。
-    pub fn try_new(stream: SendStream, cap: usize) -> Result<Self, usize> {
-        let stream = Arc::new(Mutex::new(Some(stream)));
-        let err = Arc::new(Mutex::new(None));
-        let output = StreamOutput::new(stream.clone(), err.clone());
-        let Result::Ok(builder) = CircularBuffBuilder::with_capacity(cap)
-        else {
-            return Result::Err(cap);
-        };
-        let mut ready = builder
-            .producer_passive()
-            .pipe_into_output(output);
-        let tx = futures_lite::future::block_on(ready.build_async().into_future())
-            .map_err(|_| cap)
-            .expect("valid iroh buffer capacity");
-        Result::Ok(Self { tx, stream, err })
+    pub fn try_new(stream: SendStream, cap: usize) -> IrohWriterTryNewAsync<'static> {
+        IrohWriterTryNewAsync(&PhantomData, stream, cap)
     }
 
     /// Report the last network write error, if any.
-    pub fn take_error(&self) -> Option<StreamOutputErr> {
-        self.err.lock().ok().and_then(|mut guard| guard.take())
+    pub async fn take_error(&self) -> Option<StreamOutputErr> {
+        self.err.lock().await.take()
     }
 
     /// Flush buffered data, finish the QUIC stream.
@@ -85,7 +77,7 @@ impl IrohWriter {
     /// 执行 `finish()`，对端读侧由此看到 EOF。
     pub async fn shutdown(mut self) {
         self.tx.close();
-        let stream = self.stream.lock().unwrap().take();
+        let stream = self.stream.lock().await.take();
         if let Some(mut stream) = stream {
             let _ = stream.finish();
         }
@@ -99,6 +91,34 @@ impl Drop for IrohWriter {
         // 关闭请调用 [`IrohWriter::shutdown`]。
         self.tx.close();
     }
+}
+
+#[gen_may_cancel_future(IrohWriterTryNew)]
+async fn iroh_writer_try_new_impl_<'f, C>(
+    _marker: &'f PhantomData<()>,
+    stream: SendStream,
+    cap: usize,
+    cancel: &'f mut C,
+) -> Result<IrohWriter, usize>
+where
+    C: TrCancellationToken + Clone,
+{
+    let stream = Arc::new(Mutex::new(Some(stream)));
+    let err = Arc::new(Mutex::new(None));
+    let output = StreamOutput::new(stream.clone(), err.clone());
+    let Result::Ok(builder) = CircularBuffBuilder::with_capacity(cap)
+    else {
+        return Result::Err(cap);
+    };
+    let mut ready = builder
+        .producer_passive()
+        .pipe_into_output(output);
+    let tx = ready
+        .build_async()
+        .may_cancel_with(cancel)
+        .await
+        .map_err(|_| cap)?;
+    Result::Ok(IrohWriter { tx, stream, err })
 }
 
 impl TrBuffWrite<u8> for IrohWriter {

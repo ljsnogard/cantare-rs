@@ -42,7 +42,7 @@ use crate::circular_buff::{
 use super::{
     abs_comp_::{TrConsumer, TrProducer},
     core_::CircCore,
-    error_::{RxError, TxError},
+    error_::{ConsumerError, ProducerError},
     reclaim_::{ReaderReclaim, ReclSliceMut, ReclSliceRef, WriterReclaim},
 };
 
@@ -171,7 +171,7 @@ where
         demand: &'f Demand<usize>,
     ) -> SomeOf< ReclSliceMut<'f, T,
             WriterReclaim<'f, CircCore<BufProducer<T>, C, B, T> >>,
-        TxError<usize>,
+        ProducerError<usize>,
     > {
         self.core_ref_.try_write_(demand)
     }
@@ -232,7 +232,7 @@ async fn producer_write_async_<'f, K, B, T, A, C>(
 ) -> SomeOf<
     ReclSliceMut<'f, T,
         WriterReclaim<'f, CircCore<BufProducer<T>, K, B, T>> >, 
-    TxError<usize>,
+    ProducerError<usize>,
 > where
     // P: Send + Sync + TrProducer<Data = T>,
     K: Send + Sync + TrConsumer<Data = T>,
@@ -315,7 +315,7 @@ where
         demand: &'f Demand<usize>,
     ) -> SomeOf<
         ReclSliceRef<'f, T, ReaderReclaim<'f, CircCore<P, BufConsumer<T>, B, T>>>,
-        RxError<usize>,
+        ConsumerError<usize>,
     > {
         self.core_ref_.try_read_(demand)
     }
@@ -375,7 +375,7 @@ async fn consumer_read_async_<'f, P, B, T, A, C>(
     cancel: &'f mut C,
 ) -> SomeOf<ReclSliceRef<'f, T, 
     ReaderReclaim<'f, CircCore<P, BufConsumer<T>, B, T>> >,
-    RxError<usize>>
+    ConsumerError<usize>>
 where
     P: Send + Sync + TrProducer<Data = T>,
     // K: Send + Sync + TrConsumer<Data = T>,
@@ -388,6 +388,47 @@ where
         .read_async_(demand)
         .may_cancel_with(cancel)
         .await
+}
+
+// -- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// Pair judgement
+// -- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+impl<B, T, A> Producer<BufConsumer<T>, B, T, A>
+where
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync + 'static,
+    A: Send + Sync + TrMalloc + Clone,
+{
+    pub fn is_paired_with(
+        &self,
+        consumer: &Consumer<BufProducer<T>, B, T, A>,
+    ) -> bool {
+        let this = self.core_ref_.as_ptr();
+        let that = consumer.core_ref_.as_ptr();
+        core::ptr::eq(this, that)
+    }
+}
+
+impl<B, T, A> Consumer<BufProducer<T>, B, T, A>
+where
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync + 'static,
+    A: Send + Sync + TrMalloc + Clone,
+{
+    pub fn is_paired_with(
+        &self,
+        producer: &Producer<BufConsumer<T>, B, T, A>,
+    ) -> bool
+    where
+        B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+        T: Send + Sync + 'static,
+        A: Send + Sync + TrMalloc + Clone,
+    {
+        let this = self.core_ref_.as_ptr();
+        let that = producer.core_ref_.as_ptr();
+        core::ptr::eq(this, that)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -576,7 +617,7 @@ where
         WriterReclaim<'f, CircCore<BufProducer<T>, C, B, T>>>
     where Self: 'f;
 
-    type Err = TxError<usize>;
+    type Err = ProducerError<usize>;
 
     #[inline]
     fn is_stuffed_closing(&self) -> bool {
@@ -623,7 +664,7 @@ where
         ReaderReclaim<'f, CircCore<P, BufConsumer<T>, B, T>>>
     where Self: 'f;
 
-    type Err = RxError<usize>;
+    type Err = ConsumerError<usize>;
 
     #[inline]
     fn is_drained_closing(&self) -> bool {

@@ -106,7 +106,7 @@ use super::{
         ConsumerHookEvent, ProducerHookEvent, ReceiverReact,
         TrCircBuffCore, TrConsumer, TrProducer,
     },
-    error_::{RxError, TxError},
+    error_::{ConsumerError, ProducerError},
     reclaim_::{ReaderReclaim, ReclSliceMut, ReclSliceRef, WriterReclaim},
 };
 
@@ -114,7 +114,7 @@ use super::{
 // 状态字布局
 // ---------------------------------------------------------------------------
 
-/// 保留高8位作为状态字（关闭 ×2 + 待机 ×2 + REVERSION，恰好放满）。
+/// 保留高8位作为状态字（关闭 ×2 + 待机 ×2 + REVERSION）。
 const RSV_BITS: u32 = 8;
 
 /// 生产者（写端）已关闭。
@@ -130,6 +130,7 @@ const RX_STNDBY: usize = 1usize << (usize::BITS - 4);
 pub(super) const REVERSION: usize = 1usize << (usize::BITS - 5);
 
 /// 状态字全部标志的掩码（位置更新（`update_state`）保留这些位）。
+#[allow(unused)]
 pub(super) const FLAG_MASK: usize = TX_CLOSED
     | RX_CLOSED
     | TX_STNDBY
@@ -268,7 +269,7 @@ fn has_flag(state: usize, flag: usize) -> bool {
 /// 这不是忙等；真正的等待由设备 waker 或主动端 WakeSlot 负责。
 pub(super) fn poll_once<F: Future>(fut: core::pin::Pin<&mut F>) -> Poll<F::Output> {
     let waker = Waker::noop();
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(waker);
     fut.poll(&mut cx)
 }
 
@@ -342,10 +343,10 @@ where
     pub fn try_write_<'f>(
         &'f self,
         demand: &'f Demand<usize>,
-    ) -> SomeOf<ReclSliceMut<'f, T, WriterReclaim<'f, Self>>, TxError<usize>> {
+    ) -> SomeOf<ReclSliceMut<'f, T, WriterReclaim<'f, Self>>, ProducerError<usize>> {
         let x: SomeOf<
             ReclSliceMut<'_, T, WriterReclaim<'_, Self>>,
-            TxError<usize>,
+            ProducerError<usize>,
         > = self
             .try_write_at(demand)
             .map(|(start, take)| self.create_write_segm(start, take))
@@ -374,10 +375,10 @@ where
     pub fn on_buf_producer_drop_(&self) {
         self.clear_flag(TX_STNDBY);
         let p = unsafe { &*self.producer_.get() };
-        let x = p.try_reset_demand();
-        if let Result::Err(_) = x {
+        let _ = p.try_reset_demand();
+        // if let Result::Err(_) = x {
             // todo: clear existing demand
-        }
+        // }
     }
 }
 
@@ -391,11 +392,11 @@ where
     pub fn try_read_<'f>(
         &'f self,
         demand: &'f Demand<usize>,
-    ) -> SomeOf<ReclSliceRef<'f, T, ReaderReclaim<'f, Self>>, RxError<usize>> {
+    ) -> SomeOf<ReclSliceRef<'f, T, ReaderReclaim<'f, Self>>, ConsumerError<usize>> {
         // #[allow(clippy::type_complexity)]
         let x: SomeOf<
             ReclSliceRef<'_, T, ReaderReclaim<'_, Self>>,
-            RxError<usize>,
+            ConsumerError<usize>,
         > = self
             .try_read_at(demand)
             .map(|(start, take)| self.create_read_segm(start, take))
@@ -424,10 +425,10 @@ where
     pub fn on_buf_consumer_drop_(&self) {
         self.clear_flag(RX_STNDBY);
         let c = unsafe { &*self.consumer_.get() };
-        let x = c.try_reset_demand();
-        if let Result::Err(_) = x {
+        let _ = c.try_reset_demand();
+        // if let Result::Err(_) = x {
             // todo: clear existing demand
-        }
+        // }
     }
 }
 
@@ -514,7 +515,7 @@ where
     pub(super) fn try_write_at(
         &self,
         demand: &Demand<usize>,
-    ) -> Result<(usize, usize), TxError<usize>> {
+    ) -> Result<(usize, usize), ProducerError<usize>> {
         let min_len = demand.min().copied().unwrap_or(0);
         let max_len = demand.max().copied().unwrap_or(usize::MAX);
         let state = self.atm_stat_.value();
@@ -523,9 +524,9 @@ where
         let free = pos.free_size();
         if free == 0 || free < min_len {
             if has_flag(state, TX_CLOSED) {
-                return Err(TxError::Closing);
+                return Err(ProducerError::Closing);
             }
-            return Err(TxError::Stuffed(pos.wp));
+            return Err(ProducerError::Stuffed(pos.wp));
         }
         let take = core::cmp::min(max_len, free);
         debug_assert!(take > 0 && take >= min_len);
@@ -541,7 +542,7 @@ where
     pub(super) fn try_read_at(
         &self,
         demand: &Demand<usize>,
-    ) -> Result<(usize, usize), RxError<usize>> {
+    ) -> Result<(usize, usize), ConsumerError<usize>> {
         let min_len = demand.min().copied().unwrap_or(0);
         let max_len = demand.max().copied().unwrap_or(usize::MAX);
         let state = self.atm_stat_.value();
@@ -550,12 +551,12 @@ where
         let ready = pos.data_size();
         if ready == 0 {
             if has_flag(state, TX_CLOSED) || has_flag(state, RX_CLOSED) {
-                return Err(RxError::Closing); // EOF：写端已关且读空
+                return Err(ConsumerError::Closing); // EOF：写端已关且读空
             }
-            return Err(RxError::Drained(pos.rp));
+            return Err(ConsumerError::Drained(pos.rp));
         }
         if ready < min_len && !has_flag(state, TX_CLOSED) && !has_flag(state, RX_CLOSED) {
-            return Err(RxError::Drained(pos.rp)); // 不足下限且未关闭：等待更多
+            return Err(ConsumerError::Drained(pos.rp)); // 不足下限且未关闭：等待更多
         }
         let take = core::cmp::min(max_len, ready);
         debug_assert!(take > 0);
@@ -570,6 +571,7 @@ where
     }
 
     /// 读者可以继续的条件：可读数据 ≥ min（或 EOF 有部分数据），或任一端关闭。
+    #[allow(unused)]
     pub(super) fn consumer_ready(&self, min: usize) -> bool {
         self.try_read_at(&Demand::at_least(min.max(1))).is_ok()
             || self.is_tx_closed()
@@ -870,12 +872,6 @@ where
         self.fire_producer(ProducerHookEvent::ConsumerClose(self.free_size()));
     }
 
-    pub(super) fn on_consumer_drop_(&self) {
-        // let c = unsafe { &*self.consumer_.get() };
-        self.clear_flag(RX_STNDBY);
-        // let x = c.try_reset_demand();
-    }
-
     fn update_pos_<F>(&self, f: F)
     where
         F: Fn(usize) -> usize,
@@ -1163,7 +1159,7 @@ where
 
 /// 等待者：注册进唤醒槽位的 waker。活在等待 future（或被等待方）内部，
 /// 注册期间不得移动，因此由槽位以裸指针引用。
-pub(super) struct Waiter {
+pub struct Waiter {
     pub waker: Option<Waker>,
 }
 
@@ -1178,7 +1174,7 @@ impl Waiter {
 /// 槽位由核心持有（`producer_wake_` / `consumer_wake_`），被动端专属；等待
 /// future 以 `&WakeSlot` 注册 / 注销，提交路径 `signal` 唤醒。原子指针操作，
 /// 无需锁。
-pub(super) struct WakeSlot(AtomicPtr<Waiter>);
+pub struct WakeSlot(AtomicPtr<Waiter>);
 
 impl WakeSlot {
     pub const fn new() -> Self {
@@ -1306,7 +1302,7 @@ async fn core_passive_read_async_<'f, P, B, T, C>(
     cancel: &'f mut C,
 ) -> SomeOf<
     ReclSliceRef<'f, T, ReaderReclaim<'f, CircCore<P, BufConsumer<T>, B, T>>>,
-    RxError<usize>,
+    ConsumerError<usize>,
 >
 where
     P: Send + Sync + TrProducer<Data = T>,
@@ -1370,7 +1366,7 @@ where
         });
         // 守卫在此已被 drop：槽位注销、armed 清除、demand 复位。
         if res.ok_or(cancel.cancellation()).await.is_err() {
-            return SomeOf::new_right(RxError::Cancelled);
+            return SomeOf::new_right(ConsumerError::Cancelled);
         }
         // 被唤醒后回到循环，重新检查 / 再次 pump_async。
     }
@@ -1390,7 +1386,7 @@ async fn core_passive_write_async_<'f, K, B, T, C>(
     cancel: &'f mut C,
 ) -> SomeOf<
     ReclSliceMut<'f, T, WriterReclaim<'f, CircCore<BufProducer<T>, K, B, T>>>,
-    TxError<usize>,
+    ProducerError<usize>,
 >
 where
     K: Send + Sync + TrConsumer<Data = T>,
@@ -1454,7 +1450,7 @@ where
         });
         // 守卫在此已被 drop：槽位注销、armed 清除、demand 复位。
         if res.ok_or(cancel.cancellation()).await.is_err() {
-            return SomeOf::new_right(TxError::Cancelled);
+            return SomeOf::new_right(ProducerError::Cancelled);
         }
         // 被唤醒后回到循环，重新检查 / 再次 pump_async。
     }

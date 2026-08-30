@@ -116,7 +116,6 @@ pub enum BuilderError<T> {
 }
 
 struct BuildEssential<P, C, B, T, A> {
-    capacity_: usize,
     producer_: Option<P>,
     consumer_: Option<C>,
     buffer_: Option<B>,
@@ -126,14 +125,12 @@ struct BuildEssential<P, C, B, T, A> {
 
 impl<P, C, B, T, A> BuildEssential<P, C, B, T, A> {
     pub const fn new(
-        capacity: usize,
         producer: P,
         consumer: C,
         buffer: B,
         alloc: A
     ) -> Self {
         BuildEssential {
-            capacity_: capacity,
             producer_: Option::Some(producer),
             consumer_: Option::Some(consumer),
             buffer_: Option::Some(buffer),
@@ -159,7 +156,6 @@ where
     T: 'static,
     A: TrMalloc + Clone,
 {
-    capacity_: usize,
     buffer_: B,
     alloc_: A,
     _use_t_: PhantomData<fn() -> T>,
@@ -177,8 +173,7 @@ where
         let size = buffer.borrow().len();
         match Self::try_capacity(size) {
             Result::Err(e) => Result::Err(e),
-            Result::Ok(cap) => Result::Ok(Self {
-                capacity_: cap,
+            Result::Ok(_) => Result::Ok(Self {
                 buffer_: buffer,
                 alloc_: alloc,
                 _use_t_: PhantomData,
@@ -220,7 +215,6 @@ where
         let cap = Self::try_capacity(capacity)?;
         let buff = Owned::new_uninit_slice(cap, alloc.clone());
         Result::Ok(CircularBuffBuilder {
-            capacity_: cap,
             buffer_: buff,
             alloc_: alloc,
             _use_t_: PhantomData,
@@ -239,7 +233,6 @@ where
         >
     {
         ProducerSetBuilder {
-            capacity: self.capacity_,
             producer: BufProducer::new(),
             buffer_: self.buffer_,
             alloc: self.alloc_,
@@ -263,7 +256,6 @@ where
         I: TrInput<T>,
     {
         ProducerSetBuilder {
-            capacity: self.capacity_,
             producer: DevProducer::new(input),
             buffer_: self.buffer_,
             alloc: self.alloc_,
@@ -283,7 +275,6 @@ where
         >
     {
         ConsumerSetBuilder {
-            capacity: self.capacity_,
             consumer: BufConsumer::new(),
             buffer_: self.buffer_,
             alloc: self.alloc_,
@@ -307,7 +298,6 @@ where
         O: TrOutput<T>,
     {
         ConsumerSetBuilder {
-            capacity: self.capacity_,
             consumer: DevConsumer::new(output),
             buffer_: self.buffer_,
             alloc: self.alloc_,
@@ -338,7 +328,6 @@ where
     {
         ReadyBuilder {
             essential_: Option::Some(BuildEssential::new(
-                self.capacity_,
                 DevProducer::new(input),
                 DevConsumer::new(output),
                 self.buffer_,
@@ -364,7 +353,6 @@ where
     {
         ReadyBuilder {
             essential_: Option::Some(BuildEssential::new(
-                self.capacity_,
                 BufProducer::new(),
                 BufConsumer::new(),
                 self.buffer_,
@@ -387,7 +375,6 @@ where
     T: 'static,
     A: TrMalloc + Clone,
 {
-    capacity: usize,
     producer: P,
     buffer_: B,
     alloc: A,
@@ -404,7 +391,6 @@ where
     pub fn consumer_passive(self) -> ReadyBuilder<P, BufConsumer<T>, B, T, A> {
         ReadyBuilder {
             essential_: Option::Some(BuildEssential::new(
-                self.capacity,
                 self.producer,
                 BufConsumer::new(),
                 self.buffer_,
@@ -423,7 +409,6 @@ where
     {
         ReadyBuilder {
             essential_: Option::Some(BuildEssential::new(
-                self.capacity,
                 self.producer,
                 DevConsumer::new(output),
                 self.buffer_,
@@ -446,7 +431,6 @@ where
     T: 'static,
     A: TrMalloc + Clone,
 {
-    capacity: usize,
     consumer: C,
     buffer_: B,
     alloc: A,
@@ -463,7 +447,6 @@ where
     pub fn producer_passive(self) -> ReadyBuilder<BufProducer<T>, C, B, T, A> {
         ReadyBuilder {
             essential_: Option::Some(BuildEssential::new(
-                self.capacity,
                 BufProducer::new(),
                 self.consumer,
                 self.buffer_,
@@ -482,7 +465,6 @@ where
     {
         ReadyBuilder {
             essential_: Option::Some(BuildEssential::new(
-                self.capacity,
                 DevProducer::new(input),
                 self.consumer,
                 self.buffer_,

@@ -25,7 +25,7 @@ use mm_ptr::Owned;
 
 use super::{
     super::{
-        RxError, TxError,
+        ConsumerError, ProducerError,
         abs_comp_::{ConsumerHookEvent, TrConsumer},
         core_::{CircCore, Waiter},
         BufProducer, CoreAlloc, DevConsumer,
@@ -331,8 +331,8 @@ fn pipe_from_input_stops_when_exhausted() {
 /// 主动端的半部错误类型（编译期检查 Unavailable 变体存在且可达）。
 #[allow(dead_code)]
 fn _assert_unavailable_errors() {
-    let _ = TxError::<usize>::Unavailable;
-    let _ = RxError::<usize>::Unavailable;
+    let _ = ProducerError::<usize>::Unavailable;
+    let _ = ConsumerError::<usize>::Unavailable;
 }
 
 /// 一个「数据迟到」的输入设备：`gate` 置位后才开始供数，并记录 `read_async`
@@ -418,7 +418,7 @@ fn try_read_auto_drives_active_producer() {
     let demand = Demand::at_least(1);
     let some = TrBuffTryRead::try_read(&mut rx, &demand);
     assert!(
-        matches!(some.pick_right(), Some(RxError::Drained(_))),
+        matches!(some.pick_right(), Some(ConsumerError::Drained(_))),
         "设备无更多数据时 try_read 返回 Drained"
     );
 }

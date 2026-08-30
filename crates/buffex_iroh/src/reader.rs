@@ -15,13 +15,17 @@
 //! * 流结束（EOF）或读错误经共享状态合成 [`RxError::Closing`]（错误详情经
 //!   [`IrohReader::take_error`] 取回）。
 
+use core::marker::PhantomData;
+
 use std::{
     mem::MaybeUninit,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
+
+use tokio::sync::Mutex;
 
 use iroh::endpoint::RecvStream;
 
@@ -35,7 +39,7 @@ use abs_cancel::{TrCancellationToken, TrMayCancel};
 use anylr::SomeOf;
 use buffex::{
     circular_buff::{
-        CircularBuffBuilder, Consumer, CoreAlloc, DevProducer, RxError},
+        CircularBuffBuilder, Consumer, CoreAlloc, DevProducer, ConsumerError},
     x_deps::{abs_cancel, mm_ptr},
 };
 use mm_ptr::Owned;
@@ -67,25 +71,13 @@ impl IrohReader {
     ///
     /// 构造即 `drive()` 拉一轮（有数据则入缓冲，无则立即返回，不阻塞）。
     /// 不 spawn 任何任务。
-    pub fn try_new(stream: RecvStream, cap: usize) -> Result<Self, usize> {
-        let eof = Arc::new(AtomicBool::new(false));
-        let err = Arc::new(Mutex::new(None));
-        let input = StreamInput::new(stream, eof.clone(), err.clone());
-        let Result::Ok(builder) = CircularBuffBuilder::with_capacity(cap) else {
-            return Result::Err(cap);
-        };
-        let mut ready = builder
-            .pipe_from_input(input)
-            .consumer_passive();
-        let rx = futures_lite::future::block_on(ready.build_async().into_future())
-            .map_err(|_| cap)
-            .expect("valid iroh buffer capacity");
-        Result::Ok(Self { rx, eof, err })
+    pub fn try_new(stream: RecvStream, cap: usize) -> IrohReaderTryNewAsync<'static> {
+        IrohReaderTryNewAsync(&PhantomData, stream, cap)
     }
 
     /// Report the last network read error, if any.
-    pub fn take_error(&self) -> Option<StreamInputErr> {
-        self.err.lock().ok().and_then(|mut guard| guard.take())
+    pub async fn take_error(&self) -> Option<StreamInputErr> {
+        self.err.lock().await.take()
     }
 
     /// Close the read side. 无后台任务可等待；数据流随后经 read 端报
@@ -109,10 +101,10 @@ impl IrohReader {
         // 非阻塞）——适配器无需手动驱动。
         let some = self.rx.try_read(demand);
         // EOF 合成：空 + 设备已 EOF → Closing（错误详情经 take_error 取回）。
-        if let Some(RxError::Drained(_)) = some.as_ref().pick_right()
+        if let Some(ConsumerError::Drained(_)) = some.as_ref().pick_right()
             && self.eof.load(Ordering::Acquire)
         {
-            return SomeOf::new_right(RxError::Closing);
+            return SomeOf::new_right(ConsumerError::Closing);
         }
         some
     }
@@ -157,6 +149,33 @@ impl TrBuffTryRead<u8> for IrohReader {
     ) -> SomeOf<Self::SegmRef<'f>, Self::Err> {
         IrohReader::try_read(self, demand)
     }
+}
+
+#[gen_may_cancel_future(IrohReaderTryNew)]
+async fn iroh_reader_try_new_impl_<'f, C>(
+    _marker: &'f PhantomData<()>,
+    stream: RecvStream,
+    cap: usize,
+    cancel: &'f mut C,
+) -> Result<IrohReader, usize>
+where
+    C: TrCancellationToken + Clone,
+{
+    let eof = Arc::new(AtomicBool::new(false));
+    let err = Arc::new(Mutex::new(None));
+    let input = StreamInput::new(stream, eof.clone(), err.clone());
+    let Result::Ok(builder) = CircularBuffBuilder::with_capacity(cap) else {
+        return Result::Err(cap);
+    };
+    let mut ready = builder
+        .pipe_from_input(input)
+        .consumer_passive();
+    let rx = ready
+        .build_async()
+        .may_cancel_with(cancel)
+        .await
+        .map_err(|_| cap)?;
+    Result::Ok(IrohReader { rx, eof, err })
 }
 
 #[gen_may_cancel_future(IrohRead)]

@@ -237,10 +237,12 @@ pub use builder::{
 pub use circ_buff_::{
     BufConsumer, BufProducer, DevConsumer, DevProducer,
 };
-pub use error_::{RxError, TxError};
-pub use mm_ptr::x_deps::abs_mm::mem_alloc::CoreAlloc;
+pub use error_::{ConsumerError, ProducerError};
 pub use reclaim_::{ReclSliceMut, ReclSliceRef};
 pub use spsc_::{Consumer, Producer, Pipeline, SpscPair};
+
+
+pub use crate::x_deps::abs_mm::mem_alloc::CoreAlloc;
 
 #[cfg(test)]
 mod tests_;

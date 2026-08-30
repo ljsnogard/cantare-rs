@@ -10,7 +10,7 @@ use std::{pin::pin, vec};
 use abs_buff::{Demand, TrBuffTryRead, TrBuffTryWrite};
 
 use super::{
-    super::RxError,
+    super::ConsumerError,
     DefaultBuilder, fill_segm, poll_once, take_segm, Pair, TestWaker,
 };
 
@@ -53,7 +53,7 @@ fn producer_close_gives_eof() {
     let demand = Demand::at_least(1);
     let some = TrBuffTryRead::try_read(&mut rx, &demand);
     assert!(
-        matches!(some.pick_right(), Some(RxError::Closing)),
+        matches!(some.pick_right(), Some(ConsumerError::Closing)),
         "读空且写端已关闭时应返回 Closing"
     );
 }

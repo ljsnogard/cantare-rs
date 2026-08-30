@@ -17,5 +17,5 @@ futures-lite = { workspace = true }
 anyhow = "1"
 thiserror = "2"
 iroh = "1.0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 

@@ -8,7 +8,7 @@ use std::{vec, vec::Vec};
 use abs_buff::{Demand, TrBuffTryRead, TrBuffTryWrite};
 
 use super::{
-    super::{RxError, TxError},
+    super::{ConsumerError, ProducerError},
     DefaultBuilder, fill_segm, poll_once, take_segm, Pair, TestWaker,
 };
 
@@ -66,7 +66,7 @@ fn try_read_honours_at_least() {
     let demand = Demand::at_least(4);
     let some = TrBuffTryRead::try_read(&mut rx, &demand);
     assert!(
-        matches!(some.pick_right(), Some(RxError::Drained(_))),
+        matches!(some.pick_right(), Some(ConsumerError::Drained(_))),
         "数据不足下限时必须返回 Drained，而不是不足量的段"
     );
 }
@@ -90,7 +90,7 @@ fn try_write_honours_at_least() {
     let demand = Demand::at_least(4);
     let some = TrBuffTryWrite::try_write(&mut tx, &demand);
     assert!(
-        matches!(some.pick_right(), Some(TxError::Stuffed(_))),
+        matches!(some.pick_right(), Some(ProducerError::Stuffed(_))),
         "可写空间不足下限时必须返回 Stuffed"
     );
 }
