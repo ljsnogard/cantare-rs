@@ -12,7 +12,11 @@ use abs_cancel::{TrCancellationToken, TrMayCancel};
 use anylr::SomeOf;
 use gen_mcf_macro::gen_may_cancel_future;
 
-use crate::{Demand, io::{TrInput, TrOutput}};
+use crate::{
+    Demand,
+    buffer::TrAsBufferMut,
+    io::{TrInput, TrOutput},
+};
 
 /// Represent a sequence of slices who are logically the same array but
 /// physically not.
@@ -112,17 +116,26 @@ where
     ///
     /// 搬移为位拷贝：被搬出的元素不再由本段 drop，调用方需保证 `T` 无需要
     /// drop 的资源（或由 `dst` 负责）。
-    unsafe fn move_items_to_buff(
+    fn move_items_to_buff(
         &mut self,
         dst: &mut [MaybeUninit<T>],
     ) -> usize {
         let mut c = 0usize;
-        while self.least_count() > 0 && c < dst.len() {
+        let size = dst.len();
+        while self.least_count() > 0 && c < size {
             let mut segm = self.as_segm_ref();
             let dst_buff = &mut dst[c..];
             c += unsafe { segm.move_items_to_buff(dst_buff) };
         }
         c
+    }
+
+    fn move_items_to_as_buff<TyAsBuffMut>(
+        &mut self,
+        dst: &mut TyAsBuffMut,
+    ) -> usize where TyAsBuffMut: TrAsBufferMut<T> {
+        let dst = dst.as_mut_slice_uninit();
+        self.move_items_to_buff(dst)
     }
 }
 
@@ -179,7 +192,7 @@ where
     ///
     /// 搬移为位拷贝：`src` 中被搬走的元素在搬移后不再被 drop，调用方需保证
     /// `T` 无需要 drop 的资源（或自行处理 `src` 剩余元素）。
-    unsafe fn move_items_from_buff(
+    fn move_items_from_buff(
         &mut self,
         src: &mut [MaybeUninit<T>],
     ) -> usize {
@@ -190,6 +203,15 @@ where
             c += unsafe { segm.move_items_from_buff(src_buff) };
         }
         c
+    }
+
+    #[inline]
+    fn move_items_from_as_buff<TyAsBuff>(
+        &mut self,
+        src: &mut TyAsBuff,
+    ) -> usize where TyAsBuff: TrAsBufferMut<T> {
+        let src = src.as_mut_slice_uninit();
+        self.move_items_from_buff(src)
     }
 }
 

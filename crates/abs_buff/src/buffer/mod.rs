@@ -1,3 +1,4 @@
+mod as_buff_;
 mod buff_;
 
 mod segm_;
@@ -7,6 +8,7 @@ mod segm_;
 #[cfg(any(test, feature = "segm-tests"))]
 pub mod segm_tests;
 
+pub use as_buff_::{TrAsBuffer, TrAsBufferMut};
 pub use buff_::{TrBuffer, TrBufferMut, TrMaybeUninit};
 pub use segm_::{
     SegmMut, SegmReclaim, SegmRef, TrBuffSegmMut, TrBuffSegmRef,

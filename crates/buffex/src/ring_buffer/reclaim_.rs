@@ -272,8 +272,8 @@ impl<'a, T> ReclSliceMut<'a, T> {
     ///
     /// - See `TrBuffSegmMut::move_items_from_buff`
     #[inline]
-    pub unsafe fn move_items_from_buff(&mut self, src: &mut [MaybeUninit<T>]) -> usize {
-        unsafe { TrBuffSegmMut::move_items_from_buff(self, src) }
+    pub fn move_items_from_buff(&mut self, src: &mut [MaybeUninit<T>]) -> usize {
+        TrBuffSegmMut::move_items_from_buff(self, src)
     }
 }
 
@@ -418,8 +418,8 @@ impl<'a, T> ReclSliceRef<'a, T> {
     /// ## Safety
     ///
     /// - See [abs_buff::buffer::TrBuffSegmRef::move_items_to_buff]
-    pub unsafe fn move_items_to_buff(&mut self, dst: &mut [MaybeUninit<T>]) -> usize {
-        unsafe { TrBuffSegmRef::move_items_to_buff(self, dst) }
+    pub fn move_items_to_buff(&mut self, dst: &mut [MaybeUninit<T>]) -> usize {
+        TrBuffSegmRef::move_items_to_buff(self, dst)
     }
 }
 

@@ -239,7 +239,7 @@ async fn producer_write_async_<'f, K, B, T, A, C>(
     cancel: &'f mut C,
 ) -> SomeOf<
     ReclSliceMut<'f, T,
-        WriterReclaim<'f, CircCore<BufProducer<T>, K, B, T>> >, 
+        WriterReclaim<'f, CircCore<BufProducer<T>, K, B, T>> >,
     ProducerError<usize>,
 > where
     // P: Send + Sync + TrProducer<Data = T>,
@@ -396,7 +396,7 @@ async fn consumer_read_async_<'f, P, B, T, A, C>(
     consumer: &'f mut Consumer<P, B, T, A>,
     demand: &'f Demand<usize>,
     cancel: &'f mut C,
-) -> SomeOf<ReclSliceRef<'f, T, 
+) -> SomeOf<ReclSliceRef<'f, T,
     ReaderReclaim<'f, CircCore<P, BufConsumer<T>, B, T>> >,
     ConsumerError<usize>>
 where
@@ -416,7 +416,7 @@ where
 #[gen_may_cancel_future(ConsumerClose)]
 async fn consumer_close_async_<'f, P, B, T, A, C>(
     consumer: &'f mut Consumer<P, B, T, A>,
-    cancel: &'f mut C,
+    _cancel: &'f mut C,
 ) -> ()
 where
     P: Send + Sync + TrProducer<Data = T>,

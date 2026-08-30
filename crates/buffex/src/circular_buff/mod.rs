@@ -229,11 +229,6 @@ pub mod reclaim_;
 mod spsc_;
 
 pub mod builder;
-
-pub use builder::{
-    BuilderError, CircularBuffBuilder, ConsumerSetBuilder, ProducerSetBuilder,
-    ReadyBuilder,
-};
 pub use circ_buff_::{
     BufConsumer, BufProducer, DevConsumer, DevProducer,
 };

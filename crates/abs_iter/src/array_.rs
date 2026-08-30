@@ -88,3 +88,17 @@ impl<T, const N: usize> TrAsSliceMut for &mut MaybeUninit<[T; N]> {
         self.as_mut() as &mut [MaybeUninit<T>; N]
     }
 }
+
+impl<T, const N: usize> TrAsSlice for &mut [MaybeUninit<T>; N] {
+    type Elem = MaybeUninit<T>;
+
+    fn as_slice(&self) -> &[Self::Elem] {
+        self.as_ref() as &[MaybeUninit<T>]
+    }
+}
+
+impl<T, const N: usize> TrAsSliceMut for &mut [MaybeUninit<T>; N] {
+    fn as_slice_mut(&mut self) -> &mut [Self::Elem] {
+        self.as_mut() as &mut [MaybeUninit<T>]
+    }
+}

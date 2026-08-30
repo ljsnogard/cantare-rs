@@ -114,7 +114,7 @@ where
     assert_view_eq(src, expect);
     assert!(dst.len() >= expect.len(), "目标缓冲必须足以容纳全部元素");
     // SAFETY: 测试数据为无需 drop 的简单类型（调用方保证）；
-    let moved = unsafe { TrBuffSegmRef::move_items_to_buff(src, dst) };
+    let moved = src.move_items_to_buff(dst);
     assert_eq!(moved, expect.len(), "搬移数量必须等于期望数量");
     assert_eq!(src.least_count(), 0, "源段必须被全部消费");
     for (i, m) in dst[..moved].iter().enumerate() {
@@ -152,7 +152,7 @@ where
         *m = MaybeUninit::new(expect[i]);
     }
     // SAFETY: 测试数据为无需 drop 的简单类型（调用方保证）；
-    let moved = unsafe { TrBuffSegmMut::move_items_from_buff(dst, src) };
+    let moved = dst.move_items_from_buff(src);
     assert_eq!(moved, expect.len(), "搬移数量必须等于期望数量");
     assert_eq!(
         dst.least_count(),

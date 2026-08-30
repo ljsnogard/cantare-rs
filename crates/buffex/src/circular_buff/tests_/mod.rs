@@ -40,7 +40,8 @@ use abs_buff::{
 use mm_ptr::Owned;
 
 use super::{
-    CircularBuffBuilder, CoreAlloc, ReclSliceMut, ReclSliceRef, SpscPair,
+    builder,
+    CoreAlloc, ReclSliceMut, ReclSliceRef, SpscPair,
 };
 
 /// 被动 × 被动 `build` 产出的半部对（元素 `u8`、分配器 `CoreAlloc` 的具体类型）。
@@ -51,7 +52,7 @@ pub(super) type Pair = SpscPair<Owned<[MaybeUninit<u8>], CoreAlloc>>;
 /// 显式给出缓冲类型参数 `B`，避免 `CircularBuffBuilder::with_capacity` 的
 /// 类型推断在半部链（`producer_passive` / `consumer_passive`）上无法确定 `B`。
 pub(super) type DefaultBuilder =
-    CircularBuffBuilder<Owned<[MaybeUninit<u8>], CoreAlloc>>;
+   builder::CircularBuffBuilder<Owned<[MaybeUninit<u8>], CoreAlloc>>;
 
 // ---------------------------------------------------------------------------
 // 测试设备（TrInput / TrOutput）
@@ -211,8 +212,7 @@ where
     let mut staging: Vec<MaybeUninit<u8>> =
         data.iter().map(|&b| MaybeUninit::new(b)).collect();
     // SAFETY: 测试数据为 u8，位拷贝搬入段中，staging 无剩余需 drop 的内容。
-    let moved =
-        unsafe { TrBuffSegmMut::move_items_from_buff(segm, &mut staging) };
+    let moved = TrBuffSegmMut::move_items_from_buff(segm, &mut staging);
     assert_eq!(moved, data.len());
 }
 
@@ -234,7 +234,7 @@ where
     let mut dst: Vec<MaybeUninit<u8>> = Vec::with_capacity(len);
     dst.resize(len, MaybeUninit::uninit());
     // SAFETY: 测试数据为 u8，位拷贝搬出安全。
-    let moved = unsafe { TrBuffSegmRef::move_items_to_buff(segm, &mut dst) };
+    let moved = TrBuffSegmRef::move_items_to_buff(segm, &mut dst);
     assert_eq!(moved, len);
     dst.into_iter()
         .map(|m| unsafe { m.assume_init() })

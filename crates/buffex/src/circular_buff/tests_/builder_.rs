@@ -23,7 +23,8 @@ use abs_mm::mem_alloc::CoreAlloc;
 use mm_ptr::Owned;
 
 use crate::circular_buff::{
-    BuilderError, ReclSliceRef,
+    ReclSliceRef,
+    builder,
     core_::CircCore,
     reclaim_::ReaderReclaim,
     tests_::{
@@ -194,7 +195,7 @@ fn consumer_passive_then_pipe_from_input() {
         let demand = Demand::at_least(1);
         let some = TrBuffTryRead::try_read(&mut rx, &demand);
         let mut rs: ReclSliceRef<'_, u8,
-            ReaderReclaim<'_, CircCore<_, _, Owned<[MaybeUninit<u8>], CoreAlloc>>>> = 
+            ReaderReclaim<'_, CircCore<_, _, Owned<[MaybeUninit<u8>], CoreAlloc>>>> =
             match some.pick_left() {
                 Some(s) => s,
                 None => break,
@@ -213,15 +214,15 @@ fn consumer_passive_then_pipe_from_input() {
 #[test]
 fn build_default_still_validates_capacity() {
     let r0 = DefaultBuilder::with_capacity(0);
-    assert!(matches!(r0, Err(BuilderError::SizeTooSmall(0))));
+    assert!(matches!(r0, Err(builder::BuilderError::SizeTooSmall(0))));
 
     let r1 = DefaultBuilder::with_capacity(1);
-    assert!(matches!(r1, Err(BuilderError::SizeTooSmall(1))));
+    assert!(matches!(r1, Err(builder::BuilderError::SizeTooSmall(1))));
 
     let too_big = 1usize << 28; // 超出 POS_MASK
     let rb = DefaultBuilder::with_capacity(too_big);
     assert!(matches!(
         rb,
-        Err(BuilderError::SizeTooBig(c)) if c == too_big
+        Err(builder::BuilderError::SizeTooBig(c)) if c == too_big
     ));
 }

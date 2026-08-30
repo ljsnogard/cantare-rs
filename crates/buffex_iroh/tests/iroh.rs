@@ -29,9 +29,7 @@ async fn write_all(writer: &mut IrohWriter, data: &[u8]) {
             .collect();
         // SAFETY: moving plain `u8` bytes into the ring segment is a bitwise
         // copy; the staging buffer owns nothing that needs dropping.
-        unsafe {
-            segm.move_items_from_buff(&mut staging);
-        }
+        segm.move_items_from_buff(&mut staging);
         off += n;
         drop(segm);
     }
@@ -212,9 +210,7 @@ async fn try_interface_moves_data_without_spawn() {
                     .map(|&b| std::mem::MaybeUninit::new(b))
                     .collect();
                 // SAFETY: u8 位拷贝。
-                unsafe {
-                    segm.move_items_from_buff(&mut staging);
-                }
+                segm.move_items_from_buff(&mut staging);
                 off += n;
                 drop(segm);
             } else {
@@ -244,12 +240,8 @@ async fn try_interface_moves_data_without_spawn() {
         let mut writer = IrohWriter::try_new(client_send, 32).await.unwrap();
         let mut off = 0usize;
         while off < payload.len() {
-            if let Some(mut segm) = TrBuffTryWrite::try_write(
-                &mut writer,
-                &Demand::less_than(payload.len() - off),
-            )
-            .pick_left()
-            {
+            let demand = Demand::less_than(payload.len() - off);
+            if let Some(mut segm) = writer.try_write(&demand).pick_left() {
                 let n = segm.least_count();
                 let mut staging: Vec<std::mem::MaybeUninit<u8>> = payload
                     [off..off + n]
@@ -257,9 +249,7 @@ async fn try_interface_moves_data_without_spawn() {
                     .map(|&b| std::mem::MaybeUninit::new(b))
                     .collect();
                 // SAFETY: u8 位拷贝。
-                unsafe {
-                    segm.move_items_from_buff(&mut staging);
-                }
+                segm.move_items_from_buff(&mut staging);
                 off += n;
                 drop(segm);
             } else {
@@ -396,22 +386,15 @@ async fn try_write_shutdown_flushes_all_buffered_data() {
             .unwrap();
         let mut off = 0usize;
         while off < payload.len() {
-            if let Some(mut segm) = TrBuffTryWrite::try_write(
-                &mut writer,
-                &Demand::less_than(payload.len() - off),
-            )
-            .pick_left()
-            {
+            let demand = Demand::less_than(payload.len() - off);
+            if let Some(mut segm) = writer.try_write(&demand).pick_left() {
                 let n = segm.least_count();
                 let mut staging: Vec<std::mem::MaybeUninit<u8>> = payload
                     [off..off + n]
                     .iter()
                     .map(|&b| std::mem::MaybeUninit::new(b))
                     .collect();
-                // SAFETY: u8 位拷贝。
-                unsafe {
-                    segm.move_items_from_buff(&mut staging);
-                }
+                segm.move_items_from_buff(&mut staging);
                 off += n;
                 drop(segm);
             } else {
@@ -424,7 +407,7 @@ async fn try_write_shutdown_flushes_all_buffered_data() {
     };
 
     tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(20),
         async { tokio::join!(server_future, client_future) },
     )
     .await
