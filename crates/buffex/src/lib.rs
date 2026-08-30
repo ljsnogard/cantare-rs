@@ -12,8 +12,9 @@
 #[cfg(test)]
 extern crate std;
 
-// pub mod ring_buffer;
+pub mod observer;
 pub mod circular_buff;
+pub mod multipart;
 
 pub mod x_deps {
     pub use abs_buff;

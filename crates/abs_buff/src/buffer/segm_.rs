@@ -209,7 +209,10 @@ where
     fn move_items_from_as_buff<TyAsBuff>(
         &mut self,
         src: &mut TyAsBuff,
-    ) -> usize where TyAsBuff: TrAsBufferMut<T> {
+    ) -> usize
+    where
+        TyAsBuff: ?Sized + TrAsBufferMut<T>
+    {
         let src = src.as_mut_slice_uninit();
         self.move_items_from_buff(src)
     }

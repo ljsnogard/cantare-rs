@@ -34,10 +34,12 @@ use mm_ptr::{
     x_deps::abs_mm,
 };
 
-use crate::circular_buff::{
-    BufConsumer, BufProducer, DevConsumer, DevProducer,
-    abs_comp_::TrObserver,
-    error_::PipelineError,
+use crate::{
+    observer::TrObserver,
+    circular_buff::{
+        BufConsumer, BufProducer, DevConsumer, DevProducer,
+        error_::PipelineError,
+    },
 };
 use super::{
     abs_comp_::{TrConsumer, TrProducer},
