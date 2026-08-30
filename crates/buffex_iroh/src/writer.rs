@@ -75,21 +75,17 @@ impl IrohWriter {
     ///
     /// 关闭写端 → 触发消费端 hook → 泵同步冲刷剩余数据（阻塞写）→ 取回流
     /// 执行 `finish()`，对端读侧由此看到 EOF。
-    pub async fn shutdown(mut self) {
-        self.tx.close();
-        let stream = self.stream.lock().await.take();
-        if let Some(mut stream) = stream {
-            let _ = stream.finish();
-        }
+    pub fn close_async(&mut self) -> IrohWriterCloseAsync<'_> {
+        IrohWriterCloseAsync(self)
     }
 }
 
 impl Drop for IrohWriter {
     fn drop(&mut self) {
-        // 关闭写端：触发泵冲刷剩余数据（同步阻塞写，数据不丢失）。
-        // 未显式 shutdown 时流不会被 finish（对端看不到 EOF）——如需优雅
-        // 关闭请调用 [`IrohWriter::shutdown`]。
-        self.tx.close();
+        let t = self.close_async().into_future();
+        abs_art_bridge::Runtime::block_on(async move {
+            t.await;
+        });
     }
 }
 
@@ -121,12 +117,29 @@ where
     Result::Ok(IrohWriter { tx, stream, err })
 }
 
+#[gen_may_cancel_future(IrohWriterClose)]
+async fn iroh_writer_close_async_<'f, C>(
+    writer: &'f mut IrohWriter,
+    cancel: &'f mut C,
+) -> bool
+where
+    C: TrCancellationToken + Clone,
+{
+    // 异步关闭：设置 TX_CLOSED 后持续排空残留数据，直到缓冲清空或被取消。
+    writer.tx.close_async().may_cancel_with(cancel).await;
+    let stream = writer.stream.lock().await.take();
+    if let Some(mut stream) = stream {
+        let _ = stream.finish();
+        return true;
+    }
+    false
+}
+
 impl TrBuffWrite<u8> for IrohWriter {
     type WriteAsync<'f> = <Inner as TrBuffWrite<u8>>::WriteAsync<'f>
     where
         Self: 'f;
-    type SegmMut<'f>
-        = <Inner as TrBuffWrite<u8>>::SegmMut<'f>
+    type SegmMut<'f> = <Inner as TrBuffWrite<u8>>::SegmMut<'f>
     where
         Self: 'f;
     type Err = <Inner as TrBuffWrite<u8>>::Err;

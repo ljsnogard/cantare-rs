@@ -686,6 +686,38 @@ where
         total
     }
 
+    /// 异步排空输出：持续驱动主动消费端，直到环形缓冲中的数据全部写出。
+    ///
+    /// # 调用上下文
+    /// 供被动生产端在关闭 / shutdown 前调用，确保残留数据真正到达输出设备。
+    /// 设备 Pending 时本方法会 `await`，由设备自己的 waker 唤醒。
+    async fn drain_output_async_<'f, K>(
+        &'f self,
+        cancel: &'f mut K,
+    )
+    where
+        K: TrCancellationToken + Clone,
+    {
+        loop {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let consumer = unsafe { &mut *self.consumer_.get() };
+            let moved = consumer
+                .pump_async(self)
+                .may_cancel_with(cancel)
+                .await;
+            if self.data_size() == 0 && self.is_rx_closed() {
+                break;
+            }
+            if moved == 0 {
+                break;
+            }
+        }
+    }
+
+    /// 生产端背压 park：把 waker 注册到主动生产端自己的 WakeSlot，
+    /// 等待消费端读取提交后的 `fire_producer` 唤醒。
     /// 生产端背压 park：把 waker 注册到主动生产端自己的 WakeSlot，
     /// 等待消费端读取提交后的 `fire_producer` 唤醒。
     ///
@@ -864,6 +896,21 @@ where
         self.set_flag_(TX_CLOSED);
         self.fire_consumer(ConsumerHookEvent::ProducerClose(self.data_size()));
         self.pump_output_sync();
+    }
+
+    /// 异步关闭写端：设置关闭标志后，持续异步排空主动消费端的残留数据。
+    ///
+    /// 调用者可通过 `cancel` 中断排空；一旦取消，立即停止排空并返回，
+    /// 关闭标志已经设置，最终收尾由调用方 / Drop 路径继续完成。
+    pub(super) async fn close_tx_async<'f, K>(
+        &'f self,
+        cancel: &'f mut K,
+    )
+    where
+        K: TrCancellationToken + Clone,
+    {
+        self.close_tx();
+        self.drain_output_async_(cancel).await;
     }
 
     /// 关闭读端：不再读取，触发生产端事件（`ConsumerClose`）。

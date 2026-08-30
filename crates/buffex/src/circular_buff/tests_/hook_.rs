@@ -60,11 +60,11 @@ fn producer_close_gives_eof() {
 
 /// 消费者关闭：触发生产端 hook `ConsumerClose`；写者感知对端关闭，
 /// 但仍可继续写入（数据无人消费，环满即止）。
-#[test]
-fn consumer_close_fires_event() {
+#[compio::test]
+async fn consumer_close_fires_event() {
     let (mut tx, mut rx) = make_pair::<8>();
 
-    rx.close();
+    rx.close_async().await;
     assert!(tx.is_consumer_closed(), "写者应感知消费者关闭");
 
     // 关闭后写者仍可写（直到写满）。

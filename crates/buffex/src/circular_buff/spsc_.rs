@@ -148,6 +148,14 @@ where
     pub fn close(&mut self) {
         self.core_ref_.close_tx();
     }
+
+    /// 异步关闭写端：先关闭写端，再异步排空主动消费端的残留数据。
+    ///
+    /// 返回由 `gen_may_cancel_future` 生成的异步 future，可通过
+    /// `may_cancel_with(&mut token)` 中断排空过程；一旦取消，关闭标志已设置。
+    pub fn close_async<'f>(&'f mut self) -> ProducerCloseAsync<'f, C, B, T, A> {
+        ProducerCloseAsync(self)
+    }
 }
 
 impl<C, B, T, A> Producer<C, B, T, A>
@@ -247,6 +255,21 @@ async fn producer_write_async_<'f, K, B, T, A, C>(
         .await
 }
 
+#[gen_may_cancel_future(ProducerClose)]
+async fn producer_close_async_<'f, K, B, T, A, C>(
+    producer: &'f mut Producer<K, B, T, A>,
+    cancel: &'f mut C,
+) -> ()
+where
+    K: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync + 'static,
+    A: Send + Sync + TrMalloc + Clone,
+    C: TrCancellationToken + Clone,
+{
+    producer.core_ref_.close_tx_async(cancel).await;
+}
+
 // -- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 // Consumer impl
 // -- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -289,8 +312,8 @@ where
     }
 
     /// 关闭读端：不再读取，触发生产端事件（`ConsumerClose`）。
-    pub fn close(&mut self) {
-        self.core_ref_.close_rx();
+    pub fn close_async(&mut self) -> ConsumerCloseAsync<'_, P, B, T, A> {
+        ConsumerCloseAsync(self)
     }
 }
 
@@ -388,6 +411,22 @@ where
         .read_async_(demand)
         .may_cancel_with(cancel)
         .await
+}
+
+#[gen_may_cancel_future(ConsumerClose)]
+async fn consumer_close_async_<'f, P, B, T, A, C>(
+    consumer: &'f mut Consumer<P, B, T, A>,
+    cancel: &'f mut C,
+) -> ()
+where
+    P: Send + Sync + TrProducer<Data = T>,
+    // K: Send + Sync + TrConsumer<Data = T>,
+    B: Send + Sync + BorrowMut<[MaybeUninit<T>]>,
+    T: Send + Sync + 'static,
+    A: Send + Sync + TrMalloc + Clone,
+    C: TrCancellationToken + Clone,
+{
+    consumer.core_ref_.close_rx();
 }
 
 // -- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----

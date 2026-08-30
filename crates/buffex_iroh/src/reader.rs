@@ -82,15 +82,15 @@ impl IrohReader {
 
     /// Close the read side. 无后台任务可等待；数据流随后经 read 端报
     /// `Closing`（EOF）或 `Drained`。
-    pub async fn shutdown(mut self) {
-        self.rx.close();
+    pub fn close_async(&mut self) -> IrohReaderCloseAsync<'_> {
+        IrohReaderCloseAsync(self)
     }
 
     pub fn read_async<'f>(
         &'f mut self,
         demand: &'f Demand<usize>,
-    ) -> IrohReadAsync<'f> {
-        IrohReadAsync(self, demand)
+    ) -> IrohReaderReadAsync<'f> {
+        IrohReaderReadAsync(self, demand)
     }
 
     pub fn try_read<'f>(
@@ -117,12 +117,15 @@ impl IrohReader {
 
 impl Drop for IrohReader {
     fn drop(&mut self) {
-        self.rx.close();
+        let t = self.close_async().into_future();
+        abs_art_bridge::Runtime::block_on(async move {
+            t.await;
+        });
     }
 }
 
 impl TrBuffRead<u8> for IrohReader {
-    type ReadAsync<'f> = IrohReadAsync<'f> where Self: 'f;
+    type ReadAsync<'f> = IrohReaderReadAsync<'f> where Self: 'f;
 
     type SegmRef<'f> = <Inner as TrBuffRead<u8>>::SegmRef<'f> where Self: 'f;
 
@@ -178,7 +181,7 @@ where
     Result::Ok(IrohReader { rx, eof, err })
 }
 
-#[gen_may_cancel_future(IrohRead)]
+#[gen_may_cancel_future(IrohReaderRead)]
 async fn iroh_read_async_<'f, C>(
     reader: &'f mut IrohReader,
     demand: &'f Demand<usize>,
@@ -194,4 +197,15 @@ where
         .read_async(demand)
         .may_cancel_with(cancel)
         .await
+}
+
+#[gen_may_cancel_future(IrohReaderClose)]
+async fn iroh_read_close_async_<'f, C>(
+    reader: &'f mut IrohReader,
+    cancel: &'f mut C,
+) -> ()
+where
+    C: TrCancellationToken + Clone,
+{
+    reader.rx.close_async().may_cancel_with(cancel).await;
 }
