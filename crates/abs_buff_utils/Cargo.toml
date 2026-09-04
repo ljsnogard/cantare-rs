@@ -1,0 +1,14 @@
+[package]
+name = "abs_buff_utils"
+version = "0.1.0"
+edition = "2024"
+description = "Buffer Utils for `abs_buff`"
+license = "MIT/Apache-2.0"
+
+[dependencies]
+abs_buff = { path = "../abs_buff" }
+
+[dev-dependencies]
+buffex = { path = "../buffex" }
+mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.1.3" }
+futures-lite = { workspace = true }

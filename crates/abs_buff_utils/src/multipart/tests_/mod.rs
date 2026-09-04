@@ -26,19 +26,16 @@ use std::{
 
 use abs_buff::{
     Demand, TrBuffTryRead, TrBuffTryWrite,
-    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView},
+    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrBufferState},
     x_deps::abs_cancel::{CancelledToken, TrMayCancel},
 };
+use buffex::circular_buff::{CoreAlloc, SpscPair, builder};
 use mm_ptr::Owned;
 
-use crate::{
-    circular_buff::{CoreAlloc, SpscPair, builder},
-    multipart::{
-        decode_::{DecodeError, MultipartDecode},
-        encode_::MultipartEncode,
-        prefix::{TrMultipartPrefix, U8Prefix, U16Prefix, U32Prefix},
-    },
-    observer::TrObserver,
+use super::{
+    decode_::{DecodeError, MultipartDecode},
+    encode_::MultipartEncode,
+    prefix::{TrMultipartPrefix, U8Prefix, U16Prefix, U32Prefix},
 };
 
 // ---------------------------------------------------------------------------
@@ -192,7 +189,7 @@ fn new_enc8_<'a, R, W>(
     tgt_: &'a mut W,
 ) -> MultipartEncode<'a, R, W, u8, U8Prefix>
 where
-    R: abs_buff::TrBuffRead<u8> + TrObserver,
+    R: abs_buff::TrBuffRead<u8> + TrBufferState,
     W: abs_buff::TrBuffWrite<u8>,
 {
     MultipartEncode::new(src_, tgt_)

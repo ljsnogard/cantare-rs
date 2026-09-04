@@ -61,7 +61,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use buffex::multipart::prefix::{TrMultipartPrefix, U32Prefix};
+/// use abs_buff_utils::multipart::prefix::{TrMultipartPrefix, U32Prefix};
 ///
 /// assert_eq!(U32Prefix::PREFIX_MAX(), 1usize << 32);
 /// ```
@@ -72,7 +72,7 @@ pub struct U32Prefix;
 /// # Examples
 ///
 /// ```
-/// use buffex::multipart::prefix::{TrMultipartPrefix, U16Prefix};
+/// use abs_buff_utils::multipart::prefix::{TrMultipartPrefix, U16Prefix};
 ///
 /// assert_eq!(U16Prefix::PREFIX_MAX(), 1usize << 16);
 /// ```
@@ -83,7 +83,7 @@ pub struct U16Prefix;
 /// # Examples
 ///
 /// ```
-/// use buffex::multipart::prefix::{TrMultipartPrefix, U8Prefix};
+/// use abs_buff_utils::multipart::prefix::{TrMultipartPrefix, U8Prefix};
 ///
 /// assert_eq!(U8Prefix::PREFIX_MAX(), 256);
 /// ```

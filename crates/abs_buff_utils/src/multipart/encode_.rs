@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 
 use abs_buff::{
     Demand, TrBuffRead, TrBuffWrite,
-    buffer::{TrAsBufferMut, TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView},
+    buffer::{TrAsBufferMut, TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrBufferState},
     gen_may_cancel_future,
     x_deps::{abs_cancel, anylr},
 };
@@ -13,7 +13,6 @@ use super::{
     is_read_eof_,
     prefix::{TrMultipartPrefix, U16Prefix},
 };
-use crate::observer::TrObserver;
 
 /// 编码（发送）侧的错误类型。
 ///
@@ -71,7 +70,7 @@ where
 /// 搬运，并返回已搬运的载荷字节数（`SomeOf::new_left(count)`）。
 pub struct MultipartEncode<'a, R, W, T = u8, P = U16Prefix>
 where
-    R: TrBuffRead<T> + TrObserver,
+    R: TrBuffRead<T> + TrBufferState,
     W: TrBuffWrite<T>,
     P: TrMultipartPrefix,
 {
@@ -83,7 +82,7 @@ where
 
 impl<'a, R, W, T, P> MultipartEncode<'a, R, W, T, P>
 where
-    R: TrBuffRead<T> + TrObserver,
+    R: TrBuffRead<T> + TrBufferState,
     W: TrBuffWrite<T>,
     P: TrMultipartPrefix,
 {
@@ -103,7 +102,7 @@ where
 
 impl<'a, R, W, P> MultipartEncode<'a, R, W, u8, P>
 where
-    R: TrBuffRead<u8> + TrObserver,
+    R: TrBuffRead<u8> + TrBufferState,
     W: TrBuffWrite<u8>,
     P: TrMultipartPrefix,
 {
@@ -149,7 +148,7 @@ async fn multipart_send_async_<'a, 'f, R, W, P, K>(
     cancel: &'f mut K,
 ) -> SomeOf<usize, EncodeError<R, W, u8>>
 where
-    R: TrBuffRead<u8> + TrObserver,
+    R: TrBuffRead<u8> + TrBufferState,
     W: TrBuffWrite<u8>,
     P: TrMultipartPrefix,
     K: TrCancellationToken + Clone,

@@ -22,6 +22,7 @@ use core::{
 
 use abs_buff::{
     Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
+    buffer::TrBufferState,
     gen_may_cancel_future,
     io::{TrInput, TrOutput},
     x_deps::{abs_cancel, anylr},
@@ -35,7 +36,6 @@ use mm_ptr::{
 };
 
 use crate::{
-    observer::TrObserver,
     circular_buff::{
         BufConsumer, BufProducer, DevConsumer, DevProducer,
         error_::PipelineError,
@@ -187,7 +187,7 @@ where
     }
 }
 
-impl<C, B, T, A> TrObserver for Producer<C, B, T, A>
+impl<C, B, T, A> TrBufferState for Producer<C, B, T, A>
 where
     // P: Send + Sync + TrProducer<Data = T>,
     C: Send + Sync + TrConsumer<Data = T>,
@@ -346,7 +346,7 @@ where
     }
 }
 
-impl<P, B, T, A> TrObserver for Consumer<P, B, T, A>
+impl<P, B, T, A> TrBufferState for Consumer<P, B, T, A>
 where
     P: Send + Sync + TrProducer<Data = T>,
     // C: Send + Sync + TrConsumer<Data = T>,
@@ -558,7 +558,7 @@ where
     }
 }
 
-impl<I, O, B, T, A> TrObserver for Pipeline<I, O, B, T, A>
+impl<I, O, B, T, A> TrBufferState for Pipeline<I, O, B, T, A>
 where
     I: Send + Sync + TrInput<T>,
     O: Send + Sync + TrOutput<T>,

@@ -1,5 +1,5 @@
-#[allow(unused)]
-pub trait TrObserver {
+/// Ob
+pub trait TrBufferState {
     fn capacity(&self) -> usize;
 
     fn data_size(&self) -> usize;
