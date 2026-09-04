@@ -5,11 +5,10 @@ use abs_buff::{
     buffer::{SegmRef, TrBuffSegmRef, TrBuffSegmView},
     error::{ReadErrTag, TrTaggedError},
     gen_may_cancel_future,
-    x_deps::{abs_cancel, anylr, funty},
+    x_deps::{abs_cancel, anylr},
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use anylr::SomeOf;
-use funty::Unsigned;
 
 use super::{
     is_read_eof_,
@@ -18,13 +17,13 @@ use super::{
 
 /// 解码（接收）侧的错误类型。
 ///
-/// 本类型作为 [`MultipartDecode`] 实现 [`TrBuffRead`] 时返回的读错误：
+/// 本类型作为 [`MultipartRecv`] 实现 [`TrBuffRead`] 时返回的读错误：
 /// 源缓冲出错、**格式错误**（协议被破坏，例如流在没有 0 前缀终止块的情况
 /// 下结束、或分块载荷不完整），以及正常 EOF（返回 `Closing` 标记）。
 ///
 /// 注意：本类型目前位于私有模块 `decode_` 中，尚未从
 /// [`crate::multipart`] 导出（不构成公开 API）。
-pub enum DecodeError<E>
+pub enum RecvError<E>
 where
     E: core::error::Error,
 {
@@ -41,71 +40,71 @@ where
     Cancelled,
 }
 
-impl<E> core::fmt::Debug for DecodeError<E>
+impl<E> core::fmt::Debug for RecvError<E>
 where
-    E: core::error::Error + core::fmt::Debug,
+    E: core::error::Error,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            DecodeError::Source(e) => f.debug_tuple("Source").field(e).finish(),
-            DecodeError::Invalid => f.write_str("Invalid"),
-            DecodeError::Eof => f.write_str("Eof"),
-            DecodeError::Cancelled => f.write_str("Cancelled"),
+            RecvError::Source(e) => f.debug_tuple("Source").field(e).finish(),
+            RecvError::Invalid => f.write_str("Invalid"),
+            RecvError::Eof => f.write_str("Eof"),
+            RecvError::Cancelled => f.write_str("Cancelled"),
         }
     }
 }
 
-impl<E> core::fmt::Display for DecodeError<E>
+impl<E> core::fmt::Display for RecvError<E>
 where
-    E: core::error::Error + core::fmt::Debug,
+    E: core::error::Error,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            DecodeError::Source(e) => {
+            RecvError::Source(e) => {
                 write!(f, "multipart decode source error: {e}")
             }
-            DecodeError::Invalid => {
+            RecvError::Invalid => {
                 f.write_str("multipart decode error: invalid stream")
             }
-            DecodeError::Eof => {
+            RecvError::Eof => {
                 f.write_str("multipart decode error: end of stream")
             }
-            DecodeError::Cancelled => {
+            RecvError::Cancelled => {
                 f.write_str("multipart decode error: cancelled")
             }
         }
     }
 }
 
-impl<E> core::error::Error for DecodeError<E> where
-    E: core::error::Error + core::fmt::Debug
-{
-}
+impl<E> core::error::Error for RecvError<E>
+where
+    E: core::error::Error,
+{}
 
-impl<E> TrTaggedError<ReadErrTag> for DecodeError<E>
+impl<E> TrTaggedError<ReadErrTag> for RecvError<E>
 where
     E: core::error::Error + TrTaggedError<ReadErrTag>,
 {
     fn err_tag(&self) -> ReadErrTag {
         match self {
-            DecodeError::Source(e) => e.err_tag(),
-            DecodeError::Invalid => ReadErrTag::Unknown,
-            DecodeError::Eof => ReadErrTag::Closing,
-            DecodeError::Cancelled => ReadErrTag::Cancelled,
+            RecvError::Source(e) => e.err_tag(),
+            RecvError::Invalid => ReadErrTag::Unknown,
+            RecvError::Eof => ReadErrTag::Closing,
+            RecvError::Cancelled => ReadErrTag::Cancelled,
         }
     }
 }
 
 /// 把底层源错误转换为 [`DecodeError`]：若底层已经用 `Cancelled` 标签表达取消，
 /// 统一为 [`DecodeError::Cancelled`]。
-fn decode_source_err_<E>(err: E) -> DecodeError<E>
+fn decode_source_err_<E>(err: E) -> RecvError<E>
 where
     E: core::error::Error + TrTaggedError<ReadErrTag>,
 {
     if err.err_tag() == ReadErrTag::Cancelled {
-        DecodeError::Cancelled
+        RecvError::Cancelled
     } else {
-        DecodeError::Source(err)
+        RecvError::Source(err)
     }
 }
 
@@ -113,7 +112,7 @@ where
 ///
 /// 内部包装底层源的 `SegmRef`；`Drop` 时根据底层段实际被消费的字节数，
 /// 同步削减 [`MultipartDecode`] 中“当前分块剩余载荷”的计数。
-pub struct MultipartDecodeSegm<'f, R, T>
+pub struct MultipartRecvSegm<'f, R, T>
 where
     R: TrBuffRead<T> + 'f,
 {
@@ -122,13 +121,13 @@ where
     initial_: usize,
 }
 
-impl<'f, R, T> MultipartDecodeSegm<'f, R, T>
+impl<'f, R, T> MultipartRecvSegm<'f, R, T>
 where
     R: TrBuffRead<T> + 'f,
 {
     fn new(inner: R::SegmRef<'f>, payload_left: &'f mut usize) -> Self {
         let initial = inner.least_count();
-        MultipartDecodeSegm {
+        MultipartRecvSegm {
             inner_: inner,
             payload_left_: payload_left,
             initial_: initial,
@@ -136,7 +135,7 @@ where
     }
 }
 
-impl<'f, R, T> Drop for MultipartDecodeSegm<'f, R, T>
+impl<'f, R, T> Drop for MultipartRecvSegm<'f, R, T>
 where
     R: TrBuffRead<T> + 'f,
 {
@@ -146,12 +145,11 @@ where
     }
 }
 
-impl<'f, R, T> TrBuffSegmView for MultipartDecodeSegm<'f, R, T>
+impl<'f, R, T> TrBuffSegmView for MultipartRecvSegm<'f, R, T>
 where
     R: TrBuffRead<T> + 'f,
 {
-    type SlicesIter<'g>
-        = <R::SegmRef<'f> as TrBuffSegmView>::SlicesIter<'g>
+    type SlicesIter<'g> = <R::SegmRef<'f> as TrBuffSegmView>::SlicesIter<'g>
     where
         Self: 'g,
         R::SegmRef<'f>: 'g;
@@ -171,18 +169,16 @@ where
     }
 }
 
-impl<'f, R, T> TrBuffSegmRef<'f, T> for MultipartDecodeSegm<'f, R, T>
+impl<'f, R, T> TrBuffSegmRef<'f, T> for MultipartRecvSegm<'f, R, T>
 where
     R: TrBuffRead<T> + 'f,
 {
-    type Reclaimer<'g>
-        = <R::SegmRef<'f> as TrBuffSegmRef<'f, T>>::Reclaimer<'g>
+    type Reclaimer<'g> = <R::SegmRef<'f> as TrBuffSegmRef<'f, T>>::Reclaimer<'g>
     where
         Self: 'g,
         R::SegmRef<'f>: 'g;
 
-    type TakeSegmRef<'g>
-        = <R::SegmRef<'f> as TrBuffSegmRef<'f, T>>::TakeSegmRef<'g>
+    type TakeSegmRef<'g> = <R::SegmRef<'f> as TrBuffSegmRef<'f, T>>::TakeSegmRef<'g>
     where
         Self: 'g,
         R::SegmRef<'f>: 'g;
@@ -209,7 +205,7 @@ where
 /// 当 `T` 不是 `u8` 时，前缀仍占用 `PREFIX_LEN` **个** `T` 元素；每个元素按
 /// 无符号整数解析为该“字节”的值。因此实际读取实现要求
 /// `T: abs_buff::x_deps::funty::Unsigned`。
-pub struct MultipartDecode<'a, R, T = u8, P = U16Prefix>
+pub struct MultipartRecv<'a, R, T = u8, P = U16Prefix>
 where
     R: TrBuffRead<T>,
     P: TrMultipartPrefix,
@@ -229,7 +225,7 @@ where
     _use_t_: PhantomData<fn() -> T>,
 }
 
-impl<'a, R, T, P> MultipartDecode<'a, R, T, P>
+impl<'a, R, T, P> MultipartRecv<'a, R, T, P>
 where
     R: TrBuffRead<T>,
     P: TrMultipartPrefix,
@@ -239,7 +235,7 @@ where
     /// 构造时不读取也不搬运任何数据；所有前缀裁剪都发生在
     /// [`TrBuffRead::read_async`] 返回的读段中。
     pub const fn new(source: &'a mut R) -> Self {
-        MultipartDecode {
+        MultipartRecv {
             source_: source,
             payload_left_: 0,
             eof_: false,
@@ -248,7 +244,13 @@ where
             _use_t_: PhantomData,
         }
     }
+}
 
+impl<'a, R, P> MultipartRecv<'a, R, u8, P>
+where
+    R: TrBuffRead<u8>,
+    P: TrMultipartPrefix,
+{
     /// 启动一次无前缀载荷读取。
     ///
     /// 该方法是 [`TrBuffRead`] 实现中 `read_async` 的直接入口，单独保留便于
@@ -256,11 +258,8 @@ where
     pub fn read_async<'f>(
         &'f mut self,
         demand: &'f Demand<usize>,
-    ) -> MultipartDecodeReadAsync<'a, 'f, R, T, P>
-    where
-        T: Unsigned,
-    {
-        MultipartDecodeReadAsync(self, demand)
+    ) -> MultipartRecvReadAsync<'a, 'f, R, P> {
+        MultipartRecvReadAsync(self, demand)
     }
 }
 
@@ -273,25 +272,24 @@ where
 // * 当前分块开始后，用 `Demand::less_than(payload_left_)` 向源申请一段“最多
 //   包含本块剩余载荷”的段，避免把下一分块的前缀误暴露给调用者；
 // * 调用者实际消费多少由 [`MultipartDecodeSegm`] 在 drop 时回写。
-#[gen_may_cancel_future(MultipartDecodeRead)]
-async fn multipart_decode_read_async_<'a, 'f, R, T, P, K>(
-    decode: &'f mut MultipartDecode<'a, R, T, P>,
+#[gen_may_cancel_future(MultipartRecvRead)]
+async fn multipart_decode_read_async_<'a, 'f, R, P, K>(
+    decode: &'f mut MultipartRecv<'a, R, u8, P>,
     demand: &'f Demand<usize>,
     cancel: &'f mut K,
-) -> SomeOf<MultipartDecodeSegm<'f, R, T>, DecodeError<<R as TrBuffRead<T>>::Err>>
+) -> SomeOf<MultipartRecvSegm<'f, R, u8>, RecvError<<R as TrBuffRead<u8>>::Err>>
 where
     'a: 'f,
-    R: TrBuffRead<T>,
-    T: Unsigned,
+    R: TrBuffRead<u8>,
     P: TrMultipartPrefix,
     K: TrCancellationToken + Clone,
 {
     if cancel.is_cancelled() {
-        return SomeOf::new_right(DecodeError::Cancelled);
+        return SomeOf::new_right(RecvError::Cancelled);
     }
 
     if decode.eof_ {
-        return SomeOf::new_right(DecodeError::Eof);
+        return SomeOf::new_right(RecvError::Eof);
     }
 
     // 先取出对底层源的借用；后续仅在同一结构体的其它字段上做状态更新，
@@ -314,34 +312,34 @@ where
                 if let Option::Some(err) = opt_prefix.pick_right() {
                     // 没有完整前缀时源就结束 → 格式错误（除非是取消等非 EOF 错误）
                     if is_read_eof_(&err) {
-                        return SomeOf::new_right(DecodeError::Invalid);
+                        return SomeOf::new_right(RecvError::Invalid);
                     }
                     return SomeOf::new_right(decode_source_err_(err));
                 }
                 unreachable!()
             };
 
-        let mut prefix_buf = [MaybeUninit::<T>::uninit(); 4];
+        let mut prefix_buf = [MaybeUninit::<u8>::uninit(); 4];
         let moved = TrBuffSegmRef::move_items_to_buff(
             prefix_segm,
             &mut prefix_buf[..prefix_len],
         );
         if moved < prefix_len {
             // 源关闭时可能返回不足 `at_least` 的部分段；按截断前缀处理。
-            return SomeOf::new_right(DecodeError::Invalid);
+            return SomeOf::new_right(RecvError::Invalid);
         }
         let _ = prefix_segm;
 
         let mut n = 0usize;
-        for m_ in &prefix_buf[..prefix_len] {
+        for m in &prefix_buf[..prefix_len] {
             // SAFETY: 上一步 `move_items_to_buff` 已写入 `prefix_len` 个槽位，
             // 且 `T: Unsigned` 为无符号整数，无 drop 需求。
-            n = (n << 8) | unsafe { m_.assume_init().as_usize() };
+            let b = unsafe { m.assume_init() } as usize;
+            n = (n << 8) | b;
         }
-
         if n == 0 {
             decode.eof_ = true;
-            return SomeOf::new_right(DecodeError::Eof);
+            return SomeOf::new_right(RecvError::Eof);
         }
         decode.payload_left_ = n;
     }
@@ -374,7 +372,7 @@ where
         let err = opt_src.pick_right().expect("无左侧时必有右侧错误");
         // 载荷中途源结束 → 分块不完整，格式错误。
         if is_read_eof_(&err) {
-            return SomeOf::new_right(DecodeError::Invalid);
+            return SomeOf::new_right(RecvError::Invalid);
         }
         return SomeOf::new_right(decode_source_err_(err));
     };
@@ -382,27 +380,24 @@ where
     // 此时底层源位于本分块载荷的起始处；`source_demand` 已限制最多返回
     // `payload_left` 字节，因此不会把下一分块的前缀带入本读段。
     // 把底层段连同“剩余载荷计数器”的可变借用一起交给调用者。
-    let segm = MultipartDecodeSegm::new(inner, &mut decode.payload_left_);
+    let segm = MultipartRecvSegm::new(inner, &mut decode.payload_left_);
     SomeOf::new_left(segm)
 }
 
-impl<'a, R, T, P> TrBuffRead<T> for MultipartDecode<'a, R, T, P>
+impl<'a, R, P> TrBuffRead<u8> for MultipartRecv<'a, R, u8, P>
 where
-    R: TrBuffRead<T>,
-    T: Unsigned,
+    R: TrBuffRead<u8>,
     P: TrMultipartPrefix,
 {
-    type ReadAsync<'f>
-        = MultipartDecodeReadAsync<'a, 'f, R, T, P>
+    type ReadAsync<'f> = MultipartRecvReadAsync<'a, 'f, R, P>
     where
         Self: 'f;
 
-    type SegmRef<'f>
-        = MultipartDecodeSegm<'f, R, T>
+    type SegmRef<'f> = MultipartRecvSegm<'f, R, u8>
     where
         Self: 'f;
 
-    type Err = DecodeError<<R as TrBuffRead<T>>::Err>;
+    type Err = RecvError<<R as TrBuffRead<u8>>::Err>;
 
     fn is_drained_closing(&self) -> bool {
         self.eof_
@@ -412,6 +407,6 @@ where
         &'f mut self,
         demand: &'f Demand<usize>,
     ) -> Self::ReadAsync<'f> {
-        MultipartDecodeReadAsync(self, demand)
+        MultipartRecvReadAsync(self, demand)
     }
 }

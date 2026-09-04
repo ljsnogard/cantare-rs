@@ -16,7 +16,7 @@ mod prefix_;
 use common_::*;
 
 use super::{
-    decode_::{DecodeError, MultipartDecode},
+    decode_::{RecvError, MultipartRecv},
     encode_::MultipartEncode,
     prefix::{TrMultipartPrefix, U8Prefix, U16Prefix, U32Prefix},
 };

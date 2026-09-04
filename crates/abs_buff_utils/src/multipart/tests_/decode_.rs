@@ -8,7 +8,7 @@ use abs_buff::{
 };
 
 use super::{
-    DecodeError, MultipartDecode, U16Prefix, drain_decode_to_writer_async_,
+    RecvError, MultipartRecv, U16Prefix, drain_decode_to_writer_async_,
     feed_, make_pair_async_,
 };
 
@@ -25,10 +25,10 @@ async fn decode_invalid_on_truncated_stream_() {
     feed_(&mut tgt_tx_, &stream_);
     tgt_tx_.close();
 
-    let mut dec_ = MultipartDecode::<'_, _, u8, U16Prefix>::new(&mut tgt_rx_);
+    let mut dec_ = MultipartRecv::<'_, _, u8, U16Prefix>::new(&mut tgt_rx_);
     let res_ = drain_decode_to_writer_async_(&mut dec_, &mut out_tx_).await;
     assert!(
-        matches!(res_.err(), Option::Some(DecodeError::Invalid)),
+        matches!(res_.err(), Option::Some(RecvError::Invalid)),
         "截断流必须报格式错误"
     );
 }
@@ -45,7 +45,7 @@ async fn decode_empty_stream_ends_cleanly_() {
     feed_(&mut tgt_tx_, &stream_);
     tgt_tx_.close();
 
-    let mut dec_ = MultipartDecode::<'_, _, u8, U16Prefix>::new(&mut tgt_rx_);
+    let mut dec_ = MultipartRecv::<'_, _, u8, U16Prefix>::new(&mut tgt_rx_);
     let res_ = drain_decode_to_writer_async_(&mut dec_, &mut out_tx_).await;
     assert_eq!(res_.ok(), Option::Some(0), "空流应返回 0 载荷字节");
 }
@@ -58,12 +58,12 @@ async fn decode_empty_stream_ends_cleanly_() {
 async fn decode_returns_zero_on_cancel_() {
     let (mut _tgt_tx_, mut tgt_rx_) = make_pair_async_::<64>().await;
 
-    let mut dec_ = MultipartDecode::<'_, _, u8, U16Prefix>::new(&mut tgt_rx_);
+    let mut dec_ = MultipartRecv::<'_, _, u8, U16Prefix>::new(&mut tgt_rx_);
     let demand_ = Demand::at_least(1);
     let mut tok_ = CancelledToken::new();
     let res_ = dec_.read_async(&demand_).may_cancel_with(&mut tok_).await;
     assert!(
-        matches!(res_.pick_right(), Option::Some(DecodeError::Cancelled)),
+        matches!(res_.pick_right(), Option::Some(RecvError::Cancelled)),
         "取消后不应返回数据段"
     );
 }

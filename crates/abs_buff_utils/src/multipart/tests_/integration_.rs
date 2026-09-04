@@ -3,7 +3,7 @@
 use std::vec::Vec;
 
 use super::{
-    MultipartDecode, MultipartEncode, U16Prefix, drain_all_,
+    MultipartRecv, MultipartEncode, U16Prefix, drain_all_,
     drain_decode_to_writer_async_, feed_, make_pair_async_, new_dec8_,
     new_enc8_,
 };
@@ -65,7 +65,7 @@ async fn roundtrip_default_u16_prefix_() {
         &mut tgt_tx_,
     );
     let enc_fut_ = enc_.start_async().into_future();
-    let mut dec_ = MultipartDecode::<'_, _, u8, U16Prefix>::new(&mut tgt_rx_);
+    let mut dec_ = MultipartRecv::<'_, _, u8, U16Prefix>::new(&mut tgt_rx_);
     let dec_fut_ = drain_decode_to_writer_async_(&mut dec_, &mut out_tx_);
 
     let (enc_res_, dec_res_) =
@@ -95,7 +95,7 @@ async fn encode_and_decode_drive_concurrently_() {
         &mut tgt_tx_,
     );
     let enc_fut_ = enc_.start_async().into_future();
-    let mut dec_ = MultipartDecode::<'_, _, u8, U16Prefix>::new(&mut tgt_rx_);
+    let mut dec_ = MultipartRecv::<'_, _, u8, U16Prefix>::new(&mut tgt_rx_);
     let dec_fut_ = drain_decode_to_writer_async_(&mut dec_, &mut out_tx_);
 
     let (enc_res_, dec_res_) =

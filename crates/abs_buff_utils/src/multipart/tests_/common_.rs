@@ -6,13 +6,14 @@ use std::vec::Vec;
 use abs_buff::{
     Demand, TrBuffTryRead, TrBuffTryWrite,
     buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrBufferState},
-    x_deps::abs_cancel::{NonCancellableToken, TrMayCancel},
+    x_deps::abs_cancel,
 };
+use abs_cancel::{NonCancellableToken, TrMayCancel};
 use buffex::circular_buff::{CoreAlloc, SpscPair, builder};
 use mm_ptr::Owned;
 
 use super::{
-    DecodeError, MultipartDecode, MultipartEncode, TrMultipartPrefix, U8Prefix,
+    RecvError, MultipartRecv, MultipartEncode, TrMultipartPrefix, U8Prefix,
 };
 
 /// 被动 × 被动构建产出的半部对（元素 `u8`、分配器 `CoreAlloc`）。
@@ -101,12 +102,12 @@ where
 
 /// 构造 `U8Prefix` 的解码读流（同上）。
 pub(super) fn new_dec8_<'a, R>(
-    src_: &'a mut R,
-) -> MultipartDecode<'a, R, u8, U8Prefix>
+    src: &'a mut R,
+) -> MultipartRecv<'a, R, u8, U8Prefix>
 where
     R: abs_buff::TrBuffRead<u8>,
 {
-    MultipartDecode::new(src_)
+    MultipartRecv::new(src)
 }
 
 /// 把 `MultipartDecode` 输出的载荷逐段搬运到写端，直到正常 EOF。
@@ -114,9 +115,9 @@ where
 /// 这是解码读流的测试端到端驱动：解码器本身不负责搬运，因此测试里由本辅助
 /// 函数扮演“调用者自行搬运”的角色。
 pub(super) async fn drain_decode_to_writer_async_<'a, 'b, R, W, P>(
-    decode: &'b mut MultipartDecode<'a, R, u8, P>,
+    decode: &'b mut MultipartRecv<'a, R, u8, P>,
     out: &'b mut W,
-) -> Result<usize, DecodeError<<R as abs_buff::TrBuffRead<u8>>::Err>>
+) -> Result<usize, RecvError<<R as abs_buff::TrBuffRead<u8>>::Err>>
 where
     'a: 'b,
     R: abs_buff::TrBuffRead<u8>,
@@ -133,7 +134,7 @@ where
             opt.pick_left().expect("刚已确认读取成功")
         } else {
             match opt.pick_right() {
-                Option::Some(DecodeError::Eof) => return Ok(c),
+                Option::Some(RecvError::Eof) => return Ok(c),
                 Option::Some(err) => return Err(err),
                 Option::None => unreachable!(),
             }

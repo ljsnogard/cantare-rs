@@ -7,8 +7,8 @@ mod tests_;
 
 use abs_buff::error::{ReadErrTag, TrTaggedError};
 
-pub use encode_::MultipartEncode;
-pub use decode_::MultipartDecode;
+pub use encode_::{MultipartEncode, EncodeError};
+pub use decode_::{MultipartRecv, RecvError};
 
 /// 判断读侧错误是否表示「数据流结束」（[`ReadErrTag::Closing`] /
 /// [`ReadErrTag::Drained`]）。
