@@ -124,7 +124,7 @@ where
 // 包装的实现体：宏据此生成 `MultipartEncodeStartAsync`（启动器，保存参数）
 // 与 `MultipartEncodeStartFuture`（真正轮询的 future）。
 //
-// 设计要点（与 `decode_` 的 `multipart_decode_start_async_` 严格对应）：
+// 设计要点（与 `decode_` 的读取端线格式约定严格对应）：
 //
 // * **分块长度**：`min(源当前数据量, PREFIX_MAX - 1)`。封顶保证前缀值落在
 //   `1 ..= PREFIX_MAX - 1`，0 前缀因此**只**表示 EOF（避免「源恰好有
