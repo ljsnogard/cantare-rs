@@ -39,7 +39,9 @@ use abs_cancel::{TrCancellationToken, TrMayCancel};
 use anylr::SomeOf;
 use buffex::{
     circular_buff::{
-        CircularBuffBuilder, Consumer, CoreAlloc, DevProducer, ConsumerError},
+        Consumer, CoreAlloc, DevProducer, ConsumerError,
+        builder::CircularBuffBuilder,
+    },
     x_deps::{abs_cancel, mm_ptr},
 };
 use mm_ptr::Owned;

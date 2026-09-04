@@ -29,7 +29,10 @@ use abs_buff::{
 use abs_buff_tokio_adapt::x_deps::abs_buff;
 use anylr::SomeOf;
 use buffex::{
-    circular_buff::{CircularBuffBuilder, CoreAlloc, DevConsumer, Producer},
+    circular_buff::{
+        CoreAlloc, DevConsumer, Producer,
+        builder::CircularBuffBuilder,
+    },
     x_deps::{abs_cancel, mm_ptr},
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
