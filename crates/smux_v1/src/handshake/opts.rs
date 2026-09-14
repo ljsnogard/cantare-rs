@@ -1,11 +1,13 @@
 use core::time::Duration;
 
+#[derive(Debug, Clone)]
 pub struct HandshakeOpts<'a> {
     pub basic_opts: BasicOpts,
     pub ext_opts: &'a [NegotiationExtEntry<'a>],
-    pub checksum: &'a [u8],
 }
 
+/// 基础协商结果
+#[derive(Debug, Clone)]
 pub struct BasicOpts {
     /// 分片传输过程中最大报文大小（含头部）
     pub max_packet_size: usize,
@@ -30,6 +32,33 @@ impl BasicOpts {
         max_dock_chan_count: 1usize << 32,
         max_channel_timeout: Duration::from_secs(30u64),
     };
+
+    pub fn from_entries<I>(
+        mut entries_iter: I,
+    ) -> Result<Self, NegotiationBasicEntry>
+    where
+        I: Iterator<Item: Borrow<NegotiationBasicEntry>>,
+    {
+        let mut x = BasicOpts::DEFAULT;
+        while let Option::Some(entry) = entries_iter.next() {
+            let Result::Ok(key) = NegotiationKey::try_from(entry.opts_key) else {
+                return Result::Err(entry.borrow().clone());
+            };
+            let entry = entry.borrow();
+            match key {
+                NegotiationKey::MaxPacketSize =>
+                    x.max_packet_size = entry.val_data,
+                NegotiationKey::MaxChannelCount =>
+                    x.max_channel_count = entry.val_data,
+                NegotiationKey::MaxDockChanCount =>
+                    x.max_dock_chan_count = entry.val_data,
+                NegotiationKey::MaxChannelTimeout =>
+                    x.max_channel_timeout = Duration::from_secs(entry.val_data as u64),
+                _ => (),
+            }
+        }
+        Result::Ok(x)
+    }
 }
 
 impl Default for BasicOpts {
@@ -38,7 +67,9 @@ impl Default for BasicOpts {
     }
 }
 
-/// 用低四位表示协商项的键值
+/// 用低四位表示协商项的种类或名称。
+/// `NegotiationKey` 和 `NegotiationValType` 共用同一个字节。
+#[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum NegotiationKey {
     MaxPacketSize     = 0x00,
@@ -49,13 +80,35 @@ pub enum NegotiationKey {
     ExtMsg            = 0x0E,
 }
 
-impl From<NegotiationKey> for u8 {
-    fn from(v: NegotiationKey) -> Self {
-        v as u8
+impl NegotiationKey {
+    const MASK: u8 = 0x0F;
+}
+
+impl TryFrom<u8> for NegotiationKey {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value & NegotiationKey::MASK {
+            0x00 => Result::Ok(NegotiationKey::MaxPacketSize),
+            0x01 => Result::Ok(NegotiationKey::MaxChannelCount),
+            0x02 => Result::Ok(NegotiationKey::MaxDockChanCount),
+            0x03 => Result::Ok(NegotiationKey::MaxChannelTimeout),
+            0x0C => Result::Ok(NegotiationKey::Checksum),
+            0x0E => Result::Ok(NegotiationKey::ExtMsg),
+            _ => Result::Err(value),
+        }
     }
 }
 
-/// 用高四位表示协商项的值类型
+impl From<NegotiationKey> for u8 {
+    fn from(v: NegotiationKey) -> Self {
+        (v as u8) & NegotiationValType::MASK
+    }
+}
+
+/// 用高四位表示协商项的值类型。
+/// `NegotiationKey` 和 `NegotiationValType` 共用同一个字节。
+#[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum NegotiationValType {
     /// The value will be 1 byte u8, or the checksum type will be crc-8
@@ -71,17 +124,39 @@ pub enum NegotiationValType {
     BeU64 = 0x30,
 }
 
-impl From<NegotiationValType> for u8 {
-    fn from(v: NegotiationValType) -> Self {
-        v as u8
+impl NegotiationValType {
+    const MASK: u8 = 0x30;
+}
+
+impl TryFrom<u8> for NegotiationValType {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value & NegotiationValType::MASK {
+            0x00 => Result::Ok(NegotiationValType::BeU8),
+            0x10 => Result::Ok(NegotiationValType::BeU16),
+            0x20 => Result::Ok(NegotiationValType::BeU32),
+            0x30 => Result::Ok(NegotiationValType::BeU64),
+            _ => Result::Err(value),
+        }
     }
 }
 
-pub struct NegotiationSimpleEntry {
+impl From<NegotiationValType> for u8 {
+    fn from(v: NegotiationValType) -> Self {
+        (v as u8) & NegotiationValType::MASK
+    }
+}
+
+/// 基础协商事项键值对
+#[derive(Debug, Clone)]
+pub struct NegotiationBasicEntry {
     pub opts_key: u8,
     pub val_data: usize,
 }
 
+/// 扩展协商事项键值对
+#[derive(Debug, Clone)]
 pub struct NegotiationExtEntry<'a> {
     pub len_type: u8,
     pub len_data: usize,

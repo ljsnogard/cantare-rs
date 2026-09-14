@@ -404,15 +404,9 @@ impl<'a, T> TrBuffSegmMut<'a, u8> for BorrowedWriteSegm<'a, T>
 where
     T: BorrowMut<[u8]>,
 {
-    type Reclaimer<'f>
-        = SegmReclaim<'f>
-    where
-        Self: 'f;
+    type Reclaimer<'f> = SegmReclaim<'f> where Self: 'f;
 
-    type TakeSegmMut<'f>
-        = Option<SegmMut<'f, u8, SegmReclaim<'f>>>
-    where
-        Self: 'f;
+    type TakeSegmMut<'f> = Option<SegmMut<'f, u8, SegmReclaim<'f>>> where Self: 'f;
 
     #[inline]
     fn take_segm_mut<'f>(
@@ -507,8 +501,7 @@ where
     fn write_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> Self::WriteAsync<'f>
-    {
+    ) -> Self::WriteAsync<'f> {
         let len = Borrow::<[u8]>::borrow(self).len();
         let min_len = demand.min().copied().unwrap_or(0);
         if len == 0 || len < min_len {

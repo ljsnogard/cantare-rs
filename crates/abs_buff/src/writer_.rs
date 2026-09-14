@@ -8,8 +8,7 @@ use crate::{Demand, buffer::TrBuffSegmMut, error::{TrTaggedError, WriteErrTag}};
 ///
 /// This design is to keep compatible with `io_uring` and polling model.
 pub trait TrBuffWrite<T = u8> {
-    type WriteAsync<'f>: TrMayCancel<'f, MayCancelOutput =
-        SomeOf<Self::SegmMut<'f>, Self::Err>>
+    type WriteAsync<'f>: TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>>
     where
         Self: 'f;
 
